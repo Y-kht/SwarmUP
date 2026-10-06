@@ -138,6 +138,8 @@ RECOMMENDED_LOCAL = {
     "literature": ["Qwen/Qwen3-8B", "google/gemma-4-12B-it", "Qwen/Qwen3-14B", "openai/gpt-oss-20b", "Qwen/Qwen3.5-27B",
                    "Qwen/Qwen3-Next-80B-A3B-Instruct"],
     "formatting": ["microsoft/Phi-4-mini-instruct", "Qwen/Qwen3.5-4B", "Qwen/Qwen3-8B", "google/gemma-4-12B-it", "Qwen/Qwen3-14B", "Qwen/Qwen3.5-27B"],
+    # The leader that builds the swarm itself must plan, follow a strict format, and judge the work of the others.
+    "leading": ["Qwen/Qwen3-8B", "Qwen/Qwen3-14B", "openai/gpt-oss-20b", "Qwen/Qwen3.5-27B", "Qwen/Qwen3-Next-80B-A3B-Instruct", "openai/gpt-oss-120b"],
 }
 
 # API models by provider, from the most capable to the cheapest. Some are previews and some are only open to certain accounts.
@@ -157,7 +159,7 @@ _DEEP = ["claude-opus-5-5", "gpt-6-astra", "gemini-3.1-pro-preview", "deepseek-v
 _MIDDLE = ["claude-sonnet-5-5", "gpt-6-luna", "gemini-3.8-flash", "deepseek-v4-pro"]
 _LIGHT = ["claude-haiku-4-5", "gpt-4.1-mini", "gemini-3.5-flash-lite", "deepseek-flash"]
 RECOMMENDED_API = {"math": _DEEP, "code": _DEEP, "writing": _MIDDLE, "email": _MIDDLE, "literature": _MIDDLE,
-                   "calendar": _LIGHT, "news": _LIGHT, "formatting": _LIGHT}
+                   "calendar": _LIGHT, "news": _LIGHT, "formatting": _LIGHT, "leading": _DEEP}
 
 # What the user needs to use the models of a provider: the environment variable the key is read from, and the page where the key is created.
 # The key is only kept in memory while the program runs, and it is never written to a file.
@@ -166,6 +168,19 @@ API_KEYS = {
     "claude": {"company": "Anthropic", "variable": "ANTHROPIC_API_KEY", "page": "https://platform.claude.com/settings/keys"},
     "gemini": {"company": "Google", "variable": "GEMINI_API_KEY", "page": "https://aistudio.google.com/apikey"},
     "deepseek": {"company": "DeepSeek", "variable": "DEEPSEEK_API_KEY", "page": "https://platform.deepseek.com/api_keys"},
+}
+
+# Coding agents that run on the computer of the user, linked to SwarmUP as a third kind of model: they think for an agent like a model,
+# and they can also read files, run commands and search the web, each time with the approval of the user (model_clients.py).
+# Claude Code is used with an Anthropic API key only: Anthropic does not allow third-party products to use a Claude subscription
+# (https://code.claude.com/docs/en/agent-sdk/overview). Codex is used with the ChatGPT plan of the user, signed in through Codex itself.
+# DEFAULT_CLI_MODEL lets the agent choose its own model. The models of Codex depend on the plan, so Codex lists them itself.
+DEFAULT_CLI_MODEL = "default"
+MODELS_CLI = {
+    "claude-code": {"label": "Claude Code", "company": "Anthropic", "provider": "claude", "package": "claude-agent-sdk",
+                    "page": "https://code.claude.com/docs/en/overview", "models": [DEFAULT_CLI_MODEL, *MODELS_API["claude"]]},
+    "codex": {"label": "Codex", "company": "OpenAI", "provider": None, "package": None, "page": "https://developers.openai.com/codex/cli",
+              "models": [DEFAULT_CLI_MODEL]},
 }
 
 # The costs are not written here because they change often. The info button of a model fetches them with getModelCost
@@ -203,17 +218,23 @@ def isGated(name):
 # The model a user chose for an agent, with the VRAM it needs. API models need none: they run on the servers of their provider.
 # A Hugging Face name that is not in the list (owner/name) is a local model whose size must be given in billions of parameters.
 # An API model that is not in the list can be entered by naming its provider (gpt, claude, gemini or deepseek), for the newest ones.
-def getModelInfo(name, bits=16, billions=None, provider=None):
+# cli is the coding agent of MODELS_CLI that runs the model (then name is its model, or DEFAULT_CLI_MODEL). Claude Code keeps the
+# provider claude, because it is billed through the Anthropic API key of the user. Every info has cli, None for the other models.
+def getModelInfo(name, bits=16, billions=None, provider=None, cli=None):
     name = name.strip()
+    if cli:
+        if cli not in MODELS_CLI:
+            raise ValueError(f"{cli} is not one of the coding agents: {', '.join(MODELS_CLI)}.")
+        return {"name": name or DEFAULT_CLI_MODEL, "local": False, "provider": MODELS_CLI[cli]["provider"], "billions": None, "bits": None, "vram": 0.0, "cli": cli}
     listed = next((family[name] for family in MODELS_LOCAL.values() if name in family), None)
     if "/" not in name and listed is None:
         provider = getProvider(name) or provider
         if provider not in MODELS_API or not name:
             raise ValueError(f"'{name}' is not a model of the list. A model from Hugging Face is written like owner/name.")
-        return {"name": name, "local": False, "provider": provider, "billions": None, "bits": None, "vram": 0.0}
+        return {"name": name, "local": False, "provider": provider, "billions": None, "bits": None, "vram": 0.0, "cli": None}
     size = billions or listed
     if not size or size <= 0:
         raise ValueError(f"The size of {name} is not known, so give its number of parameters in billions.")
     if bits not in BITS:
         raise ValueError(f"The models are used with {', '.join(str(option) for option in BITS)} bits, not {bits}.")
-    return {"name": name, "local": True, "provider": None, "billions": size, "bits": bits, "vram": getVram(size, bits)}
+    return {"name": name, "local": True, "provider": None, "billions": size, "bits": bits, "vram": getVram(size, bits), "cli": None}

@@ -14,7 +14,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+# The modules of SwarmUP are in the folders of src/backend. Their names have hyphens, so they are not packages: each folder goes on the path.
+sys.path[:0] = [str(folder) for folder in sorted((Path(__file__).resolve().parent.parent / "src" / "backend").iterdir()) if folder.is_dir() and not folder.name.startswith(("_", "."))]
 import harness_utils
 from harness_utils import (NO_GPU_MESSAGE, USER_NAME, AuthorLoop, CalendarLoop, CoderLoop, ConnectionLost, DocumentFormatLoop, EmailLoop, LiteratureSurveyLoop,
                            Loop, MathCheckLoop, MessagingError, NewsLoop, Swarm, addToContext, checkMessenger, describeError, fetchUrl, findTelegramChats,

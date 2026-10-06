@@ -448,7 +448,17 @@ svg.icon.xl { width: 30px; height: 30px; stroke-width: 1.6; }
 .tabs button { border: 0; background: none; padding: 9px 13px; font-weight: 600; color: var(--text-2); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap; display: inline-flex; gap: 7px; align-items: center; }
 .tabs button:hover { color: var(--text); }
 .tabs button.active { color: var(--primary-text); border-bottom-color: var(--primary); }
-.where-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.where-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.where-cards.two { grid-template-columns: 1fr 1fr; }
+.sign-in { box-shadow: none; display: flex; flex-direction: column; gap: 12px; border-color: color-mix(in srgb, var(--honey) 45%, var(--border)); }
+.device-code { display: flex; align-items: center; gap: 10px; font-family: var(--mono); font-size: 30px; font-weight: 700; letter-spacing: .14em; color: var(--text);
+  background: var(--surface-2); border: 1px dashed var(--border-strong); border-radius: var(--radius-sm); padding: 10px 16px; align-self: flex-start; user-select: all; }
+.steps { margin: 0; padding-left: 20px; color: var(--text-2); }
+.steps li { margin: 3px 0; }
+.question-card.permission { border-color: var(--primary); background: var(--primary-soft); }
+.question-card.permission .q-head { color: var(--primary-text); }
+.permission-detail { margin: 0; font-family: var(--mono); font-size: 12.8px; background: var(--surface); border: 1px solid var(--border); border-radius: 9px; padding: 9px 11px;
+  white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; color: var(--text); }
 
 /* ---------- The map of the swarm ---------- */
 .graph-scroll { overflow: hidden; padding: 8px 4px 14px; }
@@ -647,5 +657,23 @@ svg.icon.xl { width: 30px; height: 30px; stroke-width: 1.6; }
   .run-right { min-height: 520px; border-left: 0; border-top: 1px solid var(--border); }
   .run-left { overflow: visible; }
   .content.flush { overflow-y: auto; }
-  .where-cards { grid-template-columns: 1fr; }
+  .where-cards, .where-cards.two { grid-template-columns: 1fr; }
 }
+
+/* The leader that builds the swarm, and its proposals. */
+.leader-setup .card-head { align-items: flex-start; }
+.leader-setup .building { padding: 12px 14px; border-radius: var(--radius); background: var(--primary-soft); }
+.agent-why { display: flex; gap: 6px; align-items: flex-start; color: var(--text-2); margin: -4px 0 10px; }
+.agent-why .icon { color: var(--honey); flex: none; margin-top: 2px; }
+.question-card.proposal { gap: 12px; }
+.why-box { border-left: 3px solid var(--honey); padding: 6px 12px; background: var(--surface-2); border-radius: 0 10px 10px 0; font-size: 13.5px; }
+.why-box > span { display: block; margin-bottom: 2px; }
+.proposal-body { max-height: min(52vh, 560px); overflow-y: auto; padding-right: 4px; }
+.proposed-agent { display: flex; gap: 12px; align-items: flex-start; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.proposed-agent + .proposed-agent { margin-top: 2px; }
+.proposed-agent .why, .proposed-agent .needs { display: flex; gap: 6px; align-items: flex-start; }
+.proposed-agent .why .icon { color: var(--honey); flex: none; margin-top: 2px; }
+.proposed-agent .needs { color: var(--warning-text); }
+.proposed-agent .needs .icon { flex: none; margin-top: 2px; }
+.proposed-agent .kv { margin-top: 4px; grid-template-columns: fit-content(45%) minmax(0, 1fr); }
+.proposed-agent .kv dd { overflow-wrap: anywhere; }

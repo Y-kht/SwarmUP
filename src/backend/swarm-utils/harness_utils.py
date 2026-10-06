@@ -35,7 +35,8 @@ from sources_library import ALL_NEWS_OUTLETS
 # Every loop writes a draft, verifies it, asks the user, and only then acts (send, book, save...).
 # The major prompts of the loops are in agent_prompts.py and the lists to pick from are in sources_library.py.
 
-PROJECT_FOLDER = Path(__file__).resolve().parent.parent
+# The folder of the project, three folders above this file (src/backend/swarm-utils).
+PROJECT_FOLDER = Path(__file__).resolve().parents[3]
 AGENT_FILES = PROJECT_FOLDER / "agent-files"
 AGENT_RULES = PROJECT_FOLDER / "agent-rules"
 MAX_CONTEXT_ITEMS = 5
@@ -81,6 +82,7 @@ HEARTBEAT_SECONDS = 5
 STALE_SECONDS = 30
 STOP_TIMEOUT = 10
 STOPPED_MESSAGE = "The user stopped the swarm before this agent finished."
+REMOVED_MESSAGE = "This agent was removed from the swarm before it finished."
 # What is saved of an agent of a swarm, apart from its loop and the lists.
 SAVED_FIELDS = ("role", "task", "boss", "model", "recipe", "status", "result", "error", "mode", "review", "draft", "problem", "revision", "started")
 # The agents of a swarm work at the same time, so they take turns to write the files and to speak to the user.
@@ -602,6 +604,11 @@ class Loop:
         self.resumed = False
         self.onProgress = None
         self.onConnectionLost = None
+        # When the leader manages the swarm, every answer of its model goes through onAnswer (LeaderManager.readOutput), which acts on the
+        # blocks it finds and gives back the text without them.
+        self.onAnswer = None
+        # The model answers one prompt at a time, even when two threads ask it (the leader that works, and the manager of the swarm).
+        self.thinking = threading.RLock()
 
     # Messages sent by the other agents of a swarm. The agent reads them with every prompt.
     def receive(self, sender, message):
@@ -723,8 +730,13 @@ class Loop:
             prompt = "Messages from the other agents of your swarm:\n" + "\n".join(self.inbox) + f"\n\n{prompt}"
         if own and self.rules:
             prompt = f"Follow these rules strictly:\n{self.rules}\n\n{prompt}"
-        # The calls of a leader that manages the swarm never wait for the user: they have a fallback of their own.
-        return self.keepTrying(lambda: self.agent.input(prompt)) if own else self.agent.input(prompt)
+        with self.thinking:
+            # A coding agent (Claude Code, Codex) works in the folder of the loop and asks the user through it before it acts.
+            if hasattr(self.agent, "attach"):
+                self.agent.attach(self)
+            # The calls of a leader that manages the swarm never wait for the user: they have a fallback of their own.
+            answer = self.keepTrying(lambda: self.agent.input(prompt)) if own else self.agent.input(prompt)
+        return self.onAnswer(answer) if self.onAnswer else answer
 
     # The next three are the only places where the user is spoken to. A user interface can replace them.
     def notifyUser(self, message):
@@ -738,6 +750,48 @@ class Loop:
     def askSecret(self, question):
         with USER_LOCK:
             return getpass.getpass(f"{question} ")
+
+    # A coding agent wants to act: run a command, change files, read outside its folder, use the web... request is
+    # {"action": what it wants to do, in words, "detail": the command, file or address, "folder": where, "reason": why (may be empty)}.
+    # The answer is {"decision": "once", "run" (the same action is allowed until the swarm runs again) or "deny", "message": why it is denied}.
+    def askPermission(self, request):
+        with USER_LOCK:
+            reason = f"\nWhy: {request['reason']}" if request.get("reason") else ""
+            self.notifyUser(f"[{self.name}] wants to {request['action']}:\n{request['detail']}\nIn: {request.get('folder') or 'its folder'}{reason}")
+            reply = self.askUser("Type yes to allow it this time, always to allow it until the swarm runs again, or no (followed by why, if you like):").strip()
+        word, _, rest = reply.partition(" ")
+        if word.lower() in ("always", "run"):
+            return {"decision": "run", "message": ""}
+        if isYes(word):
+            return {"decision": "once", "message": ""}
+        return {"decision": "deny", "message": (rest if isNo(word) else reply).strip()}
+
+    # A coding agent asks the user questions. Each question is {"id", "header", "question", "options": [{"label", "description"}],
+    # "multiple": several options can be chosen, "secret": the answer is hidden}. The answer is {id: [chosen labels, or the text typed]}.
+    def askQuestions(self, questions):
+        answers = {}
+        with USER_LOCK:
+            for question in questions:
+                options = question.get("options") or []
+                listed = "".join(f"\n  {number}. {option['label']}" + (f": {option['description']}" if option.get("description") else "") for number, option in enumerate(options, 1))
+                self.notifyUser(f"[{self.name}] {question['question']}{listed}")
+                ask = self.askSecret if question.get("secret") else self.askUser
+                reply = ask("Your answer (numbers like 1,3, or your own words):" if options else "Your answer:").strip()
+                picked = [options[int(part) - 1]["label"] for part in reply.split(",") if part.strip().isdigit() and 1 <= int(part) <= len(options)]
+                answers[question["id"]] = picked or ([reply] if reply else [])
+        return answers
+
+    # The leader that builds the swarm proposes it, or proposes a change while it runs (leader_utils.py): proposal is {"action": build, add, remove
+    # or model, "agent": the agent it is about, "why": the reason of the leader, "text": the change in a sentence, "summary": all of it in plain
+    # text, and the details}. The answer is {"decision": "approve" or "reject", "message": what the user tells the leader to change}.
+    def askProposal(self, proposal):
+        with USER_LOCK:
+            self.notifyUser(f"[{self.name}] {proposal.get('summary') or 'proposes: ' + proposal['text']}" + (f"\nWhy: {proposal['why']}" if proposal.get("why") else ""))
+            reply = self.askUser("Type yes to approve it, or no (followed by what you want instead, if you like):").strip()
+        word, _, rest = reply.partition(" ")
+        if isYes(word):
+            return {"decision": "approve", "message": ""}
+        return {"decision": "reject", "message": (rest if isNo(word) else reply).strip()}
 
     # Passwords and addresses of servers come from the environment variables, otherwise the user is asked once.
     # They are only kept in memory while the loop exists, never saved to a file.
@@ -1452,6 +1506,29 @@ class CoderLoop(Loop):
 
 
 # ==============
+# Leader harness. The leader of a swarm that it built itself (see leader_utils.py) has no task besides leading: it follows the agents,
+# proposes changes of the swarm to the user (LeaderManager reads them in what it writes), and works last like every leader: it writes the
+# final report of the mission from the results the agents sent it. The report is saved in the folder of the mission once the user approves it.
+# ==============
+class LeaderLoop(Loop):
+    def __init__(self, agent, mission, numberOfLoops=5):
+        super().__init__(agent, numberOfLoops)
+        self.mission = mission
+
+    def describeTask(self):
+        return "It leads the swarm it built: it follows the work of the agents, proposes changes to you, and writes the final report of the mission from their results."
+
+    def run(self):
+        report = self.reviewLoop(prompts.LEADER_REPORT_PROMPT.format(mission=self.mission), lambda draft: "" if draft.strip() else "Write the report.", key="report")
+        if report is None:
+            return None
+        path = self.saveResult("report", report)
+        if path:
+            self.notifyUser(f"The report is saved in {path}.")
+        return report
+
+
+# ==============
 # Saved swarms. While a swarm runs, its state is written to RUNS_FOLDER (inside agent-files) at every change and every few seconds,
 # so a swarm that was interrupted (internet lost, computer turned off...) can go on later. Passwords, API keys and accounts are never saved.
 # ==============
@@ -1552,6 +1629,14 @@ class Swarm:
         self.heartbeat = threading.Event()
         self.thread = None
         self.outcome = {}
+        # The agents taken out of the swarm (removeAgent): departed holds those whose thread did not end yet, removed is the history.
+        self.departed = {}
+        self.removed = []
+        # The group of agents that works now (runStage), and the events of the workers that finished (execute mode).
+        self.stage = None
+        self.finished = {}
+        # The leader manages the swarm when a manager reads what it writes (see LeaderManager in leader_utils.py).
+        self.manager = None
 
     def getMember(self, name):
         if name not in self.members:
@@ -1581,7 +1666,8 @@ class Swarm:
                              "startAt": f"{start:%Y-%m-%d %H:%M}" if start else None, "state": member["agent"].getState()}
         return {"version": STATE_VERSION, "id": self.id, "mission": self.mission, "mode": self.mode, "leader": self.leader,
                 "state": "paused" if self.interruption else "running", "heartbeat": datetime.now().timestamp(), "pid": os.getpid(),
-                "savedAt": f"{datetime.now():%Y-%m-%d %H:%M:%S}", "summary": self.summary, "messages": list(self.messages), "members": members}
+                "savedAt": f"{datetime.now():%Y-%m-%d %H:%M:%S}", "summary": self.summary, "messages": list(self.messages), "members": members,
+                "removed": list(self.removed), "managed": self.manager is not None}
 
     # Writes the state to the disk. Whatever goes wrong, the swarm goes on, and the user is told once that the work cannot be continued after a stop.
     # The user is told from another thread, because speaking to the user can wait for a long time, and the locks of the swarm may be held here.
@@ -1605,31 +1691,118 @@ class Swarm:
             warning = f"Warning: the state of the swarm could not be saved ({failure}). If the program stops, its work cannot be continued."
             threading.Thread(target=self.getMember(self.leader)["agent"].notifyUser, args=(warning,), daemon=True).start()
 
+    # An agent of the swarm, or one that was just removed and whose thread did not end yet.
+    def anyMember(self, name):
+        member = self.members.get(name) or self.departed.get(name)
+        if member is None:
+            raise ValueError(f"There is no agent called {name} in the swarm.")
+        return member
+
     def setStatus(self, name, status):
-        self.members[name]["status"] = status
-        self.emit("status", name, status=status)
+        self.anyMember(name)["status"] = status
+        if name in self.members:
+            self.emit("status", name, status=status)
 
     # boss is the agent this one reports to in the tree (the leader if not given).
     # waitsFor lists the agents whose results this one needs before it can start. It is not used for the leader.
     # model is what getModelInfo gives for the model of the agent. A local model that does not fit in the GPUs is refused.
     # recipe is what the user interface needs to build the agent again after the program stopped (without passwords, they are never saved).
+    # While the swarm runs, the new agent joins the group that works now: in plan mode it plans, in execute mode it works and reports to the
+    # leader. It can wait for the agents already there (it receives their results), and nobody waits for it. Once the leader started its own
+    # final work, nobody can join that run anymore.
     def addAgent(self, name, agent, role, task, boss=None, waitsFor=(), model=None, recipe=None):
-        if name in self.members:
-            raise ValueError(f"There is already an agent called {name} in the swarm.")
-        if name == USER_NAME:
-            raise ValueError(f"{USER_NAME} is the name of the user, choose another name for the agent.")
-        if boss:
-            self.getMember(boss)
-        check = self.checkModel(model) if model else {"allowed": True}
-        if not check["allowed"]:
-            raise ValueError(check["message"])
-        self.members[name] = self.newMember(name, agent, role, task, boss, waitsFor, model, recipe)
-        self.leader = self.leader or name
+        with self.changed:
+            if name in self.members or name in self.departed:
+                raise ValueError(f"There is already an agent called {name} in the swarm.")
+            if name == USER_NAME:
+                raise ValueError(f"{USER_NAME} is the name of the user, choose another name for the agent.")
+            if boss:
+                self.getMember(boss)
+            unknown = [other for other in waitsFor if other not in self.members or other == self.leader]
+            if unknown:
+                raise ValueError(f"{name} cannot wait for {', '.join(unknown)}: they are not agents of the swarm, or it is the leader, who works last.")
+            check = self.checkModel(model) if model else {"allowed": True}
+            if not check["allowed"]:
+                raise ValueError(check["message"])
+            stage = self.stage
+            if self.active and (stage is None or not stage["open"] or (not stage["plan"] and self.leader in stage["names"])):
+                raise ValueError("The leader already started its final work, so no agent can join this run. Add it when the run is over.")
+            member = self.newMember(name, agent, role, task, boss, waitsFor, model, recipe)
+            self.members[name] = member
+            self.leader = self.leader or name
+            if not self.active:
+                return
+            self.connectAgent(name, member, False)
+            agent.inbox, agent.userMessages, agent.progress, agent.actions = [], [], {}, []
+            self.communicate(self.leader, name, self.describe(name))
+            self.tellTeam(f"{name} joined the swarm: {role}. Task: {task}" + (f" It waits for {', '.join(waitsFor)}." if waitsFor else ""), exclude=name)
+            if not stage["plan"]:
+                self.finished[name] = threading.Event()
+            self.startInStage(stage, name)
+            self.changed.notify_all()
+        self.emit("joined", name, role=role)
 
     def newMember(self, name, agent, role, task, boss, waitsFor, model, recipe):
         return {"name": name, "agent": agent, "role": role, "task": task, "boss": boss, "waitsFor": list(waitsFor), "model": model, "recipe": recipe,
                 "status": "waiting", "result": None, "error": "", "mode": self.mode, "review": "", "draft": "", "problem": "",
                 "decision": None, "revision": 0, "startAt": None, "started": False, "resumeStart": None, "wake": threading.Event()}
+
+    # Takes an agent out of the swarm (never the leader), while it runs or not. One that finished first gives its result to the agents that wait
+    # for it. One that did not finish is stopped at its next step, and the agents that wait for it go on without it. Its loop and its model are
+    # let go in the background (retire) once its thread ended: what it left half done in the files is put back, and its model frees its memory.
+    def removeAgent(self, name, reason=""):
+        with self.changed:
+            if name == self.leader:
+                raise ValueError("The leader cannot be removed: it speaks to you for the swarm.")
+            member = self.getMember(name)
+            for other in list(self.members.values()):
+                if name in other["waitsFor"]:
+                    if member["result"] is not None:
+                        self.deliverResult(name, other["name"])
+                    other["waitsFor"] = [waited for waited in other["waitsFor"] if waited != name]
+            del self.members[name]
+            member["removed"] = True
+            self.departed[name] = member
+            thread = None
+            if self.stage is not None and name in self.stage["names"]:
+                self.stage["names"].remove(name)
+                thread = self.stage["threads"].pop(name)
+            if name in self.finished:
+                self.finished[name].set()
+            member["wake"].set()
+            self.removed.append({"name": name, "role": member["role"], "task": member["task"], "status": member["status"],
+                                 "result": None if member["result"] is None else str(member["result"])[:SUMMARY_LENGTH], "reason": reason,
+                                 "time": f"{datetime.now():%Y-%m-%d %H:%M:%S}"})
+            self.changed.notify_all()
+        self.tellTeam(f"{name} ({member['role']}) left the swarm. Why: {(reason or 'not given').rstrip('.')}. Do not count on it or wait for it anymore"
+                      + (": its result was already given to the agents that needed it." if member["result"] is not None else "."))
+        self.emit("removed", name, reason=reason, status=member["status"])
+        threading.Thread(target=self.retire, args=(name, member, thread, member["status"] == "done"), daemon=True).start()
+
+    # Every agent of the swarm reads the news of the team with its next prompt (an agent that joined or left), so none of them counts on an
+    # agent that left, and all of them know the one that joined.
+    def tellTeam(self, news, exclude=None):
+        for name, member in list(self.members.items()):
+            if name != exclude:
+                member["agent"].receive("swarm", news)
+
+    # done is whether the agent had finished when it was removed: what it did after that is put back too.
+    def retire(self, name, member, thread, done):
+        if thread is not None:
+            thread.join()
+        try:
+            if not done:
+                member["agent"].rollback()
+            model = member["agent"].agent
+            if hasattr(model, "unload"):
+                model.unload()
+        except Exception:
+            traceback.print_exc()
+        self.departed.pop(name, None)
+        self.emit("retired", name)
+
+    def isRemoved(self, name):
+        return name not in self.members and (name in self.departed or any(item["name"] == name for item in self.removed))
 
     # An agent that did not finish starts again, with what its loop remembers. The ones that finished (done or failed) stay as they are.
     def settle(self, member):
@@ -1643,6 +1816,7 @@ class Swarm:
         swarm = cls(saved["mission"])
         swarm.id, swarm.mode, swarm.leader = saved["id"], saved["mode"], saved["leader"]
         swarm.summary, swarm.messages = saved.get("summary", ""), list(saved.get("messages", []))
+        swarm.removed = list(saved.get("removed", []))
         for name, data in saved["members"].items():
             agent = makeAgent(name, data)
             agent.setState(data.get("state", {}))
@@ -1693,14 +1867,27 @@ class Swarm:
         return {"allowed": status["fits"] or not model["local"], "vram": vram, "needed": after, "message": message}
 
     # Changes the model of an agent, for example to a smaller one. agent is the new loop that uses it, if the user interface made one.
+    # While the swarm runs, only an agent that did not start yet can change its model, and its old model frees its memory.
     def setModel(self, name, model, agent=None):
-        member = self.getMember(name)
-        check = self.checkModel(model, replacing=name)
-        if not check["allowed"]:
-            raise ValueError(check["message"])
-        member["model"] = model
-        if agent is not None:
-            member["agent"] = agent
+        with self.changed:
+            member = self.getMember(name)
+            if self.active and (member["started"] or member["status"] != "waiting"):
+                raise ValueError(f"{name} already started, so its model cannot change now. Remove it and add a new agent instead.")
+            check = self.checkModel(model, replacing=name)
+            if not check["allowed"]:
+                raise ValueError(check["message"])
+            previous = member["agent"]
+            member["model"] = model
+            if agent is not None:
+                member["agent"] = agent
+                if self.active:
+                    # The new loop takes over what the old one already received (the mission, the results of the agents it waited for).
+                    agent.inbox, agent.userMessages = list(previous.inbox), list(previous.userMessages)
+                    self.connectAgent(name, member, False)
+        if self.active and agent is not None and previous.agent is not agent.agent and hasattr(previous.agent, "unload"):
+            threading.Thread(target=previous.agent.unload, daemon=True).start()
+        if self.active:
+            self.emit("model", name, model=model["name"], cli=model.get("cli"))
 
     # The VRAM the swarm needs so far next to what the GPUs have, for the user interface to show while the swarm is built.
     # The message is empty, or the warning that the swarm cannot run now.
@@ -1894,17 +2081,17 @@ class Swarm:
     # The reviewer of every agent while the swarm runs. The agent sleeps here until the user decides about its draft.
     # The revision counts the drafts of the agent, so an answer can be tied to the draft it was given for.
     def waitForReview(self, name, draft, problem):
-        member = self.getMember(name)
+        member = self.anyMember(name)
         with self.changed:
-            if self.stopped:
-                raise SwarmStopped(STOPPED_MESSAGE)
+            if self.stopped or member.get("removed"):
+                raise SwarmStopped(STOPPED_MESSAGE if self.stopped else REMOVED_MESSAGE)
             member.update(review="ready", draft=draft, problem=problem, decision=None, revision=member["revision"] + 1)
             self.changed.notify_all()
             self.emit("review", name, review="ready")
-            self.changed.wait_for(lambda: member["decision"] is not None or self.stopped)
+            self.changed.wait_for(lambda: member["decision"] is not None or self.stopped or member.get("removed"))
             if member["decision"] is None:
                 member["review"] = ""
-                raise SwarmStopped(STOPPED_MESSAGE)
+                raise SwarmStopped(REMOVED_MESSAGE if member.get("removed") else STOPPED_MESSAGE)
             return member["decision"]
 
     def checkReady(self, name):
@@ -1954,7 +2141,9 @@ class Swarm:
 
     # Where every agent stands. The leader writes its summary from it, so what the user approved on its own is echoed in the summary.
     def describeProgress(self):
-        return "\n".join(self.describeMember(name, member) for name, member in self.members.items())
+        lines = [self.describeMember(name, member) for name, member in list(self.members.items())]
+        lines += [f"- {item['name']} ({item['role']}): removed from the swarm when it was {item['status']}. Why: {item['reason'] or 'not given'}" for item in list(self.removed)]
+        return "\n".join(lines)
 
     # The facts for a user who may stop the swarm: where every agent stands, what it changed outside of itself (an email sent, a file
     # written...), and what it would leave half done.
@@ -2053,19 +2242,20 @@ class Swarm:
             leader.notifyUser(f"[{self.leader}] Summary of the {what}s:\n{summary}")
             leader.notifyUser(f"You can also check, approve or correct the {what} of each agent by clicking on its name in the swarm.")
             for name in shown:
-                if self.members[name]["problem"]:
+                if name in self.members and self.members[name]["problem"]:
                     leader.notifyUser(f"Warning for {name}: the automatic checks found a problem with its draft: {self.members[name]['problem']}")
             reply = leader.askUser("Do you approve? Type yes to approve, no to reject, or write what you want changed:" if len(self.members) == 1 else
                                    "Do you approve? Type yes to approve all of them, no to reject all of them, the name of an agent to look at it alone, or write what you want changed:")
         answered = isYes(reply) or isNo(reply)
         with self.changed:
-            waiting = [name for name in shown if self.members[name]["review"] == "ready" and self.members[name]["revision"] == shown[name]]
-            changed = [name for name in shown if self.members[name]["review"] == "" or self.members[name]["revision"] != shown[name]]
+            waiting = [name for name in shown if name in self.members and self.members[name]["review"] == "ready" and self.members[name]["revision"] == shown[name]]
+            changed = [name for name in shown if name in self.members and (self.members[name]["review"] == "" or self.members[name]["revision"] != shown[name])]
             if answered:
                 for name in waiting:
                     self.decide(self.members[name], "yes" if isYes(reply) else "no")
         if changed:
             leader.notifyUser(f"The {what} of {', '.join(changed)} changed while you were reading, so it is not part of your answer. The summary will be updated.")
+        shown = {name: revision for name, revision in shown.items() if name in self.members}
         alone = next((name for name in waiting if reply.strip().lower() == name.lower()), None)
         if alone:
             self.reviewAlone(alone, shown[alone], what)
@@ -2074,9 +2264,10 @@ class Swarm:
     # Called in the thread of an agent that lost its connection. The agent is paused here, with everything it did, until the user decides.
     # The agents that lose the connection together share one question. It returns to try again, or raises SwarmStopped.
     def waitForResume(self, name, error):
+        member = self.anyMember(name)
         with self.changed:
-            if self.stopped:
-                raise SwarmStopped(STOPPED_MESSAGE)
+            if self.stopped or member.get("removed"):
+                raise SwarmStopped(STOPPED_MESSAGE if self.stopped else REMOVED_MESSAGE)
             if self.interruption is None:
                 self.interruption = {"agents": {}, "decision": None}
             interruption = self.interruption
@@ -2084,7 +2275,15 @@ class Swarm:
             self.setStatus(name, "paused")
             self.emit("connectionLost", name, reason=str(error))
             self.changed.notify_all()
-            self.changed.wait_for(lambda: interruption["decision"] is not None)
+            self.changed.wait_for(lambda: interruption["decision"] is not None or member.get("removed"))
+            if member.get("removed") and interruption["decision"] is None:
+                # The agent left: if it was the only one without connection, the swarm goes on without asking anymore.
+                interruption["agents"].pop(name, None)
+                if not interruption["agents"] and self.interruption is interruption:
+                    interruption["decision"], self.interruption = "continue", None
+                    self.changed.notify_all()
+                    self.emit("resumed")
+                raise SwarmStopped(REMOVED_MESSAGE)
             if interruption["decision"] == "stop":
                 raise SwarmStopped(STOPPED_MESSAGE)
             self.setStatus(name, "working")
@@ -2203,12 +2402,13 @@ class Swarm:
         return self.outcome
 
     # An agent is busy while it writes, acts, or is about to start. One that waits for another agent, or for the user, or is finished, is not.
-    def isBusy(self, name, waits, thread):
-        member = self.members[name]
+    def isBusy(self, name, stage):
+        member, thread = self.members[name], stage["threads"][name]
         if not thread.is_alive():
             return False
         if member["status"] == "waiting":
-            return not member["startAt"] and all(self.members[other]["status"] in ("done", "failed") for other in waits[name])
+            needed = [] if stage["plan"] else member["waitsFor"]
+            return not member["startAt"] and all(self.members[other]["status"] in ("done", "failed") for other in needed if other in self.members)
         return member["status"] == "working" and member["review"] != "ready"
 
     # Runs while a group of agents works. Each time none of them is busy, the leader summarises where they stand and the user decides.
@@ -2216,30 +2416,34 @@ class Swarm:
     # It returns when no draft waits anymore and all the agents are finished. An agent that sleeps until its time is not finished:
     # nothing is left to do until it wakes up (or is started), and then it is looked after like the others.
     # A lost connection comes before everything else: the user decides to continue or to cancel. A stopped swarm returns at once.
-    def reviewStage(self, names, threads, waits):
+    # The agents of the stage are read again at every step, because an agent can join it or leave it while it works. The stage closes in the
+    # same step that sees nothing left to do, so an agent cannot join a stage that is already over.
+    def reviewStage(self, stage):
         request = ""
         while True:
             with self.changed:
-                self.changed.wait_for(lambda: self.stopped or not any(self.isBusy(name, waits, threads[name]) for name in names))
+                self.changed.wait_for(lambda: self.stopped or not any(self.isBusy(name, stage) for name in stage["names"]))
                 if self.stopped:
+                    stage["open"] = False
                     return
                 interruption = self.interruption
-                shown = {name: self.members[name]["revision"] for name in names if self.members[name]["review"] == "ready"}
-                if not shown and not interruption and any(threads[name].is_alive() for name in names):
-                    self.changed.wait_for(lambda: any(self.isBusy(name, waits, threads[name]) or self.members[name]["review"] == "ready" for name in names)
-                                          or self.interruption or self.stopped or not any(thread.is_alive() for thread in threads.values()))
+                shown = {name: self.members[name]["revision"] for name in stage["names"] if self.members[name]["review"] == "ready"}
+                if not shown and not interruption and any(stage["threads"][name].is_alive() for name in stage["names"]):
+                    self.changed.wait_for(lambda: any(self.isBusy(name, stage) or self.members[name]["review"] == "ready" for name in stage["names"])
+                                          or self.interruption or self.stopped or not any(stage["threads"][name].is_alive() for name in stage["names"]))
                     continue
+                if not shown and not interruption:
+                    stage["open"] = False
+                    return
             if interruption:
                 self.askAboutInterruption(interruption)
-            elif shown:
-                request = self.reviewRound(shown, request)
             else:
-                return
+                request = self.reviewRound(shown, request)
 
     # An agent with a time of its own (the news briefer) sleeps until then, without holding the others back. startNow wakes it up.
     # An agent that was already at work when the swarm was interrupted does not wait again, and one that was waiting for its time keeps it.
     def waitForStart(self, name):
-        member = self.getMember(name)
+        member = self.anyMember(name)
         if member["started"]:
             return
         start = member["resumeStart"] or member["agent"].startTime()
@@ -2267,10 +2471,10 @@ class Swarm:
         self.runMember(name)
 
     # One failing agent never stops the swarm. Its error is kept and reported to the leader.
-    # An agent that is already done or failed, because the swarm was interrupted after that, is not run again.
+    # An agent that is already done or failed, because the swarm was interrupted after that, is not run again, and neither is one that was removed.
     def runMember(self, name):
-        member = self.getMember(name)
-        if member["status"] in ("done", "failed"):
+        member = self.anyMember(name)
+        if member["status"] in ("done", "failed") or member.get("removed"):
             return
         if self.stopped:
             member["error"] = STOPPED_MESSAGE
@@ -2280,8 +2484,8 @@ class Swarm:
         self.setStatus(name, "working")
         try:
             member["result"] = member["agent"].makePlan(member["task"]) if member["mode"] == "plan" else member["agent"].run()
-        except SwarmStopped:
-            member["error"] = STOPPED_MESSAGE
+        except SwarmStopped as stopped:
+            member["error"] = str(stopped) or STOPPED_MESSAGE
         except Exception as error:
             member["error"] = f"{type(error).__name__}: {error}"
         if member["result"] is None and not member["error"]:
@@ -2294,27 +2498,34 @@ class Swarm:
         if not any(message["sender"] == sender and message["receiver"] == receiver and message["message"] == result for message in self.messages):
             self.communicate(sender, receiver, result)
 
-    # Runs in its own thread. It waits for the agents it needs, works, and then reports to the leader.
-    def runWorker(self, name, finished):
-        member = self.getMember(name)
+    # Runs in its own thread. It waits for the agents it needs, works, and then reports to the leader. The agents it waits for are read again
+    # after each wait, because one of them may leave the swarm meanwhile (it is then not waited for anymore). An agent that left does not report.
+    def runWorker(self, name):
+        member = self.anyMember(name)
         try:
-            if member["status"] in ("done", "failed"):
+            if member["status"] in ("done", "failed") or member.get("removed"):
                 return
-            for other in member["waitsFor"]:
-                finished[other].wait()
-            missing = [other for other in member["waitsFor"] if self.members[other]["result"] is None]
+            for other in list(member["waitsFor"]):
+                if other in self.finished:
+                    self.finished[other].wait()
+            if member.get("removed"):
+                return
+            waited = [other for other in member["waitsFor"] if other in self.members]
+            missing = [other for other in waited if self.members[other]["result"] is None]
             if missing:
                 member["error"] = f"{', '.join(missing)} did not finish, so {name} could not start."
                 self.setStatus(name, "failed")
             else:
-                for other in member["waitsFor"]:
+                for other in waited:
                     self.deliverResult(other, name)
                 self.waitForStart(name)
                 self.runMember(name)
-            outcome = member["result"] if member["status"] == "done" else f"FAILED. {member['error']}"
-            self.communicate(name, self.leader, f"{member['role']}: {outcome}")
+            if not member.get("removed"):
+                outcome = member["result"] if member["status"] == "done" else f"FAILED. {member['error']}"
+                self.communicate(name, self.leader, f"{member['role']}: {outcome}")
         finally:
-            finished[name].set()
+            if name in self.finished:
+                self.finished[name].set()
 
     # Everything of the last run is cleared, except the plans approved in plan mode, which the agents follow when they execute.
     # A resumed run keeps it all: what is done stays done, and the agents that did not finish remember what they did.
@@ -2334,9 +2545,7 @@ class Swarm:
                 agent.inbox, agent.userMessages, agent.progress, agent.actions = [], [], {}, []
                 if self.mode == "plan":
                     agent.approvedPlan = ""
-            agent.resumed = resume
-            agent.name, agent.reviewer = name, partial(self.waitForReview, name)
-            agent.onConnectionLost, agent.onProgress = partial(self.waitForResume, name), self.checkpoint
+            self.connectAgent(name, member, resume)
         self.active = True
         self.startHeartbeat()
         self.emit("run", mode=self.mode)
@@ -2345,6 +2554,17 @@ class Swarm:
                 if name != self.leader:
                     self.communicate(self.leader, name, self.describe(name))
             self.getMember(self.leader)["agent"].receive("swarm", self.describe(self.leader))
+
+    # What a swarm gives to the loop of an agent while it runs: who reviews its drafts, what happens when the connection is lost, and when it is saved.
+    # What the user allowed a coding agent "until the swarm runs again" ends here. The leader of a managed swarm has what it writes read by the manager.
+    def connectAgent(self, name, member, resume):
+        agent = member["agent"]
+        agent.resumed = resume
+        if hasattr(agent.agent, "newRun"):
+            agent.agent.newRun()
+        agent.name, agent.reviewer = name, partial(self.waitForReview, name)
+        agent.onConnectionLost, agent.onProgress = partial(self.waitForResume, name), self.checkpoint
+        agent.onAnswer = self.manager.readOutput if self.manager is not None and name == self.leader else None
 
     # While the swarm runs its state is also written every few seconds. A saved state that is not renewed is of a program that stopped.
     def startHeartbeat(self):
@@ -2381,21 +2601,29 @@ class Swarm:
             with self.changed:
                 self.changed.notify_all()
 
-    # waits is {agent: [agents it waits for]} for a group of agents. Each one starts when the agents it waits for are done,
-    # and the user is looked after (reviewStage) until all of them are finished.
-    def runStage(self, waits, work):
-        names = list(waits)
-        threads = {name: threading.Thread(target=self.runInThread, args=(work, name), daemon=True) for name in names}
-        for thread in threads.values():
-            thread.start()
-        self.reviewStage(names, threads, waits)
-        for thread in threads.values():
+    # A group of agents that works together (all of them in plan mode, the workers then the leader in execute mode). Each one starts when the
+    # agents it waits for are done (never in plan mode), and the user is looked after (reviewStage) until all of them are finished.
+    # The stage is kept in self.stage, so an agent can join it (addAgent) or leave it (removeAgent) while it works.
+    def runStage(self, names, work, plan=False):
+        stage = {"names": [], "threads": {}, "work": work, "plan": plan, "open": True}
+        with self.changed:
+            self.stage = stage
+            for name in names:
+                self.startInStage(stage, name)
+        self.reviewStage(stage)
+        for thread in list(stage["threads"].values()):
             thread.join(timeout=STOP_TIMEOUT if self.stopped else None)
+
+    def startInStage(self, stage, name):
+        thread = threading.Thread(target=self.runInThread, args=(stage["work"], name), daemon=True)
+        stage["names"].append(name)
+        stage["threads"][name] = thread
+        thread.start()
 
     # Plan mode: all the agents, the leader too, write their plans at the same time. It returns the summary plan, or None if a plan was not approved.
     # If the user approved every plan on its own and never saw a summary, the leader writes one now.
     def runPlanning(self):
-        self.runStage({name: [] for name in self.members}, self.runMember)
+        self.runStage(list(self.members), self.runMember, plan=True)
         if any(member["status"] != "done" for member in self.members.values()):
             return None
         if not self.summary:
@@ -2404,12 +2632,12 @@ class Swarm:
 
     # Execute mode: each agent starts when the agents it waits for are done, then the leader works last.
     def runExecution(self):
-        workers = {name: member["waitsFor"] for name, member in self.members.items() if name != self.leader}
-        finished = {name: threading.Event() for name in workers}
-        self.runStage(workers, partial(self.runWorker, finished=finished))
+        workers = [name for name in self.members if name != self.leader]
+        self.finished = {name: threading.Event() for name in workers}
+        self.runStage(workers, self.runWorker)
         if self.stopped:
             return None
-        self.runStage({self.leader: []}, self.runLeader)
+        self.runStage([self.leader], self.runLeader)
         return self.members[self.leader]["result"]
 
     # With resume=True the swarm goes on where it was interrupted (see resume) instead of starting again.
@@ -2425,7 +2653,8 @@ class Swarm:
         finally:
             for member in self.members.values():
                 agent = member["agent"]
-                agent.reviewer = agent.onConnectionLost = agent.onProgress = None
+                agent.reviewer = agent.onConnectionLost = agent.onProgress = agent.onAnswer = None
                 agent.resumed = False
+            self.stage = None
             self.closeRun(ended)
             self.emit("finished", mode=self.mode, ok=result is not None)

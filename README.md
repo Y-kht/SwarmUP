@@ -19,7 +19,13 @@ The system can also require credentials for certain tools such as email. Users c
 ## Repo Structure
 
 - **`docs/`**: Contains documentation related to the project.
-- **`src/`**: Contains the source code for the project including the user interface, agent logic, and other core utilities. `user_interface.py` runs the interface, and its pages (HTML, CSS, JavaScript and SVG icons) are in `src/user-interface/`.
+- **`src/`**: Contains the source code for the project including the user interface, agent logic, and other core utilities.
+  - `src/backend/interface/`: `user_interface.py`, which runs the interface.
+  - `src/backend/swarm-utils/`: `harness_utils.py` (the agents, their loops and the swarm) and `leader_utils.py` (the leader that builds and manages the swarm).
+  - `src/backend/model-utils/`: the model lists (`models_library.py`), the clients of the models (`model_clients.py`) and the prompts (`agent_prompts.py`).
+  - `src/backend/task-utils/`: the tasks and their questions (`tasks_library.py`) and the lists to pick from (`sources_library.py`).
+  - `src/user-interface/`: the pages of the interface (HTML, CSS, JavaScript and SVG icons).
+  - The folders of `src/backend/` have hyphens in their names, so they are not Python packages: the programs and the tests put each of them on the path.
 - **`agent-files/`**: Contains files related to the agent functionality. This includes context files, memory files, and other related resources. The state of a swarm that is running is saved in `agent-files/swarm-runs/`.
 - **`agent-rules/`**: Contains rules and configurations for the agent's behavior and decision-making processes. The agent must refer to these rules to ensure it operates within the defined parameters and guidelines. Every agent has its own rules file.
 
@@ -57,7 +63,19 @@ A swarm has one or more agents, and the first one is the leader.
 - **Plan mode:** every agent writes the plan of its task, and the leader summarises all the plans for your approval. **Execute mode:** the leader summarises what is done and what is about to happen, before the agents act.
 - You can approve, reject or correct the summary as a whole, or any agent on its own. A correction of the summary is passed by the leader to the agents it concerns, and a correction of one agent only changes that agent.
 - You can message any agent, the leader included, while it works. It reads the message with its next prompt, and a draft that was being written is written again.
+- **Add and remove agents while the swarm runs.** A new agent joins the agents at work (until the leader starts its final work): it can wait for agents already there and receives their results. An agent that is removed stops at its next step, what it left half done in your files is put back, and its model frees its memory (a GPU, for a local model). One that had finished keeps its result, and the agents that need it still get it. Every agent of the swarm is told who joined or left, so none of them waits for an agent that left.
 - The tree of the swarm shows live who waits for whom, what needs your approval, and what is planning, executing or done.
+
+### The leader can build the swarm
+
+Instead of building the swarm agent by agent, you can let the leader build it. You choose its model and the folder of the mission, and you tell it the mission.
+
+- The leader reads the mission, the names of the files of the folder, the tasks an agent can have with their settings, and the models that can run on your computer now (the local models that fit in your GPUs together, the API models with a key or not, Claude Code and Codex if they are ready). It proposes the whole swarm: the agents, their tasks and settings, their models and who waits for whom, with a reason for each agent.
+- You approve the proposal, reject it, or tell the leader in your own words what to change, and it writes it again. Once approved, the agents are ordinary agents of the steps, so you can still change any of them before the run.
+- While the swarm runs, the leader is asked if the swarm needs a change each time an agent finishes or you write to it. It can propose to add an agent, to remove one (to free a GPU, for example), or to change the model of an agent that did not start. Every proposal comes with its reason and waits for your approval. One you rejected is never shown again.
+- The leader never controls SwarmUP. It is told to write its proposals in blocks (`<swarmup_build>`, `<swarmup_add>`, `<swarmup_remove>`, `<swarmup_model>`), and SwarmUP reads every answer of the leader. It finds the blocks even when they are not written exactly as asked, and checks each proposal like the forms of the user: the task, the name, the model (it must fit in the GPUs with the others), who waits for whom and every setting. What is wrong goes back to the leader to be written again, before you see anything. A sentence that only suggests a change is never acted upon: the leader is asked to confirm it in a block.
+- Passwords, tokens and API keys are never taken from the leader. SwarmUP asks you for them, and for the settings the leader could not know (your own email address, for example).
+- At the end, the leader writes the final report of the mission from the results of the agents, and saves it in the folder of the mission after you approve it.
 
 ### Your work is never lost
 
@@ -73,8 +91,16 @@ Every agent has its own model.
 
 - **Local models:** dozens of open models (Qwen, Llama, Kimi, Mistral, DeepSeek, Gemma, Phi, gpt-oss, GLM, Granite, OLMo, Nemotron) with the VRAM each one is expected to need, run on your GPUs.
 - **API models:** GPT (OpenAI), Claude (Anthropic), Gemini (Google) and DeepSeek, with their prices.
+- **Coding agents:** Claude Code (Anthropic) and Codex (OpenAI), running on your computer. They think for an agent like a model, and they can also read files, run commands and use the web, each time with your approval (see Coding agents below).
 - Recommended models for each task, and the name of any other model can be typed.
 - **GPU check:** the total and the free VRAM of your GPUs (NVIDIA on Linux and Windows, AMD on Linux), and the VRAM the swarm is expected to need, which grows with each agent. A local model that does not fit cannot be chosen. One that fits but is not free now gives a warning, and the swarm does not start until the memory is free. The Windows part is written but has not been tried on a real Windows computer yet.
+
+### Coding agents
+
+An agent can think with Claude Code or with Codex instead of a model. It works in the folder of the agent (or in an empty folder of its own if the agent has none), and **SwarmUP asks you before it does anything other than reading that folder**: a command, a change of a file, a web page, a file outside its folder. The request appears in the conversation, with the exact command or file, and you choose **Allow once**, **Allow until the next run**, or **Deny** (you can tell it why). Its own questions appear there too, with their options. Settings files in the folder cannot pre-allow anything, and a stopped swarm refuses every new request.
+
+- **Claude Code** runs with your **Anthropic API key**, billed per use like the API models. Anthropic does not allow other programs to use a Claude subscription ([Agent SDK documentation](https://code.claude.com/docs/en/agent-sdk/overview)), so SwarmUP gives Claude Code a configuration folder of its own, blanks the other credentials, and stops it if it says it uses anything other than the key. Install its library, which contains Claude Code itself: `pip install claude-agent-sdk` (Python 3.10 or later).
+- **Codex** runs with your **ChatGPT plan**. The first time, you sign in from SwarmUP: in your browser, or with a one-time code shown in SwarmUP (for the code, turn on the sign-in with a code in the security settings of ChatGPT). Codex keeps the sign-in like it does for itself; SwarmUP never sees your password. Install Codex with `npm install -g @openai/codex@0.160` (it needs Node.js). SwarmUP talks to it through its app-server, which OpenAI still calls experimental, so only the tested version (0.160.x) is accepted: set `SWARMUP_ALLOW_UNTESTED_CODEX=1` to try another one, and `SWARMUP_CODEX` to give the path of the program. The web search of Codex (which would not ask), its sub-agents and your MCP servers are switched off inside SwarmUP. On Windows every command of Codex is asked, reads too.
 
 ### Safety
 
@@ -82,23 +108,26 @@ Nothing is done without your approval. API keys, passwords, tokens and accounts 
 
 ### For developers
 
-`Swarm.addListener` gives every change of a swarm as an event, `tasks_library.py` describes the questions of every task, and `models_library.py` holds the model lists. The graphical interface (`src/user_interface.py`) is built on them: its `Session` connects every loop to the window (`notifyUser`, `askUser` and `askSecret` become messages and questions of the conversation), and the window asks the session for news with `/api/poll`.
+`Swarm.addListener` gives every change of a swarm as an event, `tasks_library.py` describes the questions of every task, and `models_library.py` holds the model lists. The graphical interface (`src/backend/interface/user_interface.py`) is built on them: its `Session` connects every loop to the window (`notifyUser`, `askUser` and `askSecret` become messages and questions of the conversation), and the window asks the session for news with `/api/poll`.
 
 - `Swarm.startInBackground` runs a swarm in its own thread, followed with `isRunning` and `wait`. `findUnfinishedSwarms` finds the swarms that were interrupted, `Swarm.restore` brings one back (the interface builds its agents again, and `publicAnswers` and `restoreAnswers` of `tasks_library.py` keep the secrets out of what is saved), and `resume` goes on where it stopped.
 - After a lost connection (the events `connectionLost`, `resumed` and `stopped`), an interface answers with `continueWork`, `summarizeChanges` and `stopWork`, as the console does.
 - `sources_library.py` lists the messaging apps (`MESSAGING_APPS`), and `harness_utils.py` has the code that sends to each one.
+- A coding agent (`ClaudeCodeModel`, `CodexModel` in `model_clients.py`) asks through its loop: `Loop.askPermission` and `Loop.askQuestions`, which an interface replaces like `askUser` (the console and the window both do). `Swarm.prepareRun` calls `newRun` on them, which forgets what was allowed until the next run.
+- `Swarm.addAgent` and `Swarm.removeAgent` work while the swarm runs (the events `joined`, `removed` and `retired`), and `Swarm.setModel` for an agent that did not start (the event `model`).
+- `leader_utils.py` holds the leader that builds the swarm: `parseOutput` (the blocks in a text), `findSuggestions` (the sentences that suggest a change), `LeaderCatalog` (what the leader is told, and the checks of its proposals), `designSwarm` (the building of the swarm with the user) and `LeaderManager` (the leader while the swarm runs). The leader asks the user through `Loop.askProposal`, and the program that runs the swarm makes the agents for it (`makeLoop`, `joined`, `remakeLoop`, `remade`). `readAnswers` of `tasks_library.py` checks the proposals of the leader and the forms of the window the same way.
 
 ## Use the interface
 
 ```bash
-python src/user_interface.py
+python src/backend/interface/user_interface.py
 ```
 
-`python src/user_interface.py` opens SwarmUP in a window of its own, on Windows, macOS and Linux.
+`python src/backend/interface/user_interface.py` opens SwarmUP in a window of its own, on Windows, macOS and Linux.
 
-It guides you through six steps, each with a guide on the side: **the mission**, **the agents** (one card per agent, with the questions of its task, checks of your email login or messaging app that send nothing, and Undo if you remove one), **the folders** (with the folder dialog of your system), **the models** (local ones with a gauge of the VRAM of your GPUs, or API ones with their prices and your key), **who waits for whom** (you choose, or the leader proposes and you approve), and **the launch** (plan first, or execute right away).
+It guides you through six steps, each with a guide on the side: **the mission** (and who builds the swarm: you, or the leader, which proposes it in a window where you approve it, reject it, or ask for changes), **the agents** (one card per agent, with the questions of its task, checks of your email login or messaging app that send nothing, and Undo if you remove one), **the folders** (with the folder dialog of your system), **the models** (local ones with a gauge of the VRAM of your GPUs, API ones with their prices and your key, or a coding agent: Claude Code with your key, or Codex with the sign-in to your ChatGPT plan), **who waits for whom** (you choose, or the leader proposes and you approve), and **the launch** (plan first, or execute right away).
 
-The swarm is then followed live on a map: a golden light shows the agents that wait for you, and the leader asks its questions in a conversation on the side, with buttons for the usual answers. You can approve, reject or correct any agent on its own, message it while it works, start an agent that waits for its time, or stop the swarm after the leader tells you what was already done. A swarm that was interrupted is offered on the home page, to continue it (you give the passwords and keys again) or to cancel it.
+The swarm is then followed live on a map: a golden light shows the agents that wait for you, and the leader asks its questions in a conversation on the side, with buttons for the usual answers. You can approve, reject or correct any agent on its own, message it while it works, start an agent that waits for its time, add an agent or remove one, or stop the swarm after the leader tells you what was already done. The proposals of a leader that built the swarm appear in the conversation, with their reason and the buttons to approve or reject them. A swarm that was interrupted is offered on the home page, to continue it (you give the passwords and keys again) or to cancel it.
 
 - For the window, install pywebview: `pip install pywebview` (on Linux it also needs GTK or Qt: `pip install pywebview[gtk]` or `pip install pywebview[qt]`). It uses the web engine of the system: WebView2 on Windows (already installed on Windows 10 and 11), WebKit on macOS. Without pywebview, SwarmUP opens in an application window of Edge, Chrome, Chromium or Brave if one is installed, and otherwise in a tab of your web browser. `--window browser` (or `app`, `webview`, `none`) chooses it yourself.
 - The interface only listens to your own computer (127.0.0.1), and only the window it opened can use it. Passwords, keys and tokens are never sent back to the window, nor written to a file.
@@ -110,10 +139,11 @@ The swarm is then followed live on a map: a golden light shows the agents that w
 python tests/full_command_line_user_test.py
 ```
 
-`python tests/full_command_line_user_test.py` lets you build and run a swarm by answering guiding questions: how many agents, the task of each one (email, writing, coding, math checking, literature review, news briefing...) with what it needs to work, the folder of each one, and the model of each one, local on your GPUs (with the VRAM it needs and a check of your GPUs) or paid through an API (with the prices). The tree of the swarm is then shown live while the agents plan or execute, and you can approve, correct or message any agent at any time (type `help`).
+`python tests/full_command_line_user_test.py` lets you build and run a swarm by answering guiding questions: who builds the swarm (you, or the leader, whose proposal you approve), how many agents, the task of each one (email, writing, coding, math checking, literature review, news briefing...) with what it needs to work, the folder of each one, and the model of each one, local on your GPUs (with the VRAM it needs and a check of your GPUs), paid through an API (with the prices), or a coding agent (Claude Code or Codex, which ask you before they act). The tree of the swarm is then shown live while the agents plan or execute, and you can approve, correct or message any agent at any time, add an agent (`add`) or remove one (`remove <agent> <why>`). Type `help` to see every command.
 
 - Nothing is done before you approve it: emails are only sent, events booked and files written after you approve the exact result.
 - If the connection is lost, the swarm pauses and asks you to type `continue` or `cancel`. If the program or the computer stops, start the program again: it offers to continue the swarm that was interrupted, or to cancel it after a summary of what it did.
 - API models need their library (`pip install anthropic` for Claude, `pip install openai` for GPT, Gemini and DeepSeek) and a key, read from `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` or `DEEPSEEK_API_KEY`, or typed when the program asks. Keys and passwords are only kept in memory.
 - Local models need `pip install torch transformers accelerate` (and `bitsandbytes` for compressed models) and an NVIDIA GPU (Linux and Windows) or an AMD GPU (Linux). They are downloaded to the Hugging Face cache, which is the folder of the `HF_HOME` environment variable.
 - `python tests/live_checks.py gpus` shows what the GPU check finds on your computer, and `python -m unittest discover -s tests` runs the tests.
+- The tests of the coding agents (`tests/test_coding_agents.py`) run the real Claude Code and Codex against a fake model on your computer, so they need no key and no account. They are skipped when `claude-agent-sdk` or Codex is not installed.

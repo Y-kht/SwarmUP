@@ -87,6 +87,7 @@ const TASK_STYLE = {
   format: { icon: 'layout', color: '#EC4899' },
   math: { icon: 'sigma', color: '#6366F1' },
   coder: { icon: 'code', color: '#F97316' },
+  leader: { icon: 'crown', color: '#F4A62A' },
 };
 
 const LOGO = '<svg viewBox="0 0 64 64" aria-hidden="true"><defs><linearGradient id="lg-a" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#7C6CFF"/>' +

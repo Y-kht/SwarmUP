@@ -10,8 +10,10 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+# The modules of SwarmUP are in the folders of src/backend. Their names have hyphens, so they are not packages: each folder goes on the path.
+sys.path[:0] = [str(folder) for folder in sorted((Path(__file__).resolve().parent.parent / "src" / "backend").iterdir()) if folder.is_dir() and not folder.name.startswith(("_", "."))]
 import harness_utils
+import leader_utils
 import model_clients
 import user_interface as gui
 from model_clients import ApiModel
@@ -314,6 +316,47 @@ class RunTests(SessionTestCase):
         waitUntil(lambda: question["id"] not in self.session.questions or self.session.swarm.getInfo("Writer")["revision"] > 1, "the correction")
         self.assertIn("Mention honey.", [item["text"] for item in self.session.feed])
 
+    def testAnAgentJoinsTheRunningSwarmAndAnotherLeavesIt(self):
+        self.buildTwoWriters()
+        self.act("start", mode="plan")
+        self.waitForQuestion("review")
+        agentId = self.act("saveAgent", task="author", values={"subject": "wax", "length": "100"}, name="Waxer", live=True)["agentId"]
+        state = self.session.describe()
+        self.assertEqual((state["agents"][-1]["name"], state["agents"][-1]["pending"]), ("Waxer", True))
+        self.assertNotIn("Waxer", self.session.swarm.getAgents())
+        with self.assertRaises(gui.FormError):
+            self.act("joinLive", agentId=agentId, waitsFor=[])
+        self.chooseApi(agentId)
+        self.assertTrue(self.session.describe()["run"]["canJoin"])
+        self.act("joinLive", agentId=agentId, waitsFor=[])
+        self.assertIn("Waxer", self.session.swarm.getAgents())
+        self.assertFalse(self.session.describe()["agents"][-1]["pending"])
+        self.assertIn("Waxer joined the swarm (writer). Every agent was told.", [item["text"] for item in self.session.feed])
+        self.act("removeLive", agent="Writer2", reason="Two texts are enough.")
+        state = self.session.describe()
+        self.assertEqual([agent["name"] for agent in state["agents"]], ["Writer", "Waxer"])
+        self.assertEqual(state["run"]["removed"][0]["reason"], "Two texts are enough.")
+        with self.assertRaises(ValueError):
+            self.act("removeLive", agent="Writer")
+        while self.session.swarm.isRunning():
+            question = self.waitForQuestion()
+            self.act("answer", id=question["id"], answer="yes")
+            time.sleep(0.05)
+        run = self.waitForEnd()
+        self.assertEqual({agent["name"]: agent["status"] for agent in run["agents"]}, {"Writer": "done", "Waxer": "done"})
+
+    def testAPendingAgentCanBeDroppedAndTheOtherAgentsStayLocked(self):
+        self.buildTwoWriters()
+        self.act("start", mode="plan")
+        self.waitForQuestion("review")
+        with self.assertRaises(ValueError):
+            self.addWriter("not now")
+        agentId = self.act("saveAgent", task="author", values={"subject": "wax", "length": "100"}, live=True)["agentId"]
+        with self.assertRaises(ValueError):
+            self.act("removeAgent", agentId=self.session.specs[1]["id"])
+        self.act("removeAgent", agentId=agentId)
+        self.assertEqual(len(self.session.describe()["agents"]), 2)
+
     def testStoppingReleasesTheQuestionsAndEndsTheRun(self):
         self.act("setMission", mission="Write about bees.")
         self.chooseApi(self.addWriter())
@@ -352,6 +395,236 @@ class RunTests(SessionTestCase):
         waitUntil(lambda: not later.swarm.isRunning() and later.runInfo.get("finishedAt"), "the end of the continued run")
         self.assertEqual(later.describe()["run"]["state"], "succeeded")
         self.assertEqual(list((self.folder / harness_utils.RUNS_FOLDER).glob("swarm_*.json")), [])
+
+
+# A pretend coding agent: before its plan it asks for a permission and asks a question, through the same helpers as Claude Code and Codex.
+class CodingAgent(Model):
+    def __init__(self, info=None):
+        super().__init__(info)
+        self.loop, self.decisions, self.answers, self.runs = None, [], [], 0
+
+    def attach(self, loop):
+        self.loop = loop
+
+    def newRun(self):
+        self.runs += 1
+
+    def input(self, prompt):
+        if "write a plan" in prompt.lower():
+            self.decisions.append(model_clients.askPermission(self.loop, {"action": "run a command", "detail": "npm test", "folder": "/work", "reason": "Check the code"}))
+            self.answers.append(model_clients.askQuestions(self.loop, [{"id": "tone", "header": "Tone", "question": "Which tone?",
+                                                                         "options": [{"label": "Warm", "description": ""}], "multiple": False, "secret": False}]))
+        return super().input(prompt)
+
+
+class CodingAgentTests(SessionTestCase):
+    def setUp(self):
+        super().setUp()
+        self.agent = CodingAgent()
+        self.account = {"signedIn": True, "type": "chatgpt", "email": "me@example.com", "plan": "plus"}
+        for name, value in (("createModel", lambda info, keys=None, token=None, report=None: self.agent if info.get("cli") else Model(info)),
+                            ("checkCodex", lambda: {"path": "codex", "version": "0.160.0", "problem": ""}), ("readCodexAccount", lambda: dict(self.account)),
+                            ("listCodexModels", lambda: [{"id": "gpt-6-luna", "name": "GPT-6 Luna", "description": "", "isDefault": False}])):
+            patcher = mock.patch.object(gui, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def chooseCodex(self):
+        self.act("setMission", mission="Write about bees.")
+        agentId = self.addWriter()
+        self.act("chooseModel", agentId=agentId, name=gui.DEFAULT_CLI_MODEL, cli="codex")
+        return agentId
+
+    def testTheRequestsOfACodingAgentAreAnsweredInTheConversation(self):
+        self.chooseCodex()
+        model = self.session.describe()["agents"][0]["model"]
+        self.assertEqual((model["cli"], model["label"]), ("codex", "Codex · its default model"))
+        self.act("start", mode="plan")
+        question = self.waitForQuestion("permission")
+        self.assertEqual((question["payload"]["detail"], [reply["value"] for reply in question["replies"]]), ("npm test", ["once", "run", "deny"]))
+        with self.assertRaises(ValueError):
+            self.act("answer", id=question["id"], answer="yes")
+        self.act("answer", id=question["id"], answer={"decision": "run", "message": ""})
+        form = self.waitForQuestion("form")
+        self.assertEqual(form["payload"][0]["question"], "Which tone?")
+        self.act("answer", id=form["id"], answer={"tone": ["Warm"]})
+        self.act("answer", id=self.waitForQuestion("review")["id"], answer="yes")
+        self.assertEqual(self.waitForEnd()["state"], "succeeded")
+        self.assertEqual((self.agent.decisions[0]["decision"], self.agent.answers, self.agent.runs), ("run", [{"tone": ["Warm"]}], 1))
+        self.assertIn("Allowed until the next run: npm test", [item["text"] for item in self.session.feed])
+
+    def testStoppingTheSwarmDeniesAPermissionThatWaits(self):
+        self.chooseCodex()
+        self.act("start", mode="plan")
+        self.waitForQuestion("permission")
+        self.act("stop")
+        self.waitForEnd()
+        self.assertEqual(self.agent.decisions[-1]["decision"], "deny")
+
+    def testCodexMustBeInstalledAndSignedIn(self):
+        self.act("setMission", mission="Write about bees.")
+        agentId = self.addWriter()
+        self.account = {"signedIn": False, "type": None, "email": None, "plan": None}
+        with self.assertRaises(gui.FormError) as caught:
+            self.act("chooseModel", agentId=agentId, name=gui.DEFAULT_CLI_MODEL, cli="codex")
+        self.assertIn("codex", caught.exception.errors)
+        self.assertEqual(self.act("codexAccount")["codex"]["account"]["signedIn"], False)
+        with mock.patch.object(gui, "checkCodex", lambda: {"path": None, "version": None, "problem": "Codex is not installed."}):
+            with self.assertRaises(ValueError) as caught:
+                self.act("chooseModel", agentId=agentId, name=gui.DEFAULT_CLI_MODEL, cli="codex")
+            self.assertIn("not installed", str(caught.exception))
+            self.assertEqual(self.act("codexAccount")["codex"]["problem"], "Codex is not installed.")
+        with self.assertRaises(ValueError):
+            self.act("price", name="x", cli="codex")
+
+    def testClaudeCodeIsUsedWithTheAnthropicKeyOnly(self):
+        self.act("setMission", mission="Write about bees.")
+        agentId = self.addWriter()
+        with mock.patch.dict(gui.os.environ, {"ANTHROPIC_API_KEY": ""}), self.assertRaises(gui.FormError) as caught:
+            self.act("chooseModel", agentId=agentId, name=gui.DEFAULT_CLI_MODEL, cli="claude-code")
+        self.assertIn("apiKey", caught.exception.errors)
+        state = self.act("chooseModel", agentId=agentId, name=gui.DEFAULT_CLI_MODEL, cli="claude-code", apiKey="sk-ant-secret")["state"]
+        self.assertEqual((state["agents"][0]["model"]["label"], state["keys"]["claude"]["source"]), ("Claude Code · its default model", "typed"))
+        self.assertNotIn("sk-ant-secret", json.dumps(state))
+        self.assertTrue(gui.hasCredentials(gui.getModelInfo("", cli="codex"), {}))
+        with mock.patch.dict(gui.os.environ, {"ANTHROPIC_API_KEY": ""}):
+            self.assertFalse(gui.hasCredentials(gui.getModelInfo("", cli="claude-code"), {}))
+
+    def testTheSignInOfCodexIsShownUntilItEnds(self):
+        finished = threading.Event()
+        class Login:
+            def start(self, kind):
+                return {"url": "https://auth.openai.com/codex/device", "code": "ABCD-1234" if kind == "code" else None}
+            def wait(self, timeout=None):
+                finished.wait(10)
+                return ""
+            def cancel(self):
+                finished.set()
+        self.account = {"signedIn": False, "type": None, "email": None, "plan": None}
+        with mock.patch.object(gui, "CodexLogin", Login), mock.patch.object(gui.webbrowser, "open") as opened:
+            login = self.act("codexSignIn", method="code")["state"]["codexLogin"]
+            self.assertEqual((login["state"], login["code"], login["url"]), ("waiting", "ABCD-1234", "https://auth.openai.com/codex/device"))
+            self.assertNotIn("login", login)
+            opened.assert_not_called()
+            self.account = {"signedIn": True, "type": "chatgpt", "email": "me@example.com", "plan": "plus"}
+            finished.set()
+            waitUntil(lambda: self.session.describe()["codexLogin"]["state"] == "done", "the end of the sign-in")
+            self.assertEqual(self.session.describe()["codexLogin"]["account"]["email"], "me@example.com")
+            finished.clear()
+            self.act("codexSignIn", method="browser")
+            opened.assert_called_once_with("https://auth.openai.com/codex/device")
+            self.act("codexCancel")
+            self.assertIsNone(self.session.describe()["codexLogin"])
+
+
+# The leader builds the swarm (leader_utils.py). Its model answers the prompts of the leader with the blocks a test gives it.
+class LeaderModeTests(SessionTestCase):
+    def setUp(self):
+        super().setUp()
+        from test_leader_utils import LeaderModel, block
+        self.block = block
+        self.leaderModel = LeaderModel()
+        for target, name, value in ((leader_utils, "checkCodex", lambda: {"problem": "Codex is not installed."}), (leader_utils, "findMissingPackages", lambda info: []),
+                                    (leader_utils, "readGpus", lambda: GPUS), (leader_utils, "DEBOUNCE_SECONDS", 0.02),
+                                    (gui, "createModel", lambda info, keys=None, token=None, report=None: self.leaderModel if info["name"] == "claude-opus-5-5" else Model(info))):
+            patcher = mock.patch.object(target, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        (self.folder / "notes.md").write_text("Bees pollinate.", encoding="utf-8")
+
+    def prepareLeader(self):
+        self.act("setMission", mission="Write a text about bees and a shorter version of it.")
+        self.act("setBuildMode", mode="leader")
+        leader = self.session.describe()["agents"][0]
+        self.act("setFolder", agentId=leader["id"], folder=str(self.folder))
+        self.chooseApi(leader["id"], "claude-opus-5-5")
+        return leader
+
+    def answerProposal(self, decision="approve", message=""):
+        question = self.waitForQuestion("proposal")
+        self.act("answer", id=question["id"], answer={"decision": decision, "message": message})
+        return question
+
+    def testTheLeaderBuildsTheSwarmOnceTheUserApprovesItsProposal(self):
+        agents = [{"name": "Writer", "task": "author", "model": "claude-sonnet-5-5", "settings": {"subject": "bees", "length": 300}, "why": "It writes the text."},
+                  {"name": "Shortener", "task": "author", "model": "claude-haiku-4-5", "waits_for": ["Writer"], "settings": {"subject": "the text of Writer in 50 words",
+                   "length": 50}, "why": "It writes the short version."}]
+        self.leaderModel.replies = {"build": [self.block("build", agents=agents[:1])], "revise": ["Here it is.\n" + self.block("build", agents=agents)]}
+        leader = self.prepareLeader()
+        self.assertEqual((leader["name"], leader["task"], leader["builder"], leader["isLeader"]), ("Leader", "leader", True, True))
+        with self.assertRaises(ValueError):
+            self.act("removeAgent", agentId=leader["id"])
+        with self.assertRaises(ValueError):
+            self.act("start", mode="execute")
+        self.act("buildWithLeader")
+        question = self.answerProposal("reject", "Add a short version too.")
+        self.assertEqual((question["kind"], question["payload"]["action"], [agent["name"] for agent in question["payload"]["agents"]]), ("proposal", "build", ["Writer"]))
+        question = self.answerProposal()
+        self.assertEqual(question["payload"]["why"], "Here it is.")
+        waitUntil(lambda: self.session.jobs["leader"]["state"] == "done", "the leader to build the swarm")
+        state = self.session.describe()
+        self.assertEqual([(agent["name"], agent["task"], agent["model"]["name"], agent["waitsFor"]) for agent in state["agents"]],
+                         [("Leader", "leader", "claude-opus-5-5", []), ("Writer", "author", "claude-sonnet-5-5", []), ("Shortener", "author", "claude-haiku-4-5", ["Writer"])])
+        self.assertEqual((state["agents"][2]["folder"], state["agents"][2]["why"], state["order"], state["buildMode"]), (str(self.folder.resolve()), "It writes the short version.", "custom", "leader"))
+        self.assertIn("Approved: the swarm of the leader", [item["text"] for item in self.session.feed])
+        self.assertIn("The user read the swarm you proposed and wants changes: Add a short version too.", self.leaderModel.prompts[1])
+        self.assertIn("notes.md", self.leaderModel.prompts[0])
+        self.act("start", mode="execute")
+        self.assertIsInstance(self.session.swarm.manager, leader_utils.LeaderManager)
+        while self.session.swarm.isRunning():
+            question = self.waitForQuestion()
+            self.act("answer", id=question["id"], answer={"decision": "approve", "message": ""} if question["kind"] == "proposal" else "yes")
+            time.sleep(0.05)
+        run = self.waitForEnd()
+        self.assertEqual((run["state"], run["agents"][0]["result"]), ("succeeded", "Report: every agent did its work."))
+        self.assertEqual(len(list(self.folder.glob("report_*.md"))), 1)
+
+    def testTheLeaderAddsAnAgentWhileTheSwarmRunsOnceTheUserApproves(self):
+        agents = [{"name": "Writer", "task": "author", "model": "claude-sonnet-5-5", "settings": {"subject": "bees"}, "why": "It writes."},
+                  {"name": "Second", "task": "author", "model": "claude-sonnet-5-5", "settings": {"subject": "honey"}, "why": "It writes too."}]
+        add = self.block("add", name="Translator", task="author", model="claude-haiku-4-5", waits_for=["Writer"], settings={"subject": "the text of Writer in French"},
+                         why="A French version helps the user.")
+        self.leaderModel.replies = {"build": [self.block("build", agents=agents)], "supervise": [add]}
+        self.prepareLeader()
+        self.act("buildWithLeader")
+        self.answerProposal()
+        waitUntil(lambda: self.session.jobs["leader"]["state"] == "done", "the leader to build the swarm")
+        self.act("start", mode="execute")
+        waitUntil(lambda: "Writer" in self.session.swarm.getReadyAgents(), "the draft of Writer")
+        self.act("approve", agent="Writer", revision=self.session.swarm.getInfo("Writer")["revision"])
+        question = self.answerProposal()
+        self.assertEqual((question["payload"]["action"], question["payload"]["agent"]), ("add", "Translator"))
+        self.assertEqual(question["text"], "Leader proposes: Add Translator (Writer (texts, essays, articles)) with claude-haiku-4-5 (Anthropic API), waiting for Writer.")
+        waitUntil(lambda: "Translator" in self.session.swarm.getAgents(), "the translator to join")
+        state = self.session.describe()
+        self.assertEqual(state["agents"][-1]["name"], "Translator")
+        self.assertIn("Translator joined the swarm (writer). Every agent was told.", [item["text"] for item in self.session.feed])
+        settle(self.session)
+
+    def testBackToBuildingByHandTheLeaderLeavesAndItsAgentsStay(self):
+        self.leaderModel.replies = {"build": [self.block("build", agents=[{"name": "Writer", "task": "author", "model": "claude-sonnet-5-5", "settings": {"subject": "bees"}}])]}
+        self.prepareLeader()
+        self.act("buildWithLeader")
+        self.answerProposal()
+        waitUntil(lambda: self.session.jobs["leader"]["state"] == "done", "the leader to build the swarm")
+        self.act("setBuildMode", mode="manual")
+        state = self.session.describe()
+        self.assertEqual(([agent["name"] for agent in state["agents"]], state["buildMode"]), (["Writer"], "manual"))
+
+    def testTheLeaderNeedsItsFolderAndItsModelBeforeItBuilds(self):
+        self.act("setMission", mission="Bees.")
+        self.act("setBuildMode", mode="leader")
+        with self.assertRaises(gui.FormError) as caught:
+            self.act("buildWithLeader")
+        self.assertIn("folder", caught.exception.errors)
+        leader = self.session.describe()["agents"][0]
+        self.act("setFolder", agentId=leader["id"], folder=str(self.folder))
+        with self.assertRaises(gui.FormError) as caught:
+            self.act("buildWithLeader")
+        self.assertIn("model", caught.exception.errors)
+        with self.assertRaises(ValueError):
+            self.act("taskForm", task="leader", agentId=leader["id"])
+        self.assertEqual(self.act("modelCatalog", agentId=leader["id"])["catalog"]["api"][0]["name"], "claude-opus-5-5")
 
 
 class ServerTests(SessionTestCase):

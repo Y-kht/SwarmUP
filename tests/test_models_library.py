@@ -3,7 +3,8 @@ import sys
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+# The modules of SwarmUP are in the folders of src/backend. Their names have hyphens, so they are not packages: each folder goes on the path.
+sys.path[:0] = [str(folder) for folder in sorted((Path(__file__).resolve().parent.parent / "src" / "backend").iterdir()) if folder.is_dir() and not folder.name.startswith(("_", "."))]
 from models_library import (API_KEYS, MODELS_API, MODELS_LOCAL, PRICE_NOTES, PRICING_PAGES, RECOMMENDED_API, RECOMMENDED_LOCAL, getModelInfo, getProvider,
                             getVram, isGated)
 
@@ -35,7 +36,7 @@ class LocalModelTests(unittest.TestCase):
 
     def testEveryRecommendationIsInTheListAndSortedFromSmallestToLargest(self):
         models = self.allLocal()
-        self.assertEqual(set(RECOMMENDED_LOCAL), {"math", "code", "writing", "email", "calendar", "news", "literature", "formatting"})
+        self.assertEqual(set(RECOMMENDED_LOCAL), {"math", "code", "writing", "email", "calendar", "news", "literature", "formatting", "leading"})
         for task, names in RECOMMENDED_LOCAL.items():
             self.assertTrue(all(name in models for name in names), task)
             sizes = [models[name] for name in names]
@@ -114,7 +115,7 @@ class ApiModelTests(unittest.TestCase):
 class ModelInfoTests(unittest.TestCase):
     def testAListedLocalModelNeedsItsVram(self):
         info = getModelInfo("Qwen/Qwen3.5-9B")
-        self.assertEqual(info, {"name": "Qwen/Qwen3.5-9B", "local": True, "provider": None, "billions": 9.7, "bits": 16, "vram": getVram(9.7)})
+        self.assertEqual(info, {"name": "Qwen/Qwen3.5-9B", "local": True, "provider": None, "billions": 9.7, "bits": 16, "vram": getVram(9.7), "cli": None})
         self.assertEqual(getModelInfo("Qwen/Qwen3.5-9B", bits=4)["vram"], getVram(9.7, 4))
         self.assertLess(getModelInfo("Qwen/Qwen3.5-9B", bits=4)["vram"], info["vram"])
 

@@ -4,7 +4,7 @@ import shlex
 from pathlib import Path
 
 from harness_utils import (EMAIL_PATTERN, PAPER_SEARCHES, PHONE_PATTERN, USER_NAME, AuthorLoop, CalendarLoop, CoderLoop, DocumentFormatLoop, EmailLoop,
-                           LiteratureSurveyLoop, MathCheckLoop, NewsLoop, nextOccurrence)
+                           LeaderLoop, LiteratureSurveyLoop, MathCheckLoop, NewsLoop, nextOccurrence)
 from sources_library import EMAIL_PROVIDERS, MESSAGING_APPS
 
 # The tasks a user can give to an agent, each one a loop of harness_utils.py. For every task: what the user is told (info),
@@ -174,9 +174,25 @@ TASKS = {
     },
 }
 
+# The task of the leader that builds the swarm itself (leader_utils.py). It is not one of TASKS: nobody chooses it for an agent, the user
+# chooses it by letting the leader build the swarm. The mission is the one the user gave, and the folder is the folder of the mission.
+LEADER_TASK = {
+    "label": "Leader that builds the swarm", "name": "Leader", "role": "leader", "recommend": "leading",
+    "build": lambda model, answers: LeaderLoop(model, answers["mission"], loops(answers)),
+    "folder": "The folder of the mission: the agents work in it, and the final report is saved in it.",
+    "info": "This agent builds the swarm for your mission: it chooses the agents, their tasks and their models, and you approve its proposal. While the swarm works "
+            "it can propose to add or remove agents, always with a reason, and nothing changes before you approve. At the end it writes the final report.",
+    "fields": [{"key": "mission", "ask": "What must the swarm achieve?", "kind": "text", "required": True}],
+}
+HIDDEN_TASKS = {"leader": LEADER_TASK}
+
 # The questions every agent has, asked at the end as an option.
 ADVANCED_FIELDS = [{"key": "numberOfLoops", "ask": "How many drafts may the agent write at most before it stops?", "kind": "number", "default": DEFAULT_LOOPS,
                     "help": "Every time you ask for a change, or an automatic check finds a problem, the agent writes a new draft."}]
+
+
+def getTask(key):
+    return TASKS[key] if key in TASKS else HIDDEN_TASKS[key]
 
 
 def getDefault(field, answers):
@@ -195,7 +211,7 @@ def isAsked(field, answers):
 
 
 def getFields(key):
-    return [*TASKS[key]["fields"], *ADVANCED_FIELDS]
+    return [*getTask(key)["fields"], *ADVANCED_FIELDS]
 
 
 # The secrets (passwords, tokens) that the user must give again for a task that was saved, only for the questions that were asked.
@@ -220,7 +236,7 @@ def restoreAnswers(key, saved, secrets=None):
 
 # The loop of a task, working inside the folder of the answers (the folder is chosen after the task). It refuses a folder that is not right.
 def buildLoop(key, model, answers):
-    loop = TASKS[key]["build"](model, answers)
+    loop = getTask(key)["build"](model, answers)
     loop.setFolder(answers.get("folder"))
     return loop
 
@@ -279,6 +295,54 @@ def parseAnswer(field, text, answers=None):
     return text, ""
 
 
+# Turns the values of a whole form into the answers of a task, field after field, like the command line asks them. The values are what a form
+# sends: a text for the kinds of parseAnswer, an option for choice, a list for choices and outlets, {name: number} for publishers, and rows
+# {host, user, password} for accounts. It returns (answers, errors), the errors being {key of the field: what is wrong}.
+# A secret left empty keeps the one of previous (the answers given before), so a password never has to be shown again to edit an agent.
+# The user interface reads its forms with it, and the leader its proposals (leader_utils.py), so both are checked the same way.
+def readAnswers(task, values, previous=None):
+    answers, errors = {}, {}
+    for field in getFields(task):
+        if not isAsked(field, answers):
+            continue
+        key, kind, raw = field["key"], field["kind"], values.get(field["key"])
+        value, error = None, ""
+        if kind == "choice":
+            value = raw or getDefault(field, answers)
+            if value not in field["options"]:
+                value, error = None, "Choose one of the options."
+        elif kind == "choices":
+            value = [option for option in field["options"] if option in (raw if raw is not None else getDefault(field, answers) or [])]
+        elif kind == "outlets":
+            value = [str(outlet).strip() for outlet in raw or [] if str(outlet).strip()]
+            wrong = [outlet for outlet in value if "://" in outlet and not outlet.startswith(("http://", "https://"))]
+            error = "Choose at least one outlet." if field.get("required") and not value else f"{wrong[0]} must start with http:// or https://." if wrong else ""
+        elif kind == "publishers":
+            value = {str(name): str(number) for name, number in (raw or {}).items()}
+        elif kind == "accounts":
+            value, old = {}, (previous or {}).get(key) or {}
+            for row in raw or []:
+                host, user, password = (str(row.get(part, "")).strip() for part in ("host", "user", "password"))
+                if not host and not user:
+                    continue
+                password = password or (old.get(host, ("", ""))[1] if old.get(host, ("", ""))[0] == user else "")
+                if not host or "/" in host or not user or not password:
+                    error = "Every account needs the website (like ieeexplore.ieee.org, without https://), a username and a password."
+                value[host] = (user, password)
+        else:
+            text = "" if raw is None else str(raw)
+            if kind == "secret" and not text and previous and previous.get(key):
+                value = previous[key]
+            else:
+                value, error = parseAnswer(field, text, answers)
+        if error:
+            errors[key] = error
+        answers[key] = value
+    if task == "literature" and not (answers.get("searches") or answers.get("publishers")) and "searches" not in errors:
+        errors["searches"] = "The survey needs a place to search: choose at least a search engine or a publisher."
+    return answers, errors
+
+
 # Which of the options the text chooses: numbers (2), several numbers and ranges (1,3-5), or the label itself.
 # It returns (chosen options, error). With one=True a single option is expected.
 def parseChoices(options, text, one=False):
@@ -315,7 +379,7 @@ def checkAgentName(name, taken=()):
 
 # A name for a new agent of a task that is not taken: Writer, then Writer2, Writer3...
 def suggestName(task, taken=()):
-    base, number = TASKS[task]["name"], 1
+    base, number = getTask(task)["name"], 1
     while checkAgentName(base if number == 1 else f"{base}{number}", taken):
         number += 1
     return base if number == 1 else f"{base}{number}"

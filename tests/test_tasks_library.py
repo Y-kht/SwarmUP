@@ -6,7 +6,8 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+# The modules of SwarmUP are in the folders of src/backend. Their names have hyphens, so they are not packages: each folder goes on the path.
+sys.path[:0] = [str(folder) for folder in sorted((Path(__file__).resolve().parent.parent / "src" / "backend").iterdir()) if folder.is_dir() and not folder.name.startswith(("_", "."))]
 import harness_utils
 from harness_utils import AGENT_RULES, AuthorLoop, CalendarLoop, CoderLoop, DocumentFormatLoop, EmailLoop, LiteratureSurveyLoop, MathCheckLoop, NewsLoop, loadRules
 from models_library import RECOMMENDED_API, RECOMMENDED_LOCAL
@@ -94,7 +95,7 @@ class BuildTests(unittest.TestCase):
             "calendar": {"request": "dentist"},
             "news": {"outlets": ["BBC World", "https://example.com/feed"], "topics": "science", "collectAt": "07:30", "maxWords": 120, "language": "German"},
             "author": {"subject": "the sea", "length": 300},
-            "literature": {"subject": "graphs", "length": 400, "searches": ["arXiv", "Crossref"], "publishers": {"IEEE": 263}, "accounts": {"ieeexplore.ieee.org": ("me", "pw")}},
+            "literature": {"subject": "graphs", "length": 400, "searches": ["arXiv", "Crossref"], "publishers": {"IEEE": 263}, "accounts": {"ieeexplore.ieee.org": ("me", "account-secret-77")}},
             "format": {"filePath": str(self.document), "style": "IEEE"},
             "math": {"filePath": str(self.document)},
             "coder": {"task": "sort a list", "filePath": str(self.folder / "sort.py"), "testCommand": ["python", "-m", "pytest"]},
@@ -178,7 +179,7 @@ class BuildTests(unittest.TestCase):
         literature = publicAnswers("literature", self.answers()["literature"])
         self.assertNotIn("accounts", literature)
         for key, answers in {**self.answers(), "news": news}.items():
-            for secret in ("app-password", "123:ABC", "pw"):
+            for secret in ("app-password", "123:ABC", "account-secret-77"):
                 self.assertNotIn(secret, json.dumps(publicAnswers(key, answers)), key)
         restored = restoreAnswers("news", saved, {"telegramToken": "123:NEW"})
         self.assertEqual(restored["telegramToken"], "123:NEW")
@@ -199,7 +200,7 @@ class BuildTests(unittest.TestCase):
 
     def testTheLiteratureLoopHasItsSearchesPublishersAndAccounts(self):
         loop = TASKS["literature"]["build"](None, self.answers()["literature"])
-        self.assertEqual((loop.searches, loop.publishers, loop.logins), (("arXiv", "Crossref"), {"IEEE": 263}, {"ieeexplore.ieee.org": ("me", "pw")}))
+        self.assertEqual((loop.searches, loop.publishers, loop.logins), (("arXiv", "Crossref"), {"IEEE": 263}, {"ieeexplore.ieee.org": ("me", "account-secret-77")}))
 
     def testTheCoderLoopHasItsCommandOrRunsTheFileWithPython(self):
         loop = TASKS["coder"]["build"](None, self.answers()["coder"])

@@ -16,7 +16,8 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+# The modules of SwarmUP are in the folders of src/backend. Their names have hyphens, so they are not packages: each folder goes on the path.
+sys.path[:0] = [str(folder) for folder in sorted((Path(__file__).resolve().parent.parent / "src" / "backend").iterdir()) if folder.is_dir() and not folder.name.startswith(("_", "."))]
 import harness_utils
 from harness_utils import (FETCH_ERRORS, PAPER_SEARCHES, LiteratureSurveyLoop, NewsLoop, describeError, fetchUrl, getModelCost, readAbstract,
                            readFeed, searchCrossref)

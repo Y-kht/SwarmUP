@@ -11,7 +11,8 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+# The modules of SwarmUP are in the folders of src/backend. Their names have hyphens, so they are not packages: each folder goes on the path.
+sys.path[:0] = [str(folder) for folder in sorted((Path(__file__).resolve().parent.parent / "src" / "backend").iterdir()) if folder.is_dir() and not folder.name.startswith(("_", "."))]
 import full_command_line_user_test as cli
 import harness_utils
 from harness_utils import Loop, Swarm, findUnfinishedSwarms, saveSwarmState, swarmStatePath
@@ -940,7 +941,8 @@ class ApiModelTests(ModelFlowCase):
         script = Script(["2", "BACK", "1", "1", "1"])
         info, model = self.choose(script)
         self.assertEqual(info["name"], "google/gemma-4-E4B-it")
-        self.assertEqual(script.said.count("\nWhere must the model of agent 1 run?\n  Local: runs on your GPUs (51.6 GB of VRAM, 51.1 GB free now). Free to use and private, but the model must fit in the VRAM.\n  API: runs on the servers of a company (OpenAI, Anthropic, Google, DeepSeek). You pay for every use, and you need an API key."), 2)
+        self.assertEqual(script.said.count("\nWhere must the model of agent 1 run?\n  Local: runs on your GPUs (51.6 GB of VRAM, 51.1 GB free now). Free to use and private, but the model must fit in the VRAM.\n  API: runs on the servers of a company (OpenAI, Anthropic, Google, DeepSeek). You pay for every use, and you need an API key.\n  Coding agent: Claude Code (with your Anthropic API key) or Codex (with your ChatGPT plan), on this computer. It can also read files and run "
+                                           "commands, each time with your approval."), 2)
 
     def testTheLeaderIsToldItsModelMattersMoreAndOtherAgentsAreNot(self):
         script = Script(["2", "1", "n", "n"], ["sk"])
@@ -1002,8 +1004,9 @@ class ProgramCase(GpuTestCase):
         self.addCleanup(environment.stop)
         self.addCleanup(lambda: self.assertFalse([name for name in threading.enumerate() if name.name.startswith("never")]))
 
-    def program(self, answers, secrets=()):
-        script = Script(answers, secrets)
+    # builder is the first answer: who builds the swarm (1: the user, agent by agent).
+    def program(self, answers, secrets=(), builder="1"):
+        script = Script([builder, *answers] if builder else answers, secrets)
         cli.runProgram(script.console())
         self.assertEqual(script.answers, [], "The program did not ask all the questions of the script.")
         return script
@@ -1127,6 +1130,35 @@ class EndToEndTests(ProgramCase):
         self.assertIn("You will not be able to run the swarm until they free enough memory.", text)
         self.assertIn("Change a model or free some GPU memory, then start again.", text)
         self.assertIn("- Writer: done. result: A short text.", text)
+
+    def testTheLeaderBuildsTheSwarmWithTheFolderAndTheModelTheUserChose(self):
+        from test_leader_utils import LeaderModel, block
+        import leader_utils
+        (self.folder / "draft.md").write_text("Bees.", encoding="utf-8")
+        agents = [{"name": "Writer", "task": "author", "model": "claude-sonnet-5-5", "settings": {"subject": "bees", "length": 200}, "why": "It writes the text."},
+                  {"name": "Shortener", "task": "author", "model": "claude-haiku-4-5", "waits_for": ["Writer"], "settings": {"subject": "the text in 50 words", "length": 50},
+                   "why": "It writes the short version."}]
+        leader = LeaderModel(build=["Here is my swarm.\n" + block("build", agents=agents)])
+        created = []
+        def create(info, apiKeys=None, token=None, report=None):
+            created.append(info["name"])
+            return leader if info["name"] == "claude-opus-5-5" else ScriptedModel(info["name"])
+        for target, name, value in ((cli, "createModel", create), (leader_utils, "checkCodex", lambda: {"problem": "Codex is not installed."}),
+                                    (leader_utils, "findMissingPackages", lambda info: []), (leader_utils, "readGpus", lambda: self.currentGpus)):
+            patcher = mock.patch.object(target, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        script = self.program(["Write a text about bees, and a short version of it.", str(self.folder), "2", "1", "n", "n", "yes", "2", "5"], builder="2")
+        text = script.text()
+        self.assertIn("Who builds the swarm?", text)
+        self.assertIn("--- Model of agent 1 of 1: Leader (leader) ---", text)
+        self.assertIn("This leader builds the swarm, follows it, and proposes changes to you", text)
+        self.assertIn("[Leader] proposes a swarm of 2 agents for your mission:\n1. Writer: Writer (texts, essays, articles), with claude-sonnet-5-5 (Anthropic API). It starts right away.", text)
+        self.assertIn("2. Shortener: Writer (texts, essays, articles), with claude-haiku-4-5 (Anthropic API). It waits for Writer.", text)
+        self.assertIn("Why: Here is my swarm.", text)
+        self.assertIn("Shortener [writer] claude-haiku-4-5, API -> waiting for Writer  waits for: Writer (waiting)", text)
+        self.assertIn("draft.md", leader.prompts[0])
+        self.assertEqual(created, ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5"])
 
     def testLeavingBeforeTheStartDoesNotRunAnything(self):
         script = self.program(["1", "A text", "4", "the sea", "", "", "", "", "2", "1", "n", "n", "1", "5"])
@@ -1410,3 +1442,26 @@ class KeyboardTests(ProgramCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LiveTeamTests(ProgramCase):
+    def testAnAgentIsAddedAndAnotherRemovedFromTheConsole(self):
+        swarm = Swarm("Bees")
+        swarm.addAgent("Leader", Loop(None), "leader", "lead")
+        swarm.addAgent("A", Loop(None), "writer", "write")
+        script = Script(["4", "the sea", "", "", "", "", "2", "1", "n", "n", ""])
+        console, specs, models = script.console(), [], {}
+        cli.addLive(console, swarm, specs, {}, {}, models)
+        self.assertEqual(script.answers, [], "The program did not ask all the questions of the script.")
+        self.assertEqual((swarm.getAgents(), [spec["name"] for spec in specs], list(models)), (["Leader", "A", "Writer"], ["Writer"], ["Writer"]))
+        self.assertIn("Which agents must Writer wait for?", script.text())
+        self.assertIn("Writer joined the swarm. Every agent was told.", script.text())
+        cli.runCommand(console, swarm, "remove A not needed anymore")
+        self.assertEqual(swarm.getAgents(), ["Leader", "Writer"])
+        self.assertEqual(swarm.removed[0]["reason"], "not needed anymore")
+        self.assertIn("Done: remove A.", script.text())
+        cli.runCommand(console, swarm, "remove Leader")
+        self.assertIn("The leader cannot be removed", script.text())
+        console.newAgent = None
+        cli.runCommand(console, swarm, "add")
+        self.assertIn("Agents cannot be added here.", script.text())

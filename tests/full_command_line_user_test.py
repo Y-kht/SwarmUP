@@ -1,11 +1,14 @@
 # A real-user test of SwarmUP in the command line. It asks guiding questions to build a swarm, and then runs it.
 # Run it with: python tests/full_command_line_user_test.py
 #
-# 1. How many agents, and the mission of the swarm.
-# 2. For every agent: its task (email, writing, coding, math checking, literature review...) and what it needs to work (credentials, files, outlets...).
-# 3. For every agent: the folder it works inside (optional).
-# 4. For every agent: its model, local on the GPUs (with the VRAM it needs, and a check of the GPUs) or paid through an API (with the prices).
-# 5. The tree of the swarm, which is updated live while the swarm plans or executes: who waits for whom, who talks to whom, what needs your approval.
+# 1. Who builds the swarm: you, agent by agent, or the leader (it proposes the agents, their tasks and their models, and you approve).
+# 2. How many agents, and the mission of the swarm.
+# 3. For every agent: its task (email, writing, coding, math checking, literature review...) and what it needs to work (credentials, files, outlets...).
+# 4. For every agent: the folder it works inside (optional).
+# 5. For every agent: its model, local on the GPUs (with the VRAM it needs, and a check of the GPUs) or paid through an API (with the prices).
+# 6. The tree of the swarm, which is updated live while the swarm plans or executes: who waits for whom, who talks to whom, what needs your approval.
+# When the leader builds the swarm, steps 2 to 5 are the mission, the folder of the mission and the model of the leader: the leader does the rest,
+# and while the swarm works it can propose to add or remove agents, which you approve or reject like its first proposal.
 # While the swarm runs you can type commands (type help): look at an agent, send it a message, approve, reject or correct it, or start it earlier.
 # The state of the swarm is saved all the time. If the connection is lost the swarm pauses and asks you to continue or cancel, and if the program
 # or the computer stops, the next start offers to continue the swarm where it was (or to cancel it, after a summary of what it did).
@@ -21,14 +24,17 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+# The modules of SwarmUP are in the folders of src/backend. Their names have hyphens, so they are not packages: each folder goes on the path.
+sys.path[:0] = [str(folder) for folder in sorted((Path(__file__).resolve().parent.parent / "src" / "backend").iterdir()) if folder.is_dir() and not folder.name.startswith(("_", "."))]
 from harness_utils import (FETCH_ERRORS, ConnectionLost, Loop, MessagingError, Swarm, checkEmailLogin, checkMessenger, checkVram, describeError, findPublishers,
                            findTelegramChats, findUnfinishedSwarms, getModelCost, nextOccurrence, readGpus)
-from model_clients import (ModelError, LocalModel, createModel, findMissingPackages, getApiKey, getHubFolder, isDownloaded, lookupHuggingFace)
-from models_library import (API_KEYS, MODELS_API, MODELS_LOCAL, RECOMMENDED_API, RECOMMENDED_LOCAL, getModelInfo, getProvider, isGated)
+from leader_utils import LeaderCatalog, LeaderManager, designSwarm
+from model_clients import (ModelError, CodexLogin, LocalModel, checkCodex, createModel, findMissingPackages, getApiKey, getHubFolder, isDownloaded, listCodexModels,
+                           lookupHuggingFace, readCodexAccount)
+from models_library import (API_KEYS, DEFAULT_CLI_MODEL, MODELS_API, MODELS_CLI, MODELS_LOCAL, RECOMMENDED_API, RECOMMENDED_LOCAL, getModelInfo, getProvider, isGated)
 from sources_library import ALL_NEWS_OUTLETS, MESSAGING_APPS, NEWS_OUTLETS, PAPER_PUBLISHERS
-from tasks_library import (ADVANCED_FIELDS, TASKS, answerKey, buildLoop, checkAgentName, describeLoop, getDefault, getHelp, isAsked, messengerSettings,
-                           parseAnswer, parseChoices, publicAnswers, restoreAnswers, secretFields, suggestFolder, suggestName)
+from tasks_library import (ADVANCED_FIELDS, DEFAULT_LOOPS, LEADER_TASK, TASKS, answerKey, buildLoop, checkAgentName, describeLoop, getDefault, getHelp, getTask, isAsked,
+                           messengerSettings, parseAnswer, parseChoices, publicAnswers, restoreAnswers, secretFields, suggestFolder, suggestName)
 
 LINE = "=" * 72
 SHOW_ALL, MANUAL, BACK = "Show all the models of the library", "Type the name of another model myself", "Go back"
@@ -43,6 +49,8 @@ COMMANDS = """Commands (type them at any time while the swarm runs):
   correct <agent> <text>  ask an agent to change its plan or its result
   msg <agent> <text>      send a message to an agent, it reads it with its next prompt
   start <agent>           start an agent that waits for a time of the day now
+  add                     add an agent to the swarm while it runs (every agent is told)
+  remove <agent> <why>    remove an agent from the swarm (it stops, its model frees its memory, every agent is told)
   quit                    leave the program (the agents are stopped)
 When the leader asks a question, type yes, no, the name of an agent to look at it alone, or what you want changed."""
 
@@ -65,6 +73,8 @@ class Console:
         self.pumping = False
         self.closed = False
         self.commands = None
+        # Adds an agent to the swarm while it runs (the command add), set by the program that knows the keys and the models.
+        self.newAgent = None
 
     def say(self, text=""):
         with self.output:
@@ -179,6 +189,8 @@ def chooseFrom(console, title, labels, one=True, extra=None, default=None, hint=
 def describeModel(info):
     if not info:
         return "no model"
+    if info.get("cli"):
+        return f"{MODELS_CLI[info['cli']]['label']}, {'its default model' if info['name'] == DEFAULT_CLI_MODEL else info['name']}"
     return f"{info['name']}, local, {info['vram']} GB" if info["local"] else f"{info['name']}, API"
 
 
@@ -239,6 +251,14 @@ def formatEvent(event):
         return f"[{when}] The swarm goes on"
     if kind == "stopped":
         return "== The swarm was stopped by you =="
+    if kind == "joined":
+        return f"[{when}] {agent} joined the swarm (every agent was told)"
+    if kind == "removed":
+        return f"[{when}] {agent} left the swarm. Why: {(event.get('reason') or 'not given').rstrip('.')}. Every agent was told."
+    if kind == "retired":
+        return f"[{when}] {agent} is gone: what it left half done was put back, and its model freed its memory"
+    if kind == "model":
+        return f"[{when}] {agent} now uses {event['model']}"
     return None
 
 
@@ -326,9 +346,15 @@ def runCommand(console, swarm, line):
     word = words[0].lower()
     actions = {"approve": lambda name, text: swarm.approveDraft(name), "reject": lambda name, text: swarm.rejectDraft(name),
                "correct": lambda name, text: swarm.correctDraft(name, text), "msg": lambda name, text: swarm.sendUserMessage(name, text),
-               "start": lambda name, text: swarm.startNow(name)}
+               "start": lambda name, text: swarm.startNow(name), "remove": lambda name, text: swarm.removeAgent(name, text or "The user removed it.")}
     if word in ("help", "?"):
         console.say(COMMANDS)
+    elif word == "add":
+        # The questions of a new agent are asked while the swarm runs, so they run in their own thread (this one reads what the user types).
+        if console.newAgent:
+            threading.Thread(target=console.newAgent, args=(swarm,), daemon=True).start()
+        else:
+            console.say("Agents cannot be added here.")
     elif word == "tree":
         console.say(renderTree(swarm, console.color))
     elif word == "log":
@@ -580,7 +606,7 @@ def fillTask(console, key, taken):
 # The folder of each agent: where it saves what it makes, and where the files it works on must be.
 # ==============
 def askFolder(console, spec, number, total):
-    task = TASKS[spec["task"]]
+    task = getTask(spec["task"])
     suggestion = suggestFolder(spec["answers"])
     console.say(f"\n--- Folder of agent {number} of {total}: {spec['name']} ({task['role']}) ---\n{describeAgent(spec)}\n{task['folder']}")
     def parse(text):
@@ -656,7 +682,7 @@ def askManualLocal(console):
 
 
 def chooseLocalModel(console, swarm, task, replacing=None):
-    recommended = RECOMMENDED_LOCAL[TASKS[task]["recommend"]]
+    recommended = RECOMMENDED_LOCAL[getTask(task)["recommend"]]
     while True:
         labels = [labelLocal(swarm, name, replacing) for name in recommended] + [SHOW_ALL, MANUAL]
         console.say("\nThe number in parentheses is the VRAM, in GB, that the model is expected to need.")
@@ -688,7 +714,7 @@ def chooseLocalModel(console, swarm, task, replacing=None):
 
 
 def chooseApiModel(console, swarm, task):
-    recommended = RECOMMENDED_API[TASKS[task]["recommend"]]
+    recommended = RECOMMENDED_API[getTask(task)["recommend"]]
     while True:
         labels = [f"{name} ({API_KEYS[getProvider(name)]['company']})" for name in recommended] + [SHOW_ALL, MANUAL]
         def showPrices(text):
@@ -732,12 +758,62 @@ def chooseKind(console, swarm, number, replacing=None):
     local = f"Local: runs on your GPUs ({status['total']} GB of VRAM, {status['free']} GB free now). Free to use and private, but the model must fit in the VRAM." if status["gpus"] \
         else "Local: runs on your GPUs. No supported GPU was found on this computer, so it is not possible."
     api = "API: runs on the servers of a company (OpenAI, Anthropic, Google, DeepSeek). You pay for every use, and you need an API key."
+    cli = ("Coding agent: Claude Code (with your Anthropic API key) or Codex (with your ChatGPT plan), on this computer. It can also read files and run "
+           "commands, each time with your approval.")
     while True:
-        console.say(f"\nWhere must the model of agent {number} run?\n  {local}\n  {api}")
-        kind = chooseFrom(console, "", ["Local (on my GPUs)", "API (paid)"], hint="Your choice (1 or 2):")
-        if kind.startswith("API") or status["gpus"]:
-            return kind.startswith("Local")
+        console.say(f"\nWhere must the model of agent {number} run?\n  {local}\n  {api}\n  {cli}")
+        kind = chooseFrom(console, "", ["Local (on my GPUs)", "API (paid)", "Coding agent (Claude Code or Codex)"], hint="Your choice (1, 2 or 3):")
+        if not kind.startswith("Local") or status["gpus"]:
+            return "local" if kind.startswith("Local") else "api" if kind.startswith("API") else "cli"
         console.say(status["message"] or "No supported GPU was found, so local models cannot run. Choose API models.")
+
+
+# Codex uses the ChatGPT plan of the user: if it is not signed in, the user signs in on the page of OpenAI (in the browser, or with a code).
+# It returns True when Codex is ready.
+def signInCodex(console):
+    status = checkCodex()
+    if status["problem"]:
+        console.say(status["problem"])
+        return False
+    account = readCodexAccount()
+    while not account["signedIn"]:
+        options = ["Sign in with ChatGPT in the browser", "Sign in with a code (when the browser cannot come back to this computer)", BACK]
+        picked = chooseFrom(console, "\nCodex is not signed in. It uses your ChatGPT plan: you sign in on the page of OpenAI, and Codex keeps the sign-in.", options)
+        if picked == BACK:
+            return False
+        login = CodexLogin()
+        target = login.start("code" if picked == options[1] else "browser")
+        if target["code"]:
+            console.say(f"Open {target['url']}, sign in with your ChatGPT account, and type this code: {target['code']}")
+        else:
+            console.say(f"Open this page in your browser and sign in with your ChatGPT account:\n{target['url']}")
+        console.say("Waiting for the sign-in (up to 15 minutes)...")
+        problem = login.wait(timeout=900)
+        if problem:
+            console.say(f"The sign-in did not work: {problem}")
+        account = readCodexAccount()
+    console.say(f"Codex is signed in{' as ' + account['email'] if account.get('email') else ''}.")
+    return True
+
+
+def chooseCodingAgent(console):
+    while True:
+        labels = [f"{agent['label']} ({'your Anthropic API key' if agent['provider'] else 'your ChatGPT plan'})" for agent in MODELS_CLI.values()] + [BACK]
+        picked = chooseFrom(console, "\nWhich coding agent? (Anthropic does not allow other programs to use a Claude subscription, so Claude Code is used with an API key.)", labels)
+        if picked == BACK:
+            return None
+        cli = list(MODELS_CLI)[labels.index(picked)]
+        if cli == "codex":
+            if not signInCodex(console):
+                continue
+            models = [DEFAULT_CLI_MODEL] + [model["id"] for model in listCodexModels()]
+        else:
+            models = MODELS_CLI[cli]["models"]
+        shown = [f"Let {MODELS_CLI[cli]['label']} choose" if name == DEFAULT_CLI_MODEL else name for name in models]
+        name = chooseFrom(console, f"\nWhich model must {MODELS_CLI[cli]['label']} use?", shown + [BACK])
+        if name == BACK:
+            continue
+        return getModelInfo(models[shown.index(name)], cli=cli)
 
 
 def prepareLocal(console, info, tokens):
@@ -793,17 +869,27 @@ def testConnection(console, model):
 def chooseModel(console, swarm, spec, number, total, keys, tokens, replacing=None):
     task = spec["task"]
     status = checkVram(swarm.getNeededVram(replacing), readGpus())
-    console.say(f"\n--- Model of agent {number} of {total}: {spec['name']} ({TASKS[task]['role']}) ---\n{describeAgent(spec)}")
-    if number == 1:
+    console.say(f"\n--- Model of agent {number} of {total}: {spec['name']} ({getTask(task)['role']}) ---\n{describeAgent(spec)}")
+    if task == "leader":
+        console.say("This leader builds the swarm, follows it, and proposes changes to you: it must plan well and follow a strict format, so a capable model is worth it.")
+    elif number == 1:
         console.say("This agent is the leader: besides its own task, its model writes the summaries you approve and decides which agents your corrections concern. "
                     "A capable model is worth it here.")
     if status["needed"]:
         console.say(f"VRAM of the swarm so far: {status['needed']} GB of {status['total']} GB ({status['free']} GB free now).")
     while True:
-        local = chooseKind(console, swarm, number, replacing)
-        info = chooseLocalModel(console, swarm, task, replacing) if local else chooseApiModel(console, swarm, task)
+        kind = chooseKind(console, swarm, number, replacing)
+        info = chooseLocalModel(console, swarm, task, replacing) if kind == "local" else chooseApiModel(console, swarm, task) if kind == "api" else chooseCodingAgent(console)
         if info is None:
             continue
+        if info.get("cli"):
+            console.say(f"\nYou chose {describeModel(info)}. It reads the files of its folder freely, and asks you before anything else (a command, a change of a "
+                        "file, a web page, a file outside its folder).")
+            if info["cli"] == "claude-code":
+                prepareApi(console, info, keys, price=False)
+            else:
+                waitForPackages(console, info)
+            return info, createModel(info, keys, report=console.say)
         check = swarm.checkModel(info, replacing)
         if info["local"]:
             console.say(f"\nYou chose {info['name']}: it is expected to need {info['vram']} GB of VRAM.\n" + describeGpus(checkVram(check["needed"], readGpus())))
@@ -836,12 +922,110 @@ def connect(loop, console):
     loop.askLogin = lambda host: console.say(f"{host} asks for an account. Add it in the setup of the literature reviewer next time. Skipping it.")
 
 
-def buildAgent(console, swarm, spec, info, model):
+def buildAgent(console, swarm, spec, info, model, waitsFor=()):
     loop = buildLoop(spec["task"], model, spec["answers"])
     connect(loop, console)
     recipe = {"task": spec["task"], "answers": publicAnswers(spec["task"], spec["answers"])}
-    swarm.addAgent(spec["name"], loop, TASKS[spec["task"]]["role"], describeLoop(loop), model=info, recipe=recipe)
+    swarm.addAgent(spec["name"], loop, getTask(spec["task"])["role"], describeLoop(loop), waitsFor=waitsFor, model=info, recipe=recipe)
     return loop
+
+
+# An agent that joins the swarm while it runs (the command add): its task, its folder, its model, and the agents it waits for (in execute mode).
+# Every agent of the swarm is told. If it cannot join (the leader already started its final work), its model is let go.
+def addLive(console, swarm, specs, keys, tokens, models):
+    number = len(swarm.getAgents()) + 1
+    spec = fillTask(console, chooseTask(console, number, number), swarm.getAgents())
+    spec["answers"]["folder"] = askFolder(console, spec, number, number)
+    info, model = chooseModel(console, swarm, spec, number, number, keys, tokens)
+    others = [name for name in swarm.getAgents() if name != swarm.getLeader()]
+    waits = []
+    if swarm.getMode() == "execute" and others:
+        waits = chooseFrom(console, f"\nWhich agents must {spec['name']} wait for? It receives their results.", others, one=False, none=True, default=[],
+                           hint="Your choices (numbers like 1,3; Enter or none = nobody):")
+    try:
+        buildAgent(console, swarm, spec, info, model, waits)
+    except ValueError as error:
+        console.say(f"{spec['name']} cannot join: {error}")
+        if hasattr(model, "unload"):
+            model.unload()
+        return
+    specs.append(spec)
+    models[spec["name"]] = model
+    console.say(f"{spec['name']} joined the swarm. Every agent was told.")
+
+
+# ==============
+# The leader builds the swarm (leader_utils.py): the user gives the mission, the folder of the mission and the model of the leader, and approves
+# the swarm the leader proposes. While the swarm runs, the leader can propose to add or remove agents, with a reason: the user approves each change.
+# ==============
+def chooseBuilder(console):
+    console.say("You can build the swarm yourself, agent by agent. Or a leader agent builds it: you choose its model and the folder of the mission, it proposes "
+                "the agents, their tasks and their models, and you approve. While the swarm works, it can also propose to add or remove agents, always with a "
+                "reason, and nothing changes before you approve.")
+    options = ["I build the swarm myself", "The leader builds the swarm (I approve its proposal)"]
+    return "leader" if chooseFrom(console, "Who builds the swarm?", options) == options[1] else "manual"
+
+
+# What the manager of the leader needs to make an agent here (see LeaderManager): the loops of the agents it adds, or of an agent with another model.
+class ConsoleMaker:
+    def __init__(self, console, specs, keys, tokens, models):
+        self.console, self.specs, self.keys, self.tokens, self.models = console, specs, keys, tokens, models
+
+    def makeLoop(self, agent):
+        model = createModel(agent["model"], self.keys, token=self.tokens.get(agent["model"]["name"]), report=self.console.say)
+        loop = buildLoop(agent["task"], model, agent["answers"])
+        connect(loop, self.console)
+        return loop
+
+    def joined(self, agent, loop):
+        self.specs.append({"task": agent["task"], "name": agent["name"], "answers": agent["answers"]})
+        self.models[agent["name"]] = loop.agent
+
+    def remakeLoop(self, name, model):
+        spec = next((spec for spec in self.specs if spec["name"] == name), None)
+        if spec is None:
+            raise ValueError(f"{name} cannot be made again here.")
+        return self.makeLoop({"name": name, "task": spec["task"], "answers": spec["answers"], "model": model})
+
+    def remade(self, name, model, loop):
+        self.models[name] = loop.agent
+
+
+# It returns the swarm the leader built and the user approved (the leader is its first agent), or None.
+def buildWithLeader(console, mission, specs, keys, tokens, models):
+    heading(console, "Step 1: the leader and the folder of the mission")
+    console.say(LEADER_TASK["info"])
+    folder = askUntilValid(console, "Folder of the mission (the agents work in it, and the final report is saved in it):",
+                           lambda text: parseAnswer({"key": "folder", "ask": "", "kind": "folder", "required": True}, text))
+    leader = {"task": "leader", "name": LEADER_TASK["name"], "answers": {"mission": mission, "folder": folder, "numberOfLoops": DEFAULT_LOOPS}}
+    info, model = chooseModel(console, Swarm(mission), leader, 1, 1, keys, tokens)
+    models[leader["name"]] = model
+    loop = buildLoop("leader", model, leader["answers"])
+    connect(loop, console)
+    loop.name = leader["name"]
+    catalog = LeaderCatalog(mission, folder, leader["name"], info, keys, tokens)
+    heading(console, "Step 2: the leader builds the swarm")
+    console.say(f"{leader['name']} is building the swarm for your mission. It shows you its proposal, and nothing is made before you approve it.")
+    try:
+        agents = designSwarm(loop, catalog)
+    except (ValueError, ModelError) as error:
+        console.say(str(error))
+        return None
+    if agents is None:
+        console.say("You rejected the swarm of the leader.")
+        return None
+    swarm = Swarm(mission)
+    buildAgent(console, swarm, leader, info, model)
+    specs.append(leader)
+    for agent in agents:
+        spec = {"task": agent["task"], "name": agent["name"], "answers": agent["answers"]}
+        models[spec["name"]] = createModel(agent["model"], keys, token=tokens.get(agent["model"]["name"]), report=console.say)
+        buildAgent(console, swarm, spec, agent["model"], models[spec["name"]])
+        specs.append(spec)
+    for agent in agents:
+        swarm.setWaitsFor(agent["name"], agent["waitsFor"])
+    LeaderManager(swarm, catalog, ConsoleMaker(console, specs, keys, tokens, models))
+    return swarm
 
 
 def chooseOrder(console, swarm):
@@ -954,7 +1138,7 @@ def changeModel(console, swarm, specs, models, keys, tokens):
         console.say(str(error))
         return
     old = models.get(name)
-    if isinstance(old, LocalModel):
+    if hasattr(old, "unload"):
         old.unload()
     models[name] = model
 
@@ -965,7 +1149,7 @@ def changeModel(console, swarm, specs, models, keys, tokens):
 # ==============
 def unloadModels(models):
     for model in models.values():
-        if isinstance(model, LocalModel):
+        if hasattr(model, "unload"):
             model.unload()
 
 
@@ -977,6 +1161,10 @@ def describeInterrupted(saved):
 
 # The model of an agent of a swarm that is brought back. The API keys and the Hugging Face tokens are never saved, so they are asked again.
 def rebuildModel(console, info, keys, tokens):
+    if info.get("cli") == "codex":
+        if not signInCodex(console):
+            raise ModelError("Codex is not signed in, so this agent cannot continue.")
+        return createModel(info, keys, report=console.say)
     if info["local"]:
         prepareLocal(console, info, tokens)
         return createModel(info, token=tokens.get(info["name"]), report=console.say)
@@ -984,33 +1172,41 @@ def rebuildModel(console, info, keys, tokens):
     return createModel(info, keys)
 
 
-def rebuildAgent(console, name, data, keys, tokens, models):
+def rebuildAgent(console, name, data, keys, tokens, models, specs=None):
     recipe = data["recipe"]
     task, secrets = recipe["task"], {}
-    console.say(f"\n--- {name} ({TASKS[task]['role']}) ---")
+    console.say(f"\n--- {name} ({getTask(task)['role']}) ---")
     for field in secretFields(task, recipe["answers"]):
         secrets[field["key"]] = askField(console, field, recipe["answers"])
     if task == "literature":
         secrets["accounts"] = askAccounts(console)
     models[name] = rebuildModel(console, data["model"], keys, tokens) if data["model"] else None
-    loop = buildLoop(task, models[name], restoreAnswers(task, recipe["answers"], secrets))
+    answers = restoreAnswers(task, recipe["answers"], secrets)
+    loop = buildLoop(task, models[name], answers)
     connect(loop, console)
+    if specs is not None:
+        specs.append({"task": task, "name": name, "answers": answers})
     return loop
 
 
 def resumeSaved(console, saved):
-    keys, tokens, models = {}, {}, {}
+    keys, tokens, models, specs = {}, {}, {}, []
     if not all(member.get("recipe") for member in saved["members"].values()):
         console.say("This swarm was made by another program, so it cannot be continued here.")
         return False
     heading(console, "Continuing your swarm")
     try:
-        swarm = Swarm.restore(saved, lambda name, data: rebuildAgent(console, name, data, keys, tokens, models))
+        swarm = Swarm.restore(saved, lambda name, data: rebuildAgent(console, name, data, keys, tokens, models, specs))
     except (ValueError, ModelError) as error:
         console.say(f"The swarm cannot be continued yet: {error} It stays saved, so you can try again.")
         unloadModels(models)
         return False
     console.say("\n" + renderTree(swarm, console.color))
+    leader = saved["members"][saved["leader"]]
+    if saved.get("managed") and leader["recipe"]["task"] == "leader":
+        catalog = LeaderCatalog(saved["mission"], leader["recipe"]["answers"].get("folder"), saved["leader"], leader["model"], keys, tokens)
+        LeaderManager(swarm, catalog, ConsoleMaker(console, specs, keys, tokens, models))
+    console.newAgent = lambda swarm: addLive(console, swarm, specs, keys, tokens, models)
     startSwarm(console, swarm, swarm.getMode(), models, resume=True)
     unloadModels(models)
     return True
@@ -1020,7 +1216,13 @@ def resumeSaved(console, saved):
 def makeLeaderModel(console, info, keys, tokens):
     if not info:
         return None
-    if not info["local"] and not (keys.get(info["provider"]) or getApiKey(info["provider"])):
+    if info.get("cli") == "codex":
+        try:
+            if not readCodexAccount()["signedIn"]:
+                return None
+        except ModelError:
+            return None
+    if not info["local"] and info["provider"] and not (keys.get(info["provider"]) or getApiKey(info["provider"])):
         console.say(f"The leader writes the summary with {info['name']}, which needs its API key again. Press Enter to skip it and get a plain list instead.")
         key = askUntilValid(console, f"Your {API_KEYS[info['provider']]['company']} API key (hidden, Enter to skip):", lambda text: (text.strip(), ""), secret=True)
         if not key:
@@ -1080,21 +1282,30 @@ def runProgram(console):
     if offerUnfinished(console):
         console.say("\nBye.")
         return
-    count = askAgentCount(console)
-    swarm, specs, keys, tokens, models = Swarm(askMission(console)), [], {}, {}, {}
-    heading(console, "Step 1: the task of each agent")
-    for number in range(1, count + 1):
-        specs.append(fillTask(console, chooseTask(console, number, count), [spec["name"] for spec in specs]))
-    heading(console, "Step 2: the folder of each agent")
-    chooseFolders(console, specs)
-    heading(console, "Step 3: the model of each agent")
-    for number, spec in enumerate(specs, 1):
-        info, model = chooseModel(console, swarm, spec, number, count, keys, tokens)
-        buildAgent(console, swarm, spec, info, model)
-        models[spec["name"]] = model
-        status = swarm.getVramStatus()
-        if status["needed"]:
-            console.say(f"\nVRAM the swarm is expected to need so far: {status['needed']} GB of {status['total']} GB ({status['free']} GB free now)." + (f"\n{status['message']}" if status["message"] else ""))
+    specs, keys, tokens, models = [], {}, {}, {}
+    if chooseBuilder(console) == "leader":
+        swarm = buildWithLeader(console, askMission(console), specs, keys, tokens, models)
+        if swarm is None:
+            unloadModels(models)
+            console.say("\nBye.")
+            return
+    else:
+        count = askAgentCount(console)
+        swarm = Swarm(askMission(console))
+        heading(console, "Step 1: the task of each agent")
+        for number in range(1, count + 1):
+            specs.append(fillTask(console, chooseTask(console, number, count), [spec["name"] for spec in specs]))
+        heading(console, "Step 2: the folder of each agent")
+        chooseFolders(console, specs)
+        heading(console, "Step 3: the model of each agent")
+        for number, spec in enumerate(specs, 1):
+            info, model = chooseModel(console, swarm, spec, number, count, keys, tokens)
+            buildAgent(console, swarm, spec, info, model)
+            models[spec["name"]] = model
+            status = swarm.getVramStatus()
+            if status["needed"]:
+                console.say(f"\nVRAM the swarm is expected to need so far: {status['needed']} GB of {status['total']} GB ({status['free']} GB free now)." + (f"\n{status['message']}" if status["message"] else ""))
+    console.newAgent = lambda swarm: addLive(console, swarm, specs, keys, tokens, models)
     heading(console, "Your swarm")
     console.say(f"The first agent, {swarm.getLeader()}, is the leader: it works last, and it speaks to you for the swarm.\n\n" + renderTree(swarm, console.color))
     mode = chooseMode(console)

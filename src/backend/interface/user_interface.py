@@ -1,10 +1,12 @@
-# The graphical interface of SwarmUP. Run it with: python src/user_interface.py
+# The graphical interface of SwarmUP. Run it with: python src/backend/interface/user_interface.py
 # It is a small web server that only listens to this computer (127.0.0.1) and opens the interface in the web browser, so it works the same
 # on Windows, macOS and Linux, with nothing to install. The pages are in the folder user-interface (index.html, style.css, icons.js, app.js).
 # The interface follows the steps of tests/full_command_line_user_test.py with clicks, from the same functions of tasks_library.py,
 # models_library.py and harness_utils.py: the mission, the task of each agent, its folder, its model, who waits for whom, and the run of
-# the swarm, which is followed live. The agents speak to the user through the Session (notify, ask and askSecret), and the browser asks
-# the Session for news (poll). Passwords, API keys and tokens are only kept in memory, and they are never sent back to the browser.
+# the swarm, which is followed live. The user can also let the leader build the swarm (leader_utils.py): the user chooses the model of the
+# leader and the folder of the mission, the leader proposes the agents, and the user approves. The agents speak to the user through the
+# Session (notify, ask and askSecret), and the browser asks the Session for news (poll). Passwords, API keys and tokens are only kept in memory,
+# and they are never sent back to the browser.
 import argparse
 import hmac
 import json
@@ -25,15 +27,21 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+# The modules of SwarmUP are in the folders of src/backend. Their names have hyphens, so they are not packages: each folder goes on the path.
+sys.path[:0] = [str(folder) for folder in sorted(Path(__file__).resolve().parents[1].iterdir()) if folder.is_dir() and not folder.name.startswith(("_", "."))]
 from harness_utils import (FETCH_ERRORS, USER_NAME, ConnectionLost, Loop, MessagingError, Swarm, checkEmailLogin, checkMessenger, checkVram, describeError,
                            findPublishers, findTelegramChats, findUnfinishedSwarms, getModelCost, nextOccurrence, readGpus)
-from model_clients import ModelError, LocalModel, createModel, findMissingPackages, getApiKey, getHubFolder, isDownloaded, lookupHuggingFace
-from models_library import API_KEYS, BITS, MODELS_API, MODELS_LOCAL, PRICING_PAGES, RECOMMENDED_API, RECOMMENDED_LOCAL, getModelInfo, isGated
+from leader_utils import LeaderCatalog, LeaderManager, designSwarm
+from model_clients import (ModelError, CodexLogin, checkCodex, createModel, findMissingPackages, getApiKey, getHubFolder, isDownloaded, listCodexModels,
+                           lookupHuggingFace, readCodexAccount)
+from models_library import (API_KEYS, BITS, DEFAULT_CLI_MODEL, MODELS_API, MODELS_CLI, MODELS_LOCAL, PRICING_PAGES, RECOMMENDED_API, RECOMMENDED_LOCAL, getModelInfo,
+                            isGated)
 from sources_library import MESSAGING_APPS, NEWS_OUTLETS, PAPER_PUBLISHERS
-from tasks_library import (ADVANCED_FIELDS, DEFAULT_LOOPS, NO_MESSENGER, TASKS, answerKey, buildLoop, checkAgentName, describeLoop, getDefault, getFields, getHelp,
-                           isAsked, messengerSettings, parseAnswer, publicAnswers, restoreAnswers, secretFields, suggestFolder, suggestName)
+from tasks_library import (ADVANCED_FIELDS, DEFAULT_LOOPS, LEADER_TASK, NO_MESSENGER, TASKS, answerKey, buildLoop, checkAgentName, describeLoop, getDefault, getFields,
+                           getHelp, getTask, isAsked, messengerSettings, parseAnswer, publicAnswers, readAnswers, restoreAnswers, secretFields, suggestFolder, suggestName)
 
-INTERFACE_FOLDER = Path(__file__).resolve().parent / "user-interface"
+# The pages of the window: src/user-interface.
+INTERFACE_FOLDER = Path(__file__).resolve().parents[2] / "user-interface"
 ASSETS = {"style.css": "text/css; charset=utf-8", "icons.js": "text/javascript; charset=utf-8", "app.js": "text/javascript; charset=utf-8",
           "logo.svg": "image/svg+xml"}
 HOST = "127.0.0.1"
@@ -61,7 +69,8 @@ USER_ERRORS = (ValueError, ModelError, MessagingError, ConnectionLost)
 # The actions that change what the user built run one at a time. The others only read, ask the internet, wait for a dialog of the system,
 # or answer the swarm, so they never wait behind a slow one.
 FREE_ACTIONS = ("checkEmail", "checkMessenger", "findChats", "searchPublishers", "browse", "pickPath", "lookupModel", "price", "testModel", "modelCatalog", "answer",
-                "approve", "reject", "correct", "message", "startNow", "openLink", "openFolder", "refreshUnfinished", "quit", "taskForm")
+                "approve", "reject", "correct", "message", "startNow", "openLink", "openFolder", "refreshUnfinished", "quit", "taskForm",
+                "codexAccount")
 
 
 # An answer of a form that is not right. errors is {key of the field: what is wrong}, shown under each field.
@@ -77,14 +86,35 @@ class FormError(ValueError):
 def describeModel(info):
     if not info:
         return None
+    cli = info.get("cli")
+    if cli:
+        agent = MODELS_CLI[cli]
+        model = "its default model" if info["name"] == DEFAULT_CLI_MODEL else info["name"]
+        return {**info, "cli": cli, "company": agent["company"], "gated": False, "label": f"{agent['label']} · {model}"}
     company = API_KEYS[info["provider"]]["company"] if info["provider"] else ""
     label = f"{info['name']} · {info['vram']} GB of VRAM" if info["local"] else f"{info['name']} · {company}"
-    return {**info, "company": company, "gated": isGated(info["name"]) if info["local"] else False, "label": label}
+    return {**info, "cli": None, "company": company, "gated": isGated(info["name"]) if info["local"] else False, "label": label}
+
+
+# Whether a model can be made without asking anything more: a local model, Codex (signed in through Codex), or a model with its API key.
+def hasCredentials(info, keys):
+    return bool(info["local"] or info.get("cli") == "codex" or keys.get(info["provider"]) or getApiKey(info["provider"]))
 
 
 # What kind of question the agents ask, and the buttons that answer it. The text box stays for every question that takes words.
-def describeQuestion(text, secret=False):
+# A coding agent asks for a permission (kind permission) or asks its own questions (kind form): those are answered with buttons and choices.
+PERMISSION_REPLIES = [{"label": "Allow once", "value": "once", "style": "primary"}, {"label": "Allow until the next run", "value": "run", "style": "ghost"},
+                      {"label": "Deny", "value": "deny", "style": "danger"}]
+
+
+def describeQuestion(text, secret=False, kind=None):
     low = text.strip().lower()
+    if kind == "permission":
+        return "permission", PERMISSION_REPLIES
+    if kind == "proposal":
+        return "proposal", []
+    if kind == "form":
+        return "form", []
     if secret:
         return "secret", []
     if "type continue to try again" in low:
@@ -101,6 +131,24 @@ def describeQuestion(text, secret=False):
     if low.startswith("username for"):
         return "text", [{"label": "Skip, I have no account", "value": "", "style": "ghost"}]
     return "text", []
+
+
+# What the user answered, as the conversation shows it. A secret is never shown.
+def describeAnswer(question, answer):
+    if question["kind"] == "permission" and isinstance(answer, dict):
+        detail = (question["payload"] or {}).get("detail", "")
+        words = {"once": "Allowed once", "run": "Allowed until the next run", "deny": "Denied"}.get(answer.get("decision"), "Denied")
+        return f"{words}: {detail}" + (f"\nWhy: {answer['message']}" if answer.get("message") else "")
+    if question["kind"] == "proposal" and isinstance(answer, dict):
+        approved = answer.get("decision") == "approve"
+        what = "the swarm of the leader" if (question["payload"] or {}).get("action") == "build" else (question["payload"] or {}).get("text", "the proposal")
+        return f"{'Approved' if approved else 'Rejected'}: {what}" + (f"\nWhat to change: {answer['message']}" if answer.get("message") else "")
+    if question["kind"] == "form" and isinstance(answer, dict):
+        secret = {item["id"] for item in question["payload"] or [] if item.get("secret")}
+        return "\n".join(f"{key}: {'••••••' if key in secret else ', '.join(values)}" for key, values in answer.items()) or "(no answer)"
+    if question["secret"] and answer:
+        return "••••••"
+    return str(answer) if answer else "(no answer)"
 
 
 def formatEvent(event):
@@ -125,6 +173,14 @@ def formatEvent(event):
         return "The connection is back: the swarm goes on.", "success"
     if kind == "stopped":
         return "The swarm was stopped.", "warning"
+    if kind == "joined":
+        return f"{agent} joined the swarm ({event.get('role', '')}). Every agent was told.", "success"
+    if kind == "removed":
+        return f"{agent} left the swarm. Why: {(event.get('reason') or 'not given').rstrip('.')}. Every agent was told.", "warning"
+    if kind == "retired":
+        return f"{agent} is gone: what it left half done was put back, and its model freed its memory.", "info"
+    if kind == "model":
+        return f"{agent} now uses {event.get('model')}.", "info"
     return None, None
 
 
@@ -221,7 +277,11 @@ def catalog():
     providers = {key: {**details, "models": MODELS_API[key], "pricing": PRICING_PAGES.get(key, "")} for key, details in API_KEYS.items()}
     return {"tasks": tasks, "providers": providers, "families": list(MODELS_LOCAL), "bits": list(BITS), "outlets": {group: list(names) for group, names in NEWS_OUTLETS.items()},
             "publishers": PAPER_PUBLISHERS, "messaging": {app: details["info"] for app, details in MESSAGING_APPS.items()}, "noMessenger": NO_MESSENGER,
-            "defaultLoops": DEFAULT_LOOPS, "platform": {"os": sys.platform, "separator": os.sep, "home": str(Path.home())}, "user": USER_NAME}
+            "defaultLoops": DEFAULT_LOOPS, "platform": {"os": sys.platform, "separator": os.sep, "home": str(Path.home())}, "user": USER_NAME,
+            "codingAgents": {key: {"label": agent["label"], "company": agent["company"], "page": agent["page"], "models": agent["models"], "provider": agent["provider"]}
+                             for key, agent in MODELS_CLI.items()}, "defaultCliModel": DEFAULT_CLI_MODEL,
+            "leaderTask": {"key": "leader", "label": LEADER_TASK["label"], "role": LEADER_TASK["role"], "info": LEADER_TASK["info"], "folder": LEADER_TASK["folder"],
+                           "name": LEADER_TASK["name"]}}
 
 
 # ==============
@@ -251,16 +311,19 @@ class Session:
         self.cancelling = None
         self.closing = False
         self.dialog = None
+        self.codexLogin = None
         self.reset()
         self.refreshUnfinished()
         self.actions = {name: getattr(self, name) for name in (
             "setMission", "taskForm", "saveAgent", "removeAgent", "undoRemove", "moveAgent", "checkEmail", "checkMessenger", "findChats", "searchPublishers",
             "browse", "pickPath", "setFolder", "openFolder", "modelCatalog", "lookupModel", "price", "chooseModel", "testModel", "checkPackages", "setOrder", "planOrder",
             "setMode", "start", "execute", "answer", "approve", "reject", "correct", "message", "startNow", "prepareStop", "stop", "clearJob", "newSwarm",
-            "resumeForm", "resume", "prepareCancel", "abandon", "refreshUnfinished", "openLink", "quit")}
+            "resumeForm", "resume", "prepareCancel", "abandon", "refreshUnfinished", "openLink", "codexAccount", "codexSignIn", "codexCancel", "joinLive",
+            "removeLive", "setBuildMode", "buildWithLeader", "quit")}
 
     def reset(self):
         self.mission = ""
+        self.buildMode = "manual"
         self.specs = []
         self.swarm = None
         self.dirty = True
@@ -293,17 +356,21 @@ class Session:
             del self.context[speaker][:-CONTEXT_LIMIT]
             self.addFeed(speaker, text, tone)
 
-    def ask(self, name, text, secret=False):
-        kind, replies = describeQuestion(text, secret)
+    # payload is what a coding agent asks: the permission it wants (kind permission), or its questions (kind form). The answer is then a dictionary.
+    def ask(self, name, text, secret=False, kind=None, payload=None):
+        kind, replies = describeQuestion(text, secret, kind)
         shown = self.readyRevisions() if kind == "review" else {}
         if kind == "review" and not shown:
             return "yes"
         event = threading.Event()
+        # Once the swarm is stopped, a coding agent may still finish its turn and ask again: it is refused at once, so the swarm can end.
+        if self.swarm is not None and self.swarm.stopped and self.swarm.isRunning():
+            return ""
         with self.lock:
             if self.closing:
                 return ""
             self.questionNumber += 1
-            question = {"id": self.questionNumber, "speaker": name, "text": str(text), "secret": secret, "kind": kind, "replies": replies,
+            question = {"id": self.questionNumber, "speaker": name, "text": str(text), "secret": secret, "kind": kind, "replies": replies, "payload": payload,
                         "context": self.context.pop(name, []), "shown": shown, "event": event, "answer": "", "time": f"{datetime.now():%H:%M:%S}"}
             self.questions[question["id"]] = question
             self.touch()
@@ -315,6 +382,10 @@ class Session:
         loop.notifyUser = lambda message: self.notify(name, message)
         loop.askUser = lambda question: self.ask(name, question)
         loop.askSecret = lambda question: self.ask(name, question, secret=True)
+        loop.askPermission = lambda request: self.ask(name, f"{name} wants to {request['action']}.", kind="permission", payload=request)
+        loop.askQuestions = lambda questions: self.ask(name, f"{name} has {'a question' if len(questions) == 1 else 'questions'} for you.", kind="form", payload=questions)
+        loop.askProposal = lambda proposal: self.ask(name, f"{name} proposes a swarm for your mission." if proposal["action"] == "build" else f"{name} proposes: {proposal['text']}.",
+                                                     kind="proposal", payload=proposal)
 
     def readyRevisions(self):
         swarm = self.swarm
@@ -325,7 +396,7 @@ class Session:
     def release(self, question, answer, shown=True):
         question["answer"] = answer
         if shown:
-            self.addFeed(USER_NAME, "••••••" if question["secret"] and answer else answer or "(no answer)", "info", "answer")
+            self.addFeed(USER_NAME, describeAnswer(question, answer), "info", "answer")
         question["event"].set()
 
     # A summary waits for an answer about drafts that the user already decided one by one. Nothing is left for it to decide, so it is
@@ -345,6 +416,10 @@ class Session:
             self.touch()
 
     def onEvent(self, event):
+        if event["kind"] == "removed":
+            self.dropSpec(event["agent"])
+        if event["kind"] == "finished":
+            self.dropProposals()
         text, tone = formatEvent(event)
         if event["kind"] == "message":
             self.addFeed(event["sender"], event["message"], "info", "message" if event["sender"] != USER_NAME else "answer", event["receiver"])
@@ -353,6 +428,13 @@ class Session:
         if event["kind"] == "review":
             self.dropAnsweredReviews()
         self.touch()
+
+    def dropProposals(self):
+        with self.lock:
+            for question in list(self.questions.values()):
+                if question["kind"] == "proposal" and (question["payload"] or {}).get("action") != "build":
+                    self.questions.pop(question["id"])
+                    self.release(question, {"decision": "reject", "message": ""}, shown=False)
 
     # ---------- Long tasks run in their own thread, and the browser follows them in the state. ----------
     def runJob(self, name, title, work):
@@ -382,9 +464,20 @@ class Session:
     def isBusy(self):
         return any(job["state"] == "running" for job in self.jobs.values()) or bool(self.swarm and self.swarm.isRunning())
 
-    def checkIdle(self):
-        if self.swarm and self.swarm.isRunning():
-            raise ValueError("The swarm is running. Wait until it finishes, or stop it, before you change it.")
+    # An agent that is being added to the swarm while it runs (pending) can be prepared like in the steps: only it can change then.
+    def checkIdle(self, spec=None):
+        if self.swarm and self.swarm.isRunning() and not (spec and spec.get("pending")):
+            raise ValueError("The swarm is running. Add or remove agents from the live view, or wait until it finishes to change it.")
+
+    # The swarm that the agents of the steps are in, when it exists: agents join it and leave it directly, so its approved plans are kept.
+    def liveSwarm(self):
+        return self.swarm if self.swarm is not None and not self.dirty else None
+
+    def dropSpec(self, name):
+        with self.lock:
+            self.specs = [spec for spec in self.specs if spec["name"] != name]
+            for spec in self.specs:
+                spec["waitsFor"] = [waited for waited in spec["waitsFor"] if waited != name]
 
     # ---------- The state that the browser draws. ----------
     def findSpec(self, agentId):
@@ -394,11 +487,11 @@ class Session:
         return spec
 
     def describeSpec(self, spec, index):
-        task, answers = TASKS[spec["task"]], spec["answers"]
+        task, answers = getTask(spec["task"]), spec["answers"]
         return {"id": spec["id"], "name": spec["name"], "task": spec["task"], "label": task["label"], "role": task["role"], "description": spec["description"],
                 "folder": answers.get("folder"), "folderNote": task["folder"], "suggestion": suggestFolder(answers), "model": describeModel(spec["model"]),
                 "missing": spec["missing"], "isLeader": index == 0, "waitsFor": spec["waitsFor"], "loops": answers.get("numberOfLoops", DEFAULT_LOOPS),
-                "tested": spec.get("tested", "")}
+                "tested": spec.get("tested", ""), "pending": bool(spec.get("pending")), "builder": spec["task"] == "leader", "why": spec.get("why", "")}
 
     def describeKeys(self):
         return {provider: {"company": details["company"], "variable": details["variable"], "page": details["page"],
@@ -413,7 +506,7 @@ class Session:
             info, member = swarm.getInfo(name), swarm.getMember(name)
             client = member["agent"].agent
             agents.append({**info, "model": describeModel(info["model"]), "task": (member.get("recipe") or {}).get("task"), "description": info["task"],
-                           "usage": dict(client.usage) if hasattr(client, "usage") else None})
+                           "usage": dict(client.usage) if hasattr(client, "usage") else None, "removable": name != swarm.getLeader()})
         try:
             stages = swarm.getStages()
         except ValueError:
@@ -434,6 +527,7 @@ class Session:
                 "error": describeError(outcome["error"]) if "error" in outcome and not isinstance(outcome["error"], USER_ERRORS) else str(outcome.get("error", "")),
                 "summary": swarm.getSummary(), "interruption": swarm.getInterruption(), "connections": swarm.getConnections(),
                 "messages": swarm.getMessages()[-80:], "ready": swarm.getReadyAgents(), "resumed": self.runInfo.get("resume", False), **self.runInfo,
+                "removed": list(swarm.removed), "canJoin": not running or self.canJoin(swarm),
                 "vram": swarm.getVramStatus() if swarm.getNeededVram() else None}
 
     def describeGpus(self):
@@ -448,9 +542,11 @@ class Session:
             jobs = {name: dict(job) for name, job in self.jobs.items()}
             agents = [self.describeSpec(spec, index) for index, spec in enumerate(self.specs)]
             cancelling = {key: value for key, value in self.cancelling.items() if key != "swarm"} if self.cancelling else None
-        return {"version": version, "mission": self.mission, "agents": agents, "mode": self.mode, "order": self.order, "keys": self.describeKeys(),
+            codexLogin = {key: value for key, value in self.codexLogin.items() if key != "login"} if self.codexLogin else None
+        return {"version": version, "mission": self.mission, "buildMode": self.buildMode, "agents": agents, "mode": self.mode, "order": self.order, "keys": self.describeKeys(),
                 "gpu": self.describeGpus(), "run": self.describeRun(), "questions": questions, "jobs": jobs, "unfinished": self.unfinished, "busy": self.isBusy(),
-                "nativeDialogs": self.dialog is not None, "trash": self.trash["spec"]["name"] if self.trash else None, "cancelling": cancelling}
+                "nativeDialogs": self.dialog is not None, "trash": self.trash["spec"]["name"] if self.trash else None, "cancelling": cancelling,
+                "codexLogin": codexLogin}
 
     # Waits until something changed after the version the browser has, then gives the state and the new lines of the feed.
     def poll(self, version, feedAfter):
@@ -477,6 +573,9 @@ class Session:
             raise FormError({"mission": "Write the mission of the swarm in a sentence or two."})
         if mission != self.mission:
             self.mission, self.dirty = mission, True
+            leader = self.leaderSpec()
+            if leader:
+                leader["answers"]["mission"] = mission
 
     # The answers so far, as they are typed, to know which questions are asked and what their defaults and help are.
     def roughAnswers(self, task, values):
@@ -492,6 +591,8 @@ class Session:
 
     def taskForm(self, payload):
         task = payload.get("task")
+        if task == "leader":
+            raise ValueError("The leader has no questions: it builds the swarm from your mission. Change the mission, its folder or its model instead.")
         if task not in TASKS:
             raise ValueError("Choose one of the tasks.")
         spec = self.findSpec(payload["agentId"]) if payload.get("agentId") else None
@@ -505,48 +606,6 @@ class Session:
         return {"form": {"task": task, "label": TASKS[task]["label"], "info": TASKS[task]["info"], "fields": fields, "values": values,
                          "advanced": [describeField(field, answers) for field in ADVANCED_FIELDS], "name": spec["name"] if spec else suggestName(task, taken),
                          "agentId": spec["id"] if spec else None}}
-
-    # Turns the values of the form into the answers of the task, field after field, like the command line asks them.
-    # A secret left empty keeps the one given before, so a password is never sent back to the browser to edit an agent.
-    def parseForm(self, task, values, previous=None):
-        answers, errors = {}, {}
-        for field in getFields(task):
-            if not isAsked(field, answers):
-                continue
-            key, kind, raw = field["key"], field["kind"], values.get(field["key"])
-            value, error = None, ""
-            if kind == "choice":
-                value = raw or getDefault(field, answers)
-                if value not in field["options"]:
-                    value, error = None, "Choose one of the options."
-            elif kind == "choices":
-                value = [option for option in field["options"] if option in (raw if raw is not None else getDefault(field, answers) or [])]
-            elif kind == "outlets":
-                value = [str(outlet).strip() for outlet in raw or [] if str(outlet).strip()]
-                wrong = [outlet for outlet in value if "://" in outlet and not outlet.startswith(("http://", "https://"))]
-                error = "Choose at least one outlet." if field.get("required") and not value else f"{wrong[0]} must start with http:// or https://." if wrong else ""
-            elif kind == "publishers":
-                value = {str(name): str(number) for name, number in (raw or {}).items()}
-            elif kind == "accounts":
-                value, old = {}, (previous or {}).get(key) or {}
-                for row in raw or []:
-                    host, user, password = (str(row.get(part, "")).strip() for part in ("host", "user", "password"))
-                    if not host and not user:
-                        continue
-                    password = password or (old.get(host, ("", ""))[1] if old.get(host, ("", ""))[0] == user else "")
-                    if not host or "/" in host or not user or not password:
-                        error = "Every account needs the website (like ieeexplore.ieee.org, without https://), a username and a password."
-                    value[host] = (user, password)
-            else:
-                text = "" if raw is None else str(raw)
-                if kind == "secret" and not text and previous and previous.get(key):
-                    value = previous[key]
-                else:
-                    value, error = parseAnswer(field, text, answers)
-            if error:
-                errors[key] = error
-            answers[key] = value
-        return answers, errors
 
     # The Telegram chat is found from the messages the user sent to the bot, when the user did not give it.
     def findTelegramChat(self, answers, errors):
@@ -564,20 +623,21 @@ class Session:
             errors[chat] = ("Open your bot in Telegram, press Start and send it any message, then press Find my chat." if not chats else
                             "Several chats wrote to your bot: press Find my chat and choose yours.")
 
+    # live (from the live view) prepares an agent that joins the swarm afterwards (joinLive): until then it is pending, and the swarm does not change.
     def saveAgent(self, payload):
-        self.checkIdle()
         task = payload.get("task")
         if task not in TASKS:
             raise ValueError("Choose one of the tasks.")
         spec = self.findSpec(payload["agentId"]) if payload.get("agentId") else None
+        live = (spec.get("pending") if spec else bool(payload.get("live"))) and self.liveSwarm() is not None
+        if not live:
+            self.checkIdle()
         previous = spec["answers"] if spec and spec["task"] == task else None
-        answers, errors = self.parseForm(task, payload.get("values") or {}, previous)
+        answers, errors = readAnswers(task, payload.get("values") or {}, previous)
         taken = [other["name"] for other in self.specs if other is not spec]
         name = str(payload.get("name") or "").strip() or suggestName(task, taken)
         if checkAgentName(name, taken):
             errors["name"] = checkAgentName(name, taken)
-        if task == "literature" and not (answers.get("searches") or answers.get("publishers")) and "searches" not in errors:
-            errors["searches"] = "The survey needs a place to search: choose at least a search engine or a publisher."
         self.findTelegramChat(answers, errors)
         if errors:
             raise FormError(errors)
@@ -592,18 +652,25 @@ class Session:
         answers["folder"] = folder
         if spec is None:
             self.agentNumber += 1
-            spec = {"id": f"agent{self.agentNumber}", "model": None, "client": None, "waitsFor": [], "missing": []}
+            spec = {"id": f"agent{self.agentNumber}", "model": None, "client": None, "waitsFor": [], "missing": [], "pending": live}
             self.specs.append(spec)
         elif spec["name"] != name:
             for other in self.specs:
                 other["waitsFor"] = [name if waited == spec["name"] else waited for waited in other["waitsFor"]]
         spec.update(task=task, name=name, answers=answers, description=describeLoop(loop))
-        self.dirty = True
+        self.dirty = self.dirty or not live
         return {"agentId": spec["id"], "description": spec["description"], "warning": warning}
 
     def removeAgent(self, payload):
-        self.checkIdle()
         spec = self.findSpec(payload.get("agentId"))
+        if spec["task"] == "leader":
+            raise ValueError("This leader builds your swarm. To build it yourself instead, choose it in the step of the mission.")
+        if spec.get("pending"):
+            self.specs.remove(spec)
+            if hasattr(spec["client"], "unload"):
+                spec["client"].unload()
+            return
+        self.checkIdle()
         index = self.specs.index(spec)
         self.specs.remove(spec)
         for other in self.specs:
@@ -637,6 +704,8 @@ class Session:
         self.checkIdle()
         spec = self.findSpec(payload.get("agentId"))
         position = max(0, min(int(payload.get("position", 0)), len(self.specs) - 1))
+        if self.leaderSpec() and (spec["task"] == "leader" or position == 0):
+            raise ValueError("The leader that builds the swarm stays first: it leads it.")
         self.specs.remove(spec)
         self.specs.insert(position, spec)
         self.dirty = True
@@ -644,7 +713,7 @@ class Session:
 
     def checkEmail(self, payload):
         spec = self.findSpec(payload["agentId"]) if payload.get("agentId") else None
-        answers, errors = self.parseForm("email", payload.get("values") or {}, spec["answers"] if spec and spec["task"] == "email" else None)
+        answers, errors = readAnswers("email", payload.get("values") or {}, spec["answers"] if spec and spec["task"] == "email" else None)
         needed = {key: error for key, error in errors.items() if key in ("provider", "sender", "password", "smtp", "imap")}
         if needed:
             raise FormError(needed, "Fill in the account first.")
@@ -652,7 +721,7 @@ class Session:
 
     def messengerAnswers(self, payload):
         spec = self.findSpec(payload["agentId"]) if payload.get("agentId") else None
-        answers, errors = self.parseForm("news", payload.get("values") or {}, spec["answers"] if spec and spec["task"] == "news" else None)
+        answers, errors = readAnswers("news", payload.get("values") or {}, spec["answers"] if spec and spec["task"] == "news" else None)
         app = answers.get("messenger")
         if app not in MESSAGING_APPS:
             raise ValueError("Choose a messaging app first.")
@@ -694,8 +763,8 @@ class Session:
 
     # ---------- Step 2: the folder of each agent. ----------
     def setFolder(self, payload):
-        self.checkIdle()
         spec = self.findSpec(payload.get("agentId"))
+        self.checkIdle(spec)
         text, folder = str(payload.get("folder") or "").strip(), None
         if text:
             folder, error = parseAnswer({"key": "folder", "ask": "", "kind": "folder"}, text)
@@ -705,7 +774,8 @@ class Session:
             loop = buildLoop(spec["task"], None, {**spec["answers"], "folder": folder})
         except ValueError as problem:
             raise FormError({"folder": str(problem)}, str(problem)) from None
-        spec["answers"]["folder"], spec["description"], self.dirty = folder, describeLoop(loop), True
+        spec["answers"]["folder"], spec["description"] = folder, describeLoop(loop)
+        self.dirty = self.dirty or not spec.get("pending")
 
     def openFolder(self, payload):
         path = str(payload.get("path") or "")
@@ -737,14 +807,15 @@ class Session:
         if bits not in BITS:
             raise ValueError(f"The models are used with {', '.join(str(option) for option in BITS)} bits.")
         sizing = self.sizingSwarm(spec["id"])
-        recommend = TASKS[spec["task"]]["recommend"]
+        recommend = getTask(spec["task"])["recommend"]
         families = {family: [self.localEntry(sizing, name, bits) for name in models] for family, models in MODELS_LOCAL.items()}
         local = [self.localEntry(sizing, name, bits) for name in RECOMMENDED_LOCAL[recommend]]
         api = [{"name": name, "provider": provider, "company": API_KEYS[provider]["company"]} for name in RECOMMENDED_API[recommend]
                for provider in [next(key for key, models in MODELS_API.items() if name in models)]]
         gpu = checkVram(sizing.getNeededVram(), readGpus())
+        cli = {"claude-code": {"missing": findMissingPackages(getModelInfo("", cli="claude-code")), "problem": ""}, "codex": checkCodex()}
         return {"catalog": {"agentId": spec["id"], "bits": bits, "local": local, "families": families, "api": api, "gpu": gpu, "isLeader": self.specs[0] is spec,
-                            "hfToken": bool(os.environ.get("HF_TOKEN")), "current": describeModel(spec["model"])}}
+                            "hfToken": bool(os.environ.get("HF_TOKEN")), "current": describeModel(spec["model"]), "cli": cli}}
 
     def lookupModel(self, payload):
         name = str(payload.get("name", "")).strip()
@@ -756,16 +827,22 @@ class Session:
 
     def price(self, payload):
         name = str(payload.get("name", "")).strip()
-        info = getModelInfo(name, provider=payload.get("provider"))
+        if payload.get("cli") == "codex":
+            raise ValueError("Codex uses your ChatGPT plan: there is no price per use, only the limits of your plan.")
+        info = getModelInfo(name, provider=payload.get("provider"), cli=payload.get("cli"))
         if info["local"]:
             raise ValueError("Local models are free to use: they run on your GPUs.")
         return {"price": describePrice(getModelCost(info["provider"], name))}
 
     def chooseModel(self, payload):
-        self.checkIdle()
         spec = self.findSpec(payload.get("agentId"))
+        self.checkIdle(spec)
         name = str(payload.get("name", "")).strip()
-        if payload.get("local"):
+        if payload.get("cli"):
+            info = getModelInfo(name, cli=payload["cli"])
+            if info["cli"] == "codex":
+                self.checkCodexReady()
+        elif payload.get("local"):
             billions = float(payload["billions"]) if payload.get("billions") not in (None, "") else None
             if billions is not None and billions <= 0:
                 raise FormError({"billions": "Write a number above 0, like 8.2."})
@@ -774,14 +851,15 @@ class Session:
             info = getModelInfo(name, provider=payload.get("provider"))
             if info["local"]:
                 raise ValueError(f"{name} is a model of Hugging Face: choose it in the local models.")
-        check = self.sizingSwarm(spec["id"]).checkModel(info)
+        # An agent about to join is checked against the swarm as it is (the agents that left freed their memory).
+        check = (self.liveSwarm() if spec.get("pending") else self.sizingSwarm(spec["id"])).checkModel(info)
         if not check["allowed"]:
             raise ValueError(check["message"])
         if info["local"]:
             token = str(payload.get("hfToken") or "").strip()
             if token:
                 self.tokens[name] = token
-        else:
+        elif info["provider"]:
             key = str(payload.get("apiKey") or "").strip()
             if key:
                 self.keys[info["provider"]] = key
@@ -789,11 +867,45 @@ class Session:
                 company = API_KEYS[info["provider"]]["company"]
                 raise FormError({"apiKey": f"{company} needs an API key. Create one at {API_KEYS[info['provider']]['page']}."}, f"{company} needs an API key.")
         client = createModel(info, self.keys, token=self.tokens.get(name), report=lambda message: self.notify(spec["name"], message))
-        if isinstance(spec["client"], LocalModel):
+        if hasattr(spec["client"], "unload"):
             spec["client"].unload()
         spec.update(model=info, client=client, missing=findMissingPackages(info), tested="")
-        self.dirty = True
+        self.dirty = self.dirty or not spec.get("pending")
         return {"warning": check["message"] if info["local"] else "", "missing": spec["missing"], "download": describeDownload(info) if info["local"] else None}
+
+    # ---------- Agents that join or leave the swarm while it runs (or between two runs, keeping what was approved). ----------
+    # A new agent joins the group that works now (see Swarm.addAgent): it can wait for agents already there, and nobody waits for it.
+    def canJoin(self, swarm):
+        stage = swarm.stage
+        return bool(stage and stage["open"] and (stage["plan"] or swarm.getLeader() not in stage["names"]))
+
+    def joinLive(self, payload):
+        spec = self.findSpec(payload.get("agentId"))
+        swarm = self.liveSwarm()
+        if not spec.get("pending"):
+            raise ValueError(f"{spec['name']} is already in the swarm.")
+        if swarm is None:
+            raise ValueError("There is no swarm to join: add the agent in the steps instead.")
+        if not spec["model"]:
+            raise FormError({"model": f"Choose a model for {spec['name']} first."}, f"Choose a model for {spec['name']} first.")
+        if payload.get("folder") is not None:
+            self.setFolder({"agentId": spec["id"], "folder": payload.get("folder")})
+        waits = [name for name in payload.get("waitsFor") or [] if name in swarm.getAgents() and name != swarm.getLeader()]
+        loop = buildLoop(spec["task"], spec["client"], spec["answers"])
+        self.connect(loop, spec["name"])
+        recipe = {"task": spec["task"], "answers": publicAnswers(spec["task"], spec["answers"])}
+        swarm.addAgent(spec["name"], loop, TASKS[spec["task"]]["role"], describeLoop(loop), waitsFor=waits, model=spec["model"], recipe=recipe)
+        spec.update(pending=False, waitsFor=waits, description=describeLoop(loop))
+
+    # The agent leaves at once (see Swarm.removeAgent); its model frees its memory as soon as its last step ended.
+    def removeLive(self, payload):
+        swarm = self.liveSwarm()
+        if swarm is None:
+            raise ValueError("There is no swarm: remove the agent in the steps instead.")
+        name = str(payload.get("agent") or "")
+        reason = str(payload.get("reason") or "").strip() or "The user removed it."
+        swarm.removeAgent(name, reason)
+        self.dropSpec(name)
 
     def testModel(self, payload):
         spec = self.findSpec(payload.get("agentId"))
@@ -801,6 +913,9 @@ class Session:
             raise ValueError("Choose a model first.")
         if spec["model"]["local"]:
             raise ValueError("A local model is tested when the swarm starts: it is loaded on the GPUs then.")
+        if spec["model"].get("cli") == "codex":
+            account = self.checkCodexReady()
+            return {"problem": "", "answer": f"Codex is signed in{' as ' + account['email'] if account.get('email') else ''}."}
         try:
             answer = spec["client"].input(TEST_PROMPT)
         except ModelError as error:
@@ -809,10 +924,178 @@ class Session:
         spec["tested"] = "ok"
         return {"problem": "", "answer": " ".join(str(answer).split())[:80]}
 
+    # ---------- Codex: signed in with the ChatGPT plan of the user, through Codex itself. ----------
+    # The sign-in runs in its own thread: the page (or the code) is shown to the user, and the state says when Codex received the answer.
+    def checkCodexReady(self):
+        status = checkCodex()
+        if status["problem"]:
+            raise ValueError(status["problem"])
+        account = readCodexAccount()
+        if not account["signedIn"]:
+            raise FormError({"codex": "Sign in to Codex with your ChatGPT account first."}, "Sign in to Codex with your ChatGPT account first.")
+        return account
+
+    def codexAccount(self, payload):
+        status = checkCodex()
+        if status["problem"]:
+            return {"codex": {**status, "account": None, "models": []}}
+        account = readCodexAccount()
+        models = listCodexModels() if account["signedIn"] else []
+        return {"codex": {**status, "account": account, "models": models}}
+
+    def codexSignIn(self, payload):
+        method = "code" if payload.get("method") == "code" else "browser"
+        with self.lock:
+            if self.codexLogin and self.codexLogin["state"] == "waiting":
+                self.codexLogin["login"].cancel()
+        login = CodexLogin()
+        try:
+            target = login.start(method)
+        except ModelError:
+            login.cancel()
+            raise
+        state = {"state": "waiting", "method": method, "url": target["url"], "code": target["code"], "error": "", "account": None, "login": login}
+        with self.lock:
+            self.codexLogin = state
+        if method == "browser":
+            webbrowser.open(target["url"])
+        def wait():
+            error = login.wait()
+            account = None
+            if not error:
+                try:
+                    account = readCodexAccount()
+                except ModelError as problem:
+                    error = str(problem)
+            with self.lock:
+                if self.codexLogin is state:
+                    state.update(state="failed" if error else "done", error=error, account=account)
+                self.touch()
+        threading.Thread(target=wait, daemon=True).start()
+
+    def codexCancel(self, payload):
+        with self.lock:
+            state, self.codexLogin = self.codexLogin, None
+        if state and state["state"] == "waiting":
+            state["login"].cancel()
+
     def checkPackages(self, payload):
         for spec in self.specs:
             if spec["model"]:
                 spec["missing"] = findMissingPackages(spec["model"])
+
+    # ---------- The leader builds the swarm, and manages it while it runs (leader_utils.py). ----------
+    # In the mode leader, the first agent is the leader of LEADER_TASK: the user gives it a model and the folder of the mission (setFolder and
+    # chooseModel, like any agent), then the leader proposes the other agents. Once the user approved, they are agents of the steps like any
+    # other, so the user can still look at them and change them before the run.
+    def leaderSpec(self):
+        return self.specs[0] if self.specs and self.specs[0]["task"] == "leader" else None
+
+    def setBuildMode(self, payload):
+        self.checkIdle()
+        mode = payload.get("mode")
+        if mode not in ("manual", "leader"):
+            raise ValueError("Choose who builds the swarm: you, or the leader.")
+        if mode == self.buildMode:
+            return
+        if any(job["state"] == "running" for name, job in self.jobs.items() if name == "leader"):
+            raise ValueError("The leader is building the swarm: wait until it proposes it.")
+        self.buildMode, self.dirty = mode, True
+        if mode == "leader":
+            self.agentNumber += 1
+            answers = {"mission": self.mission, "folder": None, "numberOfLoops": DEFAULT_LOOPS}
+            self.specs.insert(0, {"id": f"agent{self.agentNumber}", "task": "leader", "name": suggestName("leader", [spec["name"] for spec in self.specs]), "answers": answers,
+                                  "model": None, "client": None, "waitsFor": [], "missing": [], "pending": False,
+                                  "description": describeLoop(buildLoop("leader", None, answers))})
+        else:
+            leader = self.leaderSpec()
+            if leader:
+                self.specs.remove(leader)
+                if hasattr(leader["client"], "unload"):
+                    leader["client"].unload()
+        self.trash = None
+        self.sanitizeWaits()
+
+    def buildWithLeader(self, payload):
+        self.checkIdle()
+        leader = self.leaderSpec()
+        if leader is None:
+            raise ValueError("Choose to let the leader build the swarm first.")
+        if not self.mission:
+            raise FormError({"mission": "Write the mission of the swarm first."}, "Write the mission of the swarm first.")
+        if not leader["answers"].get("folder"):
+            raise FormError({"folder": "Choose the folder of the mission: the agents work in it."}, "Choose the folder of the mission first.")
+        if not leader["model"]:
+            raise FormError({"model": f"Choose the model of {leader['name']} first."}, f"Choose the model of {leader['name']} first.")
+        self.makeClients()
+        catalog = LeaderCatalog(self.mission, leader["answers"]["folder"], leader["name"], leader["model"], self.keys, self.tokens)
+        loop = buildLoop("leader", leader["client"], {**leader["answers"], "mission": self.mission})
+        self.connect(loop, leader["name"])
+        def work():
+            agents = designSwarm(loop, catalog)
+            if agents is None:
+                return None
+            self.applyPlan(leader, agents)
+            return {"agents": [agent["name"] for agent in agents]}
+        self.runJob("leader", f"{leader['name']} is building the swarm", work)
+
+    # The agents the user approved replace the ones of the steps (the leader stays). Their models are made now when nothing more is needed.
+    def applyPlan(self, leader, agents):
+        made = []
+        for agent in agents:
+            info = agent["model"]
+            client = createModel(info, self.keys, token=self.tokens.get(info["name"]), report=lambda message, name=agent["name"]: self.notify(name, message)) \
+                if hasCredentials(info, self.keys) else None
+            loop = buildLoop(agent["task"], None, agent["answers"])
+            self.agentNumber += 1
+            made.append({"id": f"agent{self.agentNumber}", "task": agent["task"], "name": agent["name"], "answers": agent["answers"], "model": info, "client": client,
+                         "waitsFor": list(agent["waitsFor"]), "missing": findMissingPackages(info), "description": describeLoop(loop), "pending": False, "tested": "",
+                         "why": agent["why"]})
+        with self.lock:
+            if self.leaderSpec() is not leader or (self.swarm and self.swarm.isRunning()):
+                for spec in made:
+                    if hasattr(spec["client"], "unload"):
+                        spec["client"].unload()
+                raise ValueError("The swarm changed while the leader was building it, so its proposal was not used.")
+            for spec in self.specs[1:]:
+                if hasattr(spec["client"], "unload"):
+                    spec["client"].unload()
+            self.specs = [leader, *made]
+            self.order = "custom" if any(spec["waitsFor"] for spec in made) else "together"
+            self.dirty, self.trash = True, None
+            self.touch()
+
+    def manage(self, swarm, leader):
+        LeaderManager(swarm, LeaderCatalog(self.mission, leader["answers"].get("folder"), leader["name"], leader["model"], self.keys, self.tokens), self)
+
+    # What the manager of the leader needs: the loop of a new agent, or of an agent with another model (LeaderManager in leader_utils.py).
+    def makeLoop(self, agent):
+        info = agent["model"]
+        client = createModel(info, self.keys, token=self.tokens.get(info["name"]), report=lambda message: self.notify(agent["name"], message))
+        loop = buildLoop(agent["task"], client, agent["answers"])
+        self.connect(loop, agent["name"])
+        return loop
+
+    def joined(self, agent, loop):
+        with self.lock:
+            self.agentNumber += 1
+            self.specs.append({"id": f"agent{self.agentNumber}", "task": agent["task"], "name": agent["name"], "answers": agent["answers"], "model": agent["model"],
+                               "client": loop.agent, "waitsFor": list(agent["waitsFor"]), "missing": findMissingPackages(agent["model"]), "description": describeLoop(loop),
+                               "pending": False, "tested": "", "why": agent["why"]})
+        self.touch()
+
+    def remakeLoop(self, name, model):
+        spec = next((spec for spec in self.specs if spec["name"] == name), None)
+        if spec is None:
+            raise ValueError(f"{name} is not an agent of the swarm anymore.")
+        return self.makeLoop({"name": name, "task": spec["task"], "answers": spec["answers"], "model": model})
+
+    def remade(self, name, model, loop):
+        with self.lock:
+            for spec in self.specs:
+                if spec["name"] == name:
+                    spec.update(model=model, client=loop.agent, missing=findMissingPackages(model), tested="")
+        self.touch()
 
     # ---------- Step 4: who waits for whom. ----------
     def setOrder(self, payload):
@@ -845,16 +1128,33 @@ class Session:
         missing = [spec["name"] for spec in self.specs if not spec["model"]]
         if missing:
             raise ValueError(f"Choose a model for {', '.join(missing)} first.")
+        self.makeClients()
+        leader = self.leaderSpec()
+        if leader and not leader["answers"].get("folder"):
+            raise ValueError(f"Choose the folder of the mission for {leader['name']} first.")
+        if leader and len(self.specs) == 1:
+            raise ValueError(f"Ask {leader['name']} to build the swarm first, in the step of the mission.")
         swarm = Swarm(self.mission)
         for spec in self.specs:
             loop = buildLoop(spec["task"], spec["client"], spec["answers"])
             self.connect(loop, spec["name"])
             recipe = {"task": spec["task"], "answers": publicAnswers(spec["task"], spec["answers"])}
-            swarm.addAgent(spec["name"], loop, TASKS[spec["task"]]["role"], describeLoop(loop), model=spec["model"], recipe=recipe)
+            swarm.addAgent(spec["name"], loop, getTask(spec["task"])["role"], describeLoop(loop), model=spec["model"], recipe=recipe)
         for spec in self.specs[1:]:
             swarm.setWaitsFor(spec["name"], spec["waitsFor"])
         swarm.addListener(self.onEvent)
+        if leader:
+            self.manage(swarm, leader)
         return swarm
+
+    # A model of the steps that has no client yet (the leader chose it before its API key was given) gets one now.
+    def makeClients(self):
+        for spec in self.specs:
+            if spec["model"] and spec["client"] is None:
+                if not hasCredentials(spec["model"], self.keys):
+                    company = API_KEYS[spec["model"]["provider"]]["company"]
+                    raise ValueError(f"{spec['name']} needs an API key of {company}: choose its model again in the step of the models to give it.")
+                spec["client"] = createModel(spec["model"], self.keys, token=self.tokens.get(spec["model"]["name"]), report=lambda message, name=spec["name"]: self.notify(name, message))
 
     def currentSwarm(self):
         if self.swarm is None or self.dirty:
@@ -865,6 +1165,8 @@ class Session:
         self.checkIdle()
         if len(self.specs) < 2:
             raise ValueError("With one agent, nobody waits for anybody.")
+        # A swarm that was stopped refuses the questions of its agents, so the leader plans in a new one.
+        self.dirty = self.dirty or bool(self.swarm and self.swarm.stopped)
         swarm = self.currentSwarm()
         def work():
             approved = swarm.planWithLeader()
@@ -917,10 +1219,21 @@ class Session:
 
     def answer(self, payload):
         with self.lock:
-            question = self.questions.pop(int(payload.get("id", 0)), None)
+            question = self.questions.get(int(payload.get("id", 0)))
             if question is None:
                 raise ValueError("This question was already answered.")
-            self.release(question, str(payload.get("answer", "")))
+            answer = payload.get("answer", "")
+            # A coding agent receives a dictionary (its permission or its answers), and so does the leader for its proposals. The other questions
+            # receive a text. A wrong answer leaves the question waiting.
+            if question["kind"] in ("permission", "form", "proposal"):
+                if not isinstance(answer, dict):
+                    raise ValueError("This question needs a choice.")
+                if question["kind"] == "proposal" and answer.get("decision") not in ("approve", "reject"):
+                    raise ValueError("Approve the proposal, or reject it.")
+            else:
+                answer = str(answer)
+            self.questions.pop(question["id"])
+            self.release(question, answer)
 
     def runningSwarm(self):
         if not self.swarm:
@@ -971,7 +1284,7 @@ class Session:
 
     def unloadModels(self):
         for spec in self.specs:
-            if isinstance(spec["client"], LocalModel):
+            if hasattr(spec["client"], "unload"):
                 spec["client"].unload()
 
     # ---------- The swarms that were interrupted. ----------
@@ -998,18 +1311,20 @@ class Session:
         saved = self.findSaved(payload.get("id"))
         if not all(member.get("recipe") for member in saved["members"].values()):
             raise ValueError("This swarm was made by another program, so it cannot be continued here.")
-        agents, providers, gated = [], {}, []
+        agents, providers, gated, codex = [], {}, [], False
         for name, member in saved["members"].items():
             task, answers, finished = member["recipe"]["task"], member["recipe"]["answers"], member["status"] in ("done", "failed")
             fields = [{**describeField(field, answers), "required": field.get("required", False) and not finished} for field in secretFields(task, answers)]
             info = member["model"]
             agents.append({"name": name, "role": member["role"], "task": task, "status": member["status"], "finished": finished, "fields": fields,
                            "accounts": task == "literature" and not finished, "model": describeModel(info), "missing": findMissingPackages(info) if info else []})
-            if info and not info["local"] and not finished:
+            if info and not info["local"] and info["provider"] and not finished:
                 providers[info["provider"]] = self.describeKeys()[info["provider"]]
+            codex = codex or bool(info and info.get("cli") == "codex" and not finished)
             if info and info["local"] and isGated(info["name"]) and not os.environ.get("HF_TOKEN") and not finished:
                 gated.append(info["name"])
-        return {"resume": {"id": saved["id"], "mission": saved["mission"], "mode": saved["mode"], "agents": agents, "providers": providers, "gated": gated}}
+        return {"resume": {"id": saved["id"], "mission": saved["mission"], "mode": saved["mode"], "agents": agents, "providers": providers, "gated": gated,
+                           "codex": codex}}
 
     def rebuildAgent(self, name, data, secretValues, rebuilt):
         recipe, finished = data["recipe"], data["status"] in ("done", "failed")
@@ -1024,7 +1339,7 @@ class Session:
             secrets["accounts"] = {str(row.get("host", "")).strip(): (str(row.get("user", "")).strip(), str(row.get("password", ""))) for row in values.get("accounts") or []
                                    if str(row.get("host", "")).strip() and str(row.get("user", "")).strip()}
         info, client = data["model"], None
-        usable = info and (info["local"] or self.keys.get(info["provider"]) or getApiKey(info["provider"]))
+        usable = info and hasCredentials(info, self.keys)
         if info and not usable and not finished:
             errors[f"key.{info['provider']}"] = f"{API_KEYS[info['provider']]['company']} needs an API key."
         if errors:
@@ -1048,6 +1363,8 @@ class Session:
             raise ValueError("Wait until the work in progress is finished.")
         saved = self.findSaved(payload.get("id"))
         self.rememberKeys(payload)
+        if any((member.get("model") or {}).get("cli") == "codex" and member["status"] not in ("done", "failed") for member in saved["members"].values()):
+            self.checkCodexReady()
         rebuilt = []
         swarm = Swarm.restore(saved, lambda name, data: self.rebuildAgent(name, data, payload.get("secrets") or {}, rebuilt))
         swarm.addListener(self.onEvent)
@@ -1055,6 +1372,9 @@ class Session:
         self.reset()
         rebuilt.sort(key=lambda spec: spec["name"] != saved["leader"])
         self.mission, self.specs, self.mode, self.swarm, self.dirty = saved["mission"], rebuilt, saved["mode"], swarm, False
+        if saved.get("managed") and self.leaderSpec():
+            self.buildMode = "leader"
+            self.manage(swarm, self.leaderSpec())
         self.order = "custom" if any(spec["waitsFor"] for spec in rebuilt) else "together"
         self.cancelling = None
         self.launch(swarm, resume=True)
@@ -1074,7 +1394,7 @@ class Session:
             return loop
         swarm = Swarm.restore(saved, rebuild)
         info = saved["members"][saved["leader"]]["model"]
-        if info and not payload.get("plain") and (info["local"] or self.keys.get(info["provider"]) or getApiKey(info["provider"])):
+        if info and not payload.get("plain") and hasCredentials(info, self.keys):
             swarm.getMember(swarm.getLeader())["agent"].agent = createModel(info, self.keys, token=self.tokens.get(info["name"]))
         def work():
             summary = swarm.summarizeChanges()

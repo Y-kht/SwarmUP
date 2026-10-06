@@ -1,4 +1,4 @@
-// SwarmUP: the interface. It draws the state that the program (src/user_interface.py) gives, and sends it what the user does.
+// SwarmUP: the interface. It draws the state that the program (src/backend/interface/user_interface.py) gives, and sends it what the user does.
 // The state comes from /api/poll, which answers as soon as something changed. Every view is drawn again from the state and from ui
 // (what only the interface knows: the open window, what is typed...), so the interface never disagrees with the program.
 'use strict';
@@ -24,7 +24,7 @@ const store = { catalog: null, state: null, feed: [], feedAfter: 0, version: -1,
 const ui = {
   view: 'home', modal: null, stack: [], selected: null, busy: {}, errors: {}, expanded: {}, visited: new Set(), feedFilter: 'all',
   missionDraft: null, folderDrafts: {}, waitsDraft: null, orderChoice: null, mode: null, resume: null, particles: [], seenFeed: 0,
-  composer: {}, corrections: {}, messages: {}, renderedOnce: false, animate: true,
+  composer: {}, corrections: {}, messages: {}, renderedOnce: false, animate: true, forms: {}, codex: { loading: false, data: null },
 };
 let pointerDown = false, renderPending = false;
 
@@ -67,7 +67,7 @@ function logo() {
 
 function button(label, options = {}) {
   const { kind = '', size = '', iconName, onClick, disabled, busy, title, type = 'button', after } = options;
-  return h('button', { type, class: ['btn', kind, size, !label && 'icon-only'], onClick, disabled: disabled || busy, title: title || null, 'aria-label': title || null },
+  return h('button', { type, class: ['btn', kind, size, !label && 'icon-only'], onClick, disabled: disabled || busy, title: title || null, 'aria-label': !label && title ? title : null },
     busy ? h('span', { class: 'spinner' }) : iconName ? icon(iconName, size === 'sm' ? 'sm' : '') : null, label, after ? icon(after, size === 'sm' ? 'sm' : '') : null);
 }
 
@@ -94,6 +94,7 @@ function taskIcon(task, size = '') {
 }
 
 function taskOf(key) {
+  if (key === 'leader') return store.catalog.leaderTask;
   return store.catalog.tasks.find(task => task.key === key) || { label: key, role: key, info: '' };
 }
 
@@ -282,7 +283,12 @@ function addFeed(items) {
 function applyState(state) {
   if (store.state && state.version < store.state.version) return;
   const before = store.jobs;
+  const signingIn = store.state?.codexLogin?.state === 'waiting';
   store.state = state;
+  if (signingIn && state.codexLogin?.state === 'done') {
+    toast(`Codex is signed in${state.codexLogin.account?.email ? ` as ${state.codexLogin.account.email}` : ''}.`, 'success');
+    loadCodex();
+  }
   store.version = state.version;
   store.jobs = state.jobs;
   for (const [name, job] of Object.entries(state.jobs)) {
@@ -298,6 +304,12 @@ function onJobEnded(name, job) {
     else if (job.result) { toast('The order of the leader is approved.', 'success'); ui.waitsDraft = null; ui.orderChoice = null; }
     else toast('No order was approved, so nothing changed.', 'warning');
     api('clearJob', { name }).catch(() => {});
+  }
+  if (name === 'leader') {
+    if (job.state === 'failed') toast('The leader could not build the swarm. Read why in the step of the mission.', 'danger');
+    else if (job.result) { toast(`The leader built a swarm of ${plural(job.result.agents.length, 'agent')}. Check it, then launch it.`, 'success'); go('agents'); }
+    else toast('No swarm was built: you rejected the proposal of the leader.', 'warning');
+    if (job.state !== 'failed') api('clearJob', { name }).catch(() => {});
   }
   if (name === 'cancel' && job.state === 'failed') toast(job.error, 'danger');
   if (name === 'changes' && job.state === 'failed') toast(job.error, 'danger');
@@ -404,11 +416,12 @@ function stepState() {
   const state = store.state;
   const agents = state.agents;
   const models = agents.length > 0 && agents.every(agent => agent.model);
+  const team = state.buildMode === 'leader' ? agents.length > 1 : agents.length > 0;
   return {
-    mission: { done: !!state.mission, enabled: true },
-    agents: { done: agents.length > 0, enabled: !!state.mission },
+    mission: { done: !!state.mission && (state.buildMode !== 'leader' || team), enabled: true },
+    agents: { done: team, enabled: !!state.mission },
     folders: { done: agents.length > 0 && ui.visited.has('folders'), enabled: agents.length > 0 },
-    models: { done: models, enabled: agents.length > 0 },
+    models: { done: models && team, enabled: agents.length > 0 },
     teamwork: { done: models && ui.visited.has('teamwork'), enabled: models },
     launch: { done: false, enabled: models },
   };
@@ -522,35 +535,106 @@ function savedCard(saved) {
 
 
 // ==============
-// Step 1: the mission.
+// Step 1: the mission, and who builds the swarm: the user agent by agent, or the leader (it proposes the agents, and the user approves).
 // ==============
 function viewMission() {
   if (ui.missionDraft === null) ui.missionDraft = store.state.mission;
+  const state = store.state;
   const error = ui.errors.mission;
-  const save = async () => {
+  const leaderMode = state.buildMode === 'leader';
+  const built = leaderMode && state.agents.length > 1;
+  const saveMission = async () => {
     const form = {};
     const data = await act('setMission', { mission: ui.missionDraft }, { form, busy: 'mission' });
     ui.errors.mission = form.errors?.mission || '';
-    if (data) go('agents'); else render();
+    render();
+    return !!data;
   };
+  const save = async () => { if (await saveMission()) go('agents'); };
+  const build = async () => {
+    if (!await saveMission()) return;
+    const form = ui.errors.leader = {};
+    await act('buildWithLeader', {}, { form, busy: 'buildWithLeader' });
+    render();
+  };
+  const building = state.jobs.leader?.state === 'running';
+  const next = !leaderMode || built ? { label: 'Continue to the agents', onClick: save, busy: ui.busy.mission, disabled: building } :
+    { label: 'Ask the leader to build the swarm', iconName: 'sparkles', onClick: build, busy: ui.busy.buildWithLeader || building };
   return {
     header: header(stepEyebrow('mission'), 'What should your swarm achieve?', 'Describe the goal in your own words, as you would to a colleague. Every agent reads it to understand what it works for.'),
-    content: h('div', { class: 'stack loose', style: { maxWidth: '820px' } },
+    content: h('div', { class: 'stack loose', style: { maxWidth: '860px' } },
       h('div', { class: ['card pad enter', error && 'has-error'] },
         h('div', { class: 'field' },
           h('label', { class: 'field-label', for: 'mission' }, 'The mission', h('span', { class: 'req' }, '*')),
           h('textarea', { id: 'mission', class: 'textarea big', 'data-key': 'mission', placeholder: 'For example: prepare a short morning briefing on AI news and send it to my phone.',
-            value: ui.missionDraft, onInput: event => { ui.missionDraft = event.target.value; }, onKeydown: event => { if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') save(); } }),
+            value: ui.missionDraft, onInput: event => { ui.missionDraft = event.target.value; },
+            onKeydown: event => { if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') next.onClick(); } }),
           error ? h('div', { class: 'field-error' }, icon('alert'), error) : h('div', { class: 'field-help' }, icon('info'), 'One or two sentences are enough. You can change it later.'))),
       h('div', { class: 'stack enter-2' }, h('h4', {}, 'Need inspiration? Click an example'),
-        h('div', { class: 'pills' }, EXAMPLES.map(example => h('button', { class: 'pill', type: 'button', onClick: () => { ui.missionDraft = example; ui.errors.mission = ''; render(); } }, icon('sparkles', 'sm'), example))))),
-    footer: footer({ label: 'Home', onClick: () => go('home') }, { label: 'Continue to the agents', onClick: save, busy: ui.busy.mission }),
-    guide: [
+        h('div', { class: 'pills' }, EXAMPLES.map(example => h('button', { class: 'pill', type: 'button', onClick: () => { ui.missionDraft = example; ui.errors.mission = ''; render(); } }, icon('sparkles', 'sm'), example)))),
+      h('div', { class: 'stack enter-2' }, h('h2', {}, 'Who builds the swarm?'),
+        h('div', { class: 'choice-cards' }, [
+          ['manual', 'users', 'I build it myself', 'You add each agent, answer its questions, and choose its folder and its model. Full control, step by step.'],
+          ['leader', 'crown', 'The leader builds it', 'You choose the model of the leader and the folder of the mission. It proposes the agents, their tasks and their models, and you approve.'],
+        ].map(([mode, iconName, title, text]) => h('button', { type: 'button', class: ['choice-card', state.buildMode === mode && 'selected'], disabled: building || ui.busy.setBuildMode,
+          onClick: () => { if (state.buildMode !== mode) act('setBuildMode', { mode }); } }, h('span', { class: 'cc-icon' }, icon(iconName, 'lg')),
+          h('div', {}, h('div', { class: 'cc-title' }, title, mode === 'leader' ? badge('New', 'honey') : null), h('div', { class: 'cc-text' }, text)), h('span', { class: 'radio' }))))),
+      leaderMode ? leaderSetup(build) : null),
+    footer: footer({ label: 'Home', onClick: () => go('home') }, next),
+    guide: leaderMode ? [
+      { q: 'What the leader does', icon: 'crown', tone: 'tip', text: ['reads your mission and the files of its folder', 'chooses the agents, their tasks, their settings and their models', 'shows you all of it, with its reasons, for your approval'] },
+      { q: 'You stay in charge', text: 'Nothing is made before you approve. Ask for changes in your own words: the leader writes its proposal again. Passwords and API keys are asked to you, never to the leader.' },
+      { q: 'While the swarm works', text: 'The leader can propose to add an agent, to remove one (to free a GPU, for example) or to change a model. Each proposal comes with its reason, and waits for your approval.' },
+    ] : [
       { q: 'Why a mission?', text: 'The agents work better when they know the goal of the whole team, not only their own task.', tone: 'tip', icon: 'target' },
       { q: 'Good missions are', text: ['concrete: what must exist at the end', 'short: one or two sentences', 'in your own words: no special format'] },
       { q: 'Example', text: '"Write a 500-word survey on battery recycling and email it to my supervisor."' },
     ],
   };
+}
+
+// The leader that builds the swarm: its model and the folder of the mission, then the button that asks it to build.
+function leaderSetup(build) {
+  const state = store.state;
+  const leader = state.agents.find(agent => agent.builder);
+  if (!leader) return null;
+  const job = state.jobs.leader;
+  const building = job?.state === 'running';
+  const others = state.agents.filter(agent => !agent.builder);
+  const form = ui.errors.leader || {};
+  const draft = ui.folderDrafts[leader.id] ?? leader.folder ?? '';
+  const folderError = (ui.errors[`folder-${leader.id}`] || {}).errors?.folder || form.errors?.folder;
+  const saveFolder = folder => act('setFolder', { agentId: leader.id, folder }, { busy: `folder-${leader.id}`, form: folderForm(leader) }).then(data => {
+    if (data) { ui.folderDrafts[leader.id] = undefined; if (ui.errors.leader?.errors) delete ui.errors.leader.errors.folder; }
+    render();
+  });
+  return h('div', { class: 'card enter-3 leader-setup' },
+    h('div', { class: 'card-head' }, taskIcon('leader'), h('div', { class: 'grow' }, h('h3', {}, `${leader.name}, the leader that builds your swarm`),
+      h('div', { class: 'small muted' }, 'It works last: it follows the agents, proposes changes to you, and writes the final report.'))),
+    h('div', { class: 'card-body stack' },
+      h('div', { class: ['field', folderError && 'has-error'] }, h('label', { class: 'field-label' }, 'The folder of the mission', h('span', { class: 'req' }, '*')),
+        h('div', { class: 'input-group' },
+          h('div', { class: 'input-wrap' }, h('span', { class: 'input-icon' }, icon('folder', 'sm')),
+            h('input', { class: 'input with-icon', 'data-key': `folder-${leader.id}`, value: draft, placeholder: 'Write a path or press Browse', disabled: building,
+              onInput: event => { ui.folderDrafts[leader.id] = event.target.value; }, onKeydown: event => { if (event.key === 'Enter') saveFolder(event.target.value); },
+              onBlur: event => { if (event.target.value !== (leader.folder || '')) saveFolder(event.target.value); } })),
+          button('Browse…', { iconName: 'folderOpen', disabled: building, onClick: () => pickPath('folder', draft, path => { ui.folderDrafts[leader.id] = path; saveFolder(path); }) })),
+        folderError ? h('div', { class: 'field-error' }, icon('alert'), folderError) :
+          h('div', { class: 'field-help' }, icon('info'), 'The leader reads the names of its files to choose the agents. Every agent works in it, and the final report is saved in it.')),
+      h('div', { class: ['field', form.errors?.model && 'has-error'] }, h('label', { class: 'field-label' }, 'The model of the leader', h('span', { class: 'req' }, '*')),
+        h('div', { class: 'row wrap' }, leader.model ? h('span', { class: 'model-chip' }, icon(modelIcon(leader.model), 'sm'), h('span', {}, modelName(leader.model))) : h('span', { class: 'small faint' }, 'No model yet.'),
+          button(leader.model ? 'Change' : 'Choose its model', { kind: leader.model ? '' : 'primary', size: 'sm', iconName: leader.model ? 'refresh' : 'plus', disabled: building, onClick: () => openModelPicker(leader) })),
+        form.errors?.model ? h('div', { class: 'field-error' }, icon('alert'), form.errors.model) :
+          h('div', { class: 'field-help' }, icon('info'), 'It must plan well and write its proposals in a strict format: a capable model is worth it here.'),
+        leader.missing.length ? callout('warning', 'download', h('b', {}, `This model needs ${leader.missing.join(', ')}.`), codeLine(`pip install -U ${leader.missing.join(' ')}`)) : null),
+      others.length && !(job?.state === 'done') ? callout('info', 'info', `Your ${plural(others.length, 'agent')} (${others.map(agent => agent.name).join(', ')}) will be replaced by the swarm of the leader when you approve it.`) : null,
+      building ? h('div', { class: 'row building' }, spinner(), h('div', { class: 'grow' }, h('b', {}, `${leader.name} is building your swarm…`),
+        h('div', { class: 'small muted' }, 'Its proposal opens in a window for your approval. You can ask for changes in your own words.'))) :
+        job?.state === 'failed' ? callout('danger', 'alert', h('b', {}, 'The leader could not build the swarm.'), h('div', {}, job.error)) :
+          state.agents.length > 1 ? callout('success', 'checkCircle', h('b', {}, `The leader built a swarm of ${plural(others.length, 'agent')}.`), h('div', {}, 'Check it in the next steps: you can still change any agent. Or ask the leader for a new proposal.')) : null,
+      form.error && !Object.keys(form.errors || {}).length ? callout('danger', 'alert', form.error) : null,
+      state.agents.length > 1 ? h('div', { class: 'row' }, h('div', { class: 'grow' }),
+        button('Ask for a new proposal', { kind: 'soft', iconName: 'sparkles', busy: ui.busy.buildWithLeader || building, onClick: build })) : null));
 }
 
 
@@ -560,9 +644,20 @@ function viewMission() {
 function viewAgents() {
   const state = store.state;
   const agents = state.agents;
+  const leaderMode = state.buildMode === 'leader';
+  if (leaderMode && agents.length <= 1) {
+    return {
+      header: header(stepEyebrow('agents'), 'Who is in your team?', 'The leader builds your team from your mission.'),
+      content: h('div', { class: 'card empty enter' }, h('div', { class: 'empty-icon' }, icon('crown', 'xl')), h('h2', {}, 'The leader did not build the swarm yet'),
+        h('p', { style: { margin: '8px auto 18px', maxWidth: '460px' } }, 'Give the leader its model and the folder of the mission, then ask it to build the swarm. You approve its proposal before anything is made.'),
+        button('Go to the leader', { kind: 'primary', size: 'lg', iconName: 'crown', onClick: () => go('mission') })),
+      footer: footer({ onClick: () => go('mission') }, null),
+      guide: null,
+    };
+  }
   return {
-    header: header(stepEyebrow('agents'), 'Who is in your team?', 'Add an agent for each task. The first agent is the leader: it does its own task, works last, and summarises the work of the others for you.',
-      null),
+    header: header(stepEyebrow('agents'), 'Who is in your team?', leaderMode ? 'The team the leader proposed and you approved. You can still change, add or remove agents: the leader stays first and leads.' :
+      'Add an agent for each task. The first agent is the leader: it does its own task, works last, and summarises the work of the others for you.', null),
     content: h('div', { class: 'stack' },
       agents.length === 0 ? h('div', { class: 'card empty enter' }, h('div', { class: 'empty-icon' }, icon('users', 'xl')), h('h2', {}, 'Your team is empty'),
         h('p', { style: { margin: '8px auto 18px', maxWidth: '440px' } }, 'Add your first agent: choose what it must do, then answer a few questions about it. One agent is enough to start.'),
@@ -572,7 +667,11 @@ function viewAgents() {
             h('span', { class: 'small faint', style: { fontWeight: '500' } }, 'Email, survey, briefing, code…')))),
     footer: footer({ onClick: () => go('mission') }, { label: 'Continue to the folders', disabled: !agents.length, onClick: () => go('folders') },
       agents.length ? { text: `${plural(agents.length, 'agent')} · ${agents[0].name} leads` } : { text: 'Add at least one agent to continue.' }),
-    guide: [
+    guide: leaderMode ? [
+      { q: 'Built by the leader', icon: 'crown', tone: 'tip', text: 'Each card says why the leader chose the agent. Click a card to change its settings, as if you had added it yourself.' },
+      { q: 'Want another team?', text: 'Go back to the mission and ask the leader for a new proposal, in your own words.' },
+      { q: 'During the run', text: 'The leader may propose to add or remove agents. Every proposal waits for your approval.' },
+    ] : [
       { q: 'The leader', icon: 'crown', text: 'The first agent leads the team. Use the arrows on a card to change who leads. Give the leader a capable model: it writes the summaries you approve.', tone: 'tip' },
       { q: 'One task per agent', text: 'An agent does one thing well. For an email and a survey, add two agents: they work at the same time.' },
       { q: 'You can change your mind', text: 'Click a card to edit it. A removed agent can be brought back right away with Undo.' },
@@ -583,6 +682,16 @@ function viewAgents() {
 function agentCard(agent, index, total) {
   const move = position => act('moveAgent', { agentId: agent.id, position });
   const stop = handler => event => { event.stopPropagation(); handler(); };
+  const builderLeads = store.state.buildMode === 'leader';
+  if (agent.builder) {
+    return h('div', { class: ['card agent-card leader', ui.animate && 'enter'], role: 'button', tabindex: '0', onClick: () => go('mission'), onKeydown: event => { if (event.key === 'Enter') go('mission'); } },
+      h('div', { class: 'row' }, taskIcon('leader'), h('div', { class: 'grow' }, h('div', { class: 'row', style: { gap: '6px' } }, h('h3', {}, agent.name), h('span', { class: 'leader-mark', title: 'Leader' }, icon('crown', 'sm'))),
+        h('div', { class: 'small muted' }, taskOf('leader').label)), badge('Leader', 'honey')),
+      h('p', { class: 'agent-desc' }, agent.description),
+      h('div', { class: 'row wrap', style: { gap: '6px' } }, agent.folder ? badge(shorten(agent.folder.split(/[\\/]/).pop() || agent.folder, 24), '', 'folder') : null,
+        agent.model ? badge(shorten(modelName(agent.model), 30), { cli: 'honey', local: 'primary', api: 'info' }[modelKind(agent.model)], modelIcon(agent.model)) : null),
+      h('div', { class: 'agent-actions' }, button('Its model and folder', { kind: 'ghost', size: 'sm', iconName: 'edit', onClick: stop(() => go('mission')) })));
+  }
   return h('div', { class: ['card agent-card', agent.isLeader && 'leader', ui.animate && 'enter'], role: 'button', tabindex: '0', onClick: () => openAgentForm(agent.task, agent.id),
     onKeydown: event => { if (event.key === 'Enter') openAgentForm(agent.task, agent.id); } },
     h('div', { class: 'row' }, taskIcon(agent.task),
@@ -590,13 +699,14 @@ function agentCard(agent, index, total) {
         h('div', { class: 'small muted' }, taskOf(agent.task).label)),
       agent.isLeader ? badge('Leader', 'honey') : badge(`#${index + 1}`, 'outline')),
     h('p', { class: 'agent-desc' }, agent.description),
+    agent.why ? h('p', { class: 'agent-why small' }, icon('crown', 'sm'), ` ${agent.why}`) : null,
     h('div', { class: 'row wrap', style: { gap: '6px' } }, agent.folder ? badge(shorten(agent.folder.split(/[\\/]/).pop() || agent.folder, 24), '', 'folder') : null,
-      agent.model ? badge(shorten(agent.model.name, 26), agent.model.local ? 'primary' : 'info', agent.model.local ? 'cpu' : 'cloud') : null),
+      agent.model ? badge(shorten(modelName(agent.model), 30), { cli: 'honey', local: 'primary', api: 'info' }[modelKind(agent.model)], modelIcon(agent.model)) : null),
     h('div', { class: 'agent-actions' },
       button('Edit', { kind: 'ghost', size: 'sm', iconName: 'edit', onClick: stop(() => openAgentForm(agent.task, agent.id)) }),
-      !agent.isLeader ? button('Make leader', { kind: 'ghost', size: 'sm', iconName: 'crown', onClick: stop(() => move(0)) }) : null,
+      !agent.isLeader && !builderLeads ? button('Make leader', { kind: 'ghost', size: 'sm', iconName: 'crown', onClick: stop(() => move(0)) }) : null,
       h('div', { class: 'spacer grow' }),
-      button('', { kind: 'ghost', size: 'sm', iconName: 'chevronLeft', title: 'Move earlier', disabled: index === 0, onClick: stop(() => move(index - 1)) }),
+      button('', { kind: 'ghost', size: 'sm', iconName: 'chevronLeft', title: 'Move earlier', disabled: index === 0 || (builderLeads && index === 1), onClick: stop(() => move(index - 1)) }),
       button('', { kind: 'ghost', size: 'sm', iconName: 'chevronRight', title: 'Move later', disabled: index === total - 1, onClick: stop(() => move(index + 1)) }),
       button('', { kind: 'ghost', size: 'sm', iconName: 'trash', title: `Remove ${agent.name}`, onClick: stop(() => removeAgent(agent)) })));
 }
@@ -606,20 +716,21 @@ async function removeAgent(agent) {
   if (data) toast(`${agent.name} was removed.`, 'info', { label: 'Undo', run: () => act('undoRemove', {}, { ok: `${agent.name} is back.` }) });
 }
 
-function taskPickerModal() {
+function taskPickerModal(modal) {
   return modalFrame({
     size: 'wide', iconEl: h('span', { class: 'task-icon lg', style: { '--task': '#5B4CF0', '--task-soft': '#5B4CF026' } }, icon('plus', 'lg')), title: 'What must this agent do?',
     subtitle: 'Choose a task. Next, you answer a few questions about it.',
     body: h('div', { class: 'task-grid' }, store.catalog.tasks.map(task => h('button', { class: 'task-tile', type: 'button', style: { '--task': taskStyle(task.key).color, '--task-shadow': tint(taskStyle(task.key).color, 0.45) },
-      onClick: () => { closeModal(); openAgentForm(task.key, null); } }, taskIcon(task.key), h('div', {}, h('h3', {}, task.label), h('p', {}, firstSentence(task.info)))))),
+      onClick: () => { closeModal(); openAgentForm(task.key, null, modal.live); } }, taskIcon(task.key), h('div', {}, h('h3', {}, task.label), h('p', {}, firstSentence(task.info)))))),
     foot: [h('div', { class: 'spacer' }), button('Cancel', { kind: 'ghost', onClick: closeModal })],
   });
 }
 
 // ---------- The form of an agent ----------
-async function openAgentForm(task, agentId) {
+// live: the agent is prepared from the live view, to join the swarm while it runs (then come its model, and the step to join).
+async function openAgentForm(task, agentId, live = false) {
   const modal = { type: 'agent', task, agentId, form: null, values: {}, touched: {}, errors: {}, error: '', name: '', reveal: {}, checks: {}, outletGroup: null,
-    outletSearch: '', feedUrl: '', publisherSearch: '', publisherResults: null, chats: null, advanced: false, about: !agentId };
+    outletSearch: '', feedUrl: '', publisherSearch: '', publisherResults: null, chats: null, advanced: false, about: !agentId, live };
   openModal(modal);
   const data = await act('taskForm', { task, agentId }, { busy: 'form' });
   if (!data) { closeModal(); return; }
@@ -887,9 +998,15 @@ function agentFormModal(modal) {
   if (!modal.form) return modalFrame({ size: 'wide', iconEl: taskIcon(modal.task, 'lg'), title: task.label, body: loading('Preparing the questions…') });
   const visible = modal.form.fields.filter(field => field.visible);
   const save = async () => {
-    const data = await act('saveAgent', { task: modal.task, agentId: modal.agentId, values: modal.values, name: modal.name }, { busy: 'saveAgent', form: modal });
+    const data = await act('saveAgent', { task: modal.task, agentId: modal.agentId, values: modal.values, name: modal.name, live: modal.live }, { busy: 'saveAgent', form: modal });
     if (data) {
       closeModal();
+      const agent = store.state.agents.find(item => item.id === data.agentId);
+      if (agent?.pending) {
+        toast(`${agent.name} is ready. Now choose its model.`, 'success');
+        if (!agent.model) openModelPicker(agent, { live: true });
+        return;
+      }
       toast(editing ? `${modal.name || 'The agent'} is updated.` : `${modal.name || 'The agent'} joined the swarm.`, 'success');
       if (data.warning) toast(data.warning, 'warning');
       return;
@@ -1070,7 +1187,8 @@ function viewModels() {
   const state = store.state;
   const agents = state.agents;
   const missing = agents.filter(agent => !agent.model);
-  const providers = [...new Set(agents.filter(agent => agent.model && !agent.model.local).map(agent => agent.model.provider))];
+  const providers = [...new Set(agents.filter(agent => agent.model && !agent.model.local && agent.model.provider).map(agent => agent.model.provider))];
+  const codex = agents.some(agent => agent.model?.cli === 'codex');
   return {
     header: header(stepEyebrow('models'), 'Give each agent a brain', 'The model is the AI that does the thinking. It runs on your own GPUs (free and private) or on the servers of a company (paid, through an API key).'),
     content: h('div', { class: 'stack loose' },
@@ -1081,15 +1199,33 @@ function viewModels() {
       h('div', { class: 'agent-rows' }, agents.map(agent => modelRow(agent))),
       providers.length ? h('div', { class: 'card pad' }, h('div', { class: 'row', style: { marginBottom: '10px' } }, icon('key'), h('h3', {}, 'API keys')),
         h('div', { class: 'stack tight' }, providers.map(provider => { const key = state.keys[provider]; return h('div', { class: 'row small' }, icon('lock', 'sm'), h('b', {}, key.company),
-          h('span', { class: 'muted' }, key.source === 'environment' ? `read from ${key.variable}` : key.source === 'typed' ? 'given by you, kept in memory only' : 'missing')); }))) : null),
+          h('span', { class: 'muted' }, key.source === 'environment' ? `read from ${key.variable}` : key.source === 'typed' ? 'given by you, kept in memory only' : 'missing')); }),
+          codex ? h('div', { class: 'row small' }, icon('user', 'sm'), h('b', {}, 'Codex'), h('span', { class: 'muted' }, 'your ChatGPT plan, signed in through Codex')) : null)) :
+        codex ? h('div', { class: 'card pad' }, h('div', { class: 'row small' }, icon('user', 'sm'), h('b', {}, 'Codex'), h('span', { class: 'muted' }, 'uses your ChatGPT plan, signed in through Codex'))) : null),
     footer: footer({ onClick: () => go('folders') }, { label: 'Continue to the teamwork', disabled: missing.length > 0, onClick: () => go('teamwork') },
       missing.length ? { text: `Choose a model for ${missing.map(agent => agent.name).join(', ')}.` } : { text: 'Every agent has a model.' }),
     guide: [
-      { q: 'Local or API?', icon: 'cpu', tone: 'tip', text: ['Local: free and private, but the model must fit in the memory (VRAM) of your GPUs.', 'API: the best models without a GPU. You pay for what you use and need a key.'] },
+      { q: 'Local, API or coding agent?', icon: 'cpu', tone: 'tip', text: ['Local: free and private, but the model must fit in the memory (VRAM) of your GPUs.', 'API: the best models without a GPU. You pay for what you use and need a key.',
+        'Coding agent: Claude Code or Codex on this computer. They can also read files and run commands, each time with your approval.'] },
       { q: 'Which one?', text: 'Start with a recommended model: they are picked for the task of the agent, from the smallest to the largest. Bigger models think better but cost more VRAM or money.' },
       { q: 'The leader', icon: 'crown', text: 'Besides its own task, the leader writes the summaries you approve. A capable model is worth it here.' },
     ],
   };
+}
+
+// The three kinds of models: on the GPUs, through an API, or a coding agent of this computer (Claude Code, Codex).
+function modelKind(model) {
+  return model?.cli ? 'cli' : model?.local ? 'local' : 'api';
+}
+
+function modelIcon(model) {
+  return { cli: 'terminal', local: 'cpu', api: 'cloud' }[modelKind(model)];
+}
+
+function modelName(model) {
+  if (!model?.cli) return model?.name || '';
+  const agent = store.catalog.codingAgents[model.cli];
+  return model.name === store.catalog.defaultCliModel ? `${agent.label} (its default model)` : `${agent.label} · ${model.name}`;
 }
 
 function modelRow(agent) {
@@ -1100,8 +1236,9 @@ function modelRow(agent) {
       h('div', { class: 'agent-row-head' }, h('span', { class: 'agent-row-name' }, agent.name), agent.isLeader ? badge('Leader', 'honey', 'crown') : null,
         h('span', { class: 'small muted' }, taskOf(agent.task).label), h('span', { class: 'grow' }),
         model ? button('Change', { size: 'sm', iconName: 'refresh', onClick: () => openModelPicker(agent) }) : button('Choose a model', { kind: 'primary', size: 'sm', iconName: 'plus', onClick: () => openModelPicker(agent) })),
-      model ? h('div', { class: 'row wrap' }, h('span', { class: 'model-chip' }, icon(model.local ? 'cpu' : 'cloud', 'sm'), h('span', {}, model.name)),
-        model.local ? badge(`${model.vram} GB of VRAM${model.bits < 16 ? `, ${model.bits}-bit` : ''}`, 'primary') : badge(model.company, 'info'),
+      model ? h('div', { class: 'row wrap' }, h('span', { class: 'model-chip' }, icon(modelIcon(model), 'sm'), h('span', {}, modelName(model))),
+        model.local ? badge(`${model.vram} GB of VRAM${model.bits < 16 ? `, ${model.bits}-bit` : ''}`, 'primary') :
+          model.cli === 'codex' ? badge('Your ChatGPT plan', 'honey', 'user') : model.cli ? badge('Your Anthropic API key', 'honey', 'key') : badge(model.company, 'info'),
         model.gated ? badge('Licence needed', 'warning', 'lock') : null,
         !model.local ? (agent.tested === 'ok' ? badge('Connection works', 'success', 'check') : agent.tested === 'failed' ? badge('Connection failed', 'danger', 'x') :
           button('Test the connection', { kind: 'ghost', size: 'sm', iconName: 'zap', busy: ui.busy[`test-${agent.id}`], onClick: () => testModel(agent) })) : null) :
@@ -1115,15 +1252,17 @@ async function testModel(agent) {
   if (data) toast(data.problem ? `It did not work: ${data.problem}` : `${agent.model.name} answered: ${data.answer}`, data.problem ? 'danger' : 'success');
 }
 
-async function openModelPicker(agent) {
+async function openModelPicker(agent, options = {}) {
   const current = agent.model;
   const modal = { type: 'model', agentId: agent.id, agentName: agent.name, task: agent.task, where: null, tab: 'recommended', family: null, provider: null, bits: current?.local ? current.bits : 16,
-    catalog: null, selected: current ? { ...current } : null, apiKey: '', hfToken: '', newKey: false, prices: {}, other: { name: '', billions: '', provider: 'claude', found: null }, errors: {}, error: '' };
+    catalog: null, selected: current ? { ...current } : null, apiKey: '', hfToken: '', newKey: false, prices: {}, other: { name: '', billions: '', provider: 'claude', found: null }, errors: {}, error: '',
+    cli: current?.cli || 'claude-code', live: !!options.live };
   openModal(modal);
   await loadCatalog(modal);
   if (!modal.catalog) return;
   const hasGpu = modal.catalog.gpu.gpus.length > 0;
-  modal.where = current ? (current.local ? 'local' : 'api') : hasGpu ? 'local' : 'api';
+  modal.where = current ? modelKind(current) : hasGpu ? 'local' : 'api';
+  if (modal.where === 'cli' && modal.cli === 'codex') loadCodex();
   render();
 }
 
@@ -1186,7 +1325,8 @@ function modelPickerModal(modal) {
   const families = store.catalog.families;
   const providers = Object.keys(store.catalog.providers);
   let list;
-  if (where === 'local') {
+  if (where === 'cli') list = codingAgentPanel(modal);
+  else if (where === 'local') {
     if (modal.tab === 'recommended') list = h('div', { class: 'model-list' }, catalog.local.map(entry => localOption(modal, entry)));
     else if (modal.tab === 'all') {
       modal.family = modal.family || families[0];
@@ -1206,14 +1346,15 @@ function modelPickerModal(modal) {
   const choose = async () => {
     const selected = modal.selected;
     const payload = { agentId: modal.agentId, name: selected.name, local: selected.local, bits: modal.bits, billions: selected.local && selected.custom ? selected.billions : null,
-      provider: selected.provider, apiKey: modal.apiKey, hfToken: modal.hfToken };
+      provider: selected.provider, cli: selected.cli || null, apiKey: modal.apiKey, hfToken: modal.hfToken };
     const data = await act('chooseModel', payload, { busy: 'chooseModel', form: modal });
     if (!data) { render(); return; }
     closeModal();
-    toast(`${modal.agentName} now thinks with ${selected.name}.`, 'success');
+    toast(`${modal.agentName} now thinks with ${modelName(selected)}.`, 'success');
+    if (modal.live) openModal({ type: 'join', agentId: modal.agentId, waits: [], folder: null, errors: {}, error: '' });
     if (data.warning) toast(data.warning, 'warning');
     if (data.download && !data.download.downloaded) toast(`${selected.name} will be downloaded at the first start: about ${data.download.size} GB${data.download.free !== null ? `, and ${data.download.free} GB are free on the disk` : ''}.`, 'info');
-    if (!selected.local) toast('Check that the key works with a tiny request (it costs a fraction of a cent).', 'info', { label: 'Test now', run: () => testModel(store.state.agents.find(agent => agent.id === modal.agentId)) });
+    if (!selected.local && selected.cli !== 'codex') toast('Check that the key works with a tiny request (it costs a fraction of a cent).', 'info', { label: 'Test now', run: () => testModel(store.state.agents.find(agent => agent.id === modal.agentId)) });
   };
   return modalFrame({
     size: 'xl', iconEl: taskIcon(modal.task, 'lg'), title: `Model for ${modal.agentName}`, subtitle: `${taskOf(modal.task).label}. The recommended models suit this task.`,
@@ -1225,17 +1366,21 @@ function modelPickerModal(modal) {
             h('div', { class: 'cc-text' }, hasGpu ? `Private and free. It must fit in your ${catalog.gpu.total} GB of VRAM (${catalog.gpu.free} GB free now).` : 'No supported GPU was found on this computer.')), h('span', { class: 'radio' })),
         h('button', { type: 'button', class: ['choice-card', where === 'api' && 'selected'], onClick: () => { modal.where = 'api'; modal.tab = 'recommended'; render(); } },
           h('span', { class: 'cc-icon', style: { background: 'var(--info-soft)', color: 'var(--info-text)' } }, icon('cloud', 'lg')), h('div', {}, h('div', { class: 'cc-title' }, 'Through an API', badge('Paid', 'info')),
-            h('div', { class: 'cc-text' }, 'The models of OpenAI, Anthropic, Google and DeepSeek. Every use is billed, and you need an API key.')), h('span', { class: 'radio' }))),
+            h('div', { class: 'cc-text' }, 'The models of OpenAI, Anthropic, Google and DeepSeek. Every use is billed, and you need an API key.')), h('span', { class: 'radio' })),
+        h('button', { type: 'button', class: ['choice-card', where === 'cli' && 'selected'], onClick: () => { modal.where = 'cli'; if (modal.cli === 'codex') loadCodex(); render(); } },
+          h('span', { class: 'cc-icon', style: { background: 'var(--honey-soft)', color: 'var(--honey-text)' } }, icon('terminal', 'lg')), h('div', {}, h('div', { class: 'cc-title' }, 'A coding agent', badge('Claude Code · Codex', 'honey')),
+            h('div', { class: 'cc-text' }, 'Claude Code or Codex on this computer. It can also read files and run commands, each time with your approval.')), h('span', { class: 'radio' }))),
       where === 'local' ? h('div', { class: 'card pad', style: { boxShadow: 'none' } }, gpuMeter(catalog.gpu, extra, modal.selected?.local ? shorten(modal.selected.name, 30) : 'This model'),
         h('div', { class: 'row wrap', style: { marginTop: '14px' } }, h('b', { class: 'small' }, 'Memory saver'),
           h('div', { class: 'segmented' }, store.catalog.bits.map(bits => h('button', { type: 'button', class: modal.bits === bits && 'active', onClick: () => { modal.bits = bits; loadCatalog(modal); } },
             bits === 16 ? 'Full quality' : `${bits}-bit (${bits === 8 ? 'half' : 'quarter'} the memory)`))),
           h('span', { class: 'small muted grow' }, modal.bits === 16 ? 'Compress a model to fit a smaller GPU, at a small cost in quality.' : 'Needs the bitsandbytes package.'))) : null,
-      where ? h('div', {}, h('div', { class: 'tabs' }, [['recommended', 'Recommended', 'sparkles'], ['all', 'All models', 'list'], ['other', where === 'local' ? 'Another model of Hugging Face' : 'Another model', 'edit']]
+      where === 'cli' ? list : where ? h('div', {}, h('div', { class: 'tabs' }, [['recommended', 'Recommended', 'sparkles'], ['all', 'All models', 'list'], ['other', where === 'local' ? 'Another model of Hugging Face' : 'Another model', 'edit']]
         .map(([tab, label, iconName]) => h('button', { type: 'button', class: modal.tab === tab && 'active', onClick: () => { modal.tab = tab; render(); } }, icon(iconName, 'sm'), label))), list) : null,
-      modal.selected && where === (modal.selected.local ? 'local' : 'api') ? selectionPanel(modal) : null),
+      modal.selected && where === modelKind(modal.selected) ? selectionPanel(modal) : null),
     foot: [modal.error ? h('div', { class: 'small', style: { color: 'var(--danger-text)', maxWidth: '520px' } }, modal.error) : null, h('div', { class: 'spacer' }), button('Cancel', { kind: 'ghost', onClick: closeModal }),
-      button('Use this model', { kind: 'primary', iconName: 'check', busy: ui.busy.chooseModel, disabled: !modal.selected || where !== (modal.selected.local ? 'local' : 'api') || modal.selected.status === 'tooBig', onClick: choose })],
+      button('Use this model', { kind: 'primary', iconName: 'check', busy: ui.busy.chooseModel, disabled: !modal.selected || where !== modelKind(modal.selected) || modal.selected.status === 'tooBig' ||
+        (modal.selected.cli === 'codex' && !ui.codex.data?.account?.signedIn) || (modal.selected.cli === 'claude-code' && modal.catalog.cli['claude-code'].missing.length > 0), onClick: choose })],
   });
 }
 
@@ -1296,10 +1441,18 @@ function selectionPanel(modal) {
           h('input', { class: 'input', type: 'password', 'data-key': 'hf-token', value: modal.hfToken, placeholder: 'hf_…', onInput: event => { modal.hfToken = event.target.value; } }))) : null,
       h('div', { class: 'small muted', style: { marginTop: '10px' } }, 'It is downloaded to the Hugging Face cache the first time the swarm starts (the folder of the HF_HOME environment variable).'));
   }
+  if (selected.cli === 'codex') {
+    const account = ui.codex.data?.account;
+    return h('div', { class: 'card pad selection-panel', style: { boxShadow: 'none', background: 'var(--surface-2)' } },
+      h('div', { class: 'row', style: { marginBottom: '10px' } }, icon('terminal'), h('h3', { class: 'grow' }, modelName(selected)), badge('Your ChatGPT plan', 'honey', 'user')),
+      account?.signedIn ? h('div', { class: 'row small' }, icon('checkCircle', 'sm'), `Codex is signed in${account.email ? ` as ${account.email}` : ''}. Its use counts in the limits of your plan.`) :
+        h('div', { class: 'small muted' }, 'Sign in to Codex above to use it.'));
+  }
   const key = store.state.keys[selected.provider];
   const askKey = !key.source || modal.newKey;
   return h('div', { class: 'card pad selection-panel', style: { boxShadow: 'none', background: 'var(--surface-2)' } },
-    h('div', { class: 'row', style: { marginBottom: '10px' } }, icon('cloud'), h('h3', { class: 'grow' }, selected.name), badge(key.company, 'info')),
+    h('div', { class: 'row', style: { marginBottom: '10px' } }, icon(modelIcon(selected)), h('h3', { class: 'grow' }, modelName(selected)), badge(key.company, 'info')),
+    selected.cli ? h('div', { class: 'small muted', style: { marginBottom: '10px' } }, 'Claude Code is billed through your Anthropic API key, like the API models. Anthropic does not allow other programs to use a Claude subscription, so your Claude plan cannot be used here.') : null,
     !askKey ? h('div', { class: 'row small' }, icon('checkCircle', 'sm'), h('span', { class: 'grow' }, key.source === 'environment' ? `Using the API key of ${key.variable}.` : 'Using the API key you gave earlier (kept in memory only).'),
       h('button', { class: 'link-btn', type: 'button', onClick: () => { modal.newKey = true; render(); } }, 'Use another key')) :
       h('div', { class: ['field', modal.errors.apiKey && 'has-error'] }, h('label', { class: 'field-label' }, `Your ${key.company} API key`, h('span', { class: 'req' }, '*')),
@@ -1307,6 +1460,91 @@ function selectionPanel(modal) {
           value: modal.apiKey, placeholder: 'Paste it here', onInput: event => { modal.apiKey = event.target.value; } })),
         modal.errors.apiKey ? h('div', { class: 'field-error' }, icon('alert'), modal.errors.apiKey) : null,
         h('div', { class: 'field-help' }, icon('lock'), h('span', {}, 'Only kept in memory while SwarmUP runs, never saved. ', extLink(key.page, 'Create a key'), ` Next time, set ${key.variable} instead of typing it.`))));
+}
+
+
+// The coding agents: which one, whether it is installed, the sign-in of Codex, and the model it uses.
+function codingAgentPanel(modal) {
+  const agents = store.catalog.codingAgents;
+  const pick = cli => { modal.cli = cli; modal.selected = null; if (cli === 'codex') loadCodex(); render(); };
+  const cards = h('div', { class: 'where-cards two' }, [['claude-code', 'Anthropic API key', 'Claude Code by Anthropic. Billed per use through your Anthropic API key.'],
+    ['codex', 'ChatGPT plan', 'Codex by OpenAI. Uses your ChatGPT plan: sign in once with your ChatGPT account.']].map(([cli, tag, text]) =>
+    h('button', { type: 'button', class: ['choice-card', modal.cli === cli && 'selected'], onClick: () => pick(cli) }, h('span', { class: 'cc-icon', style: { background: 'var(--honey-soft)', color: 'var(--honey-text)' } }, icon('terminal', 'lg')),
+      h('div', {}, h('div', { class: 'cc-title' }, agents[cli].label, badge(tag, 'outline')), h('div', { class: 'cc-text' }, text)), h('span', { class: 'radio' }))));
+  const option = (cli, name, title, description, isDefault) => {
+    const selected = modal.selected?.cli === cli && modal.selected.name === name;
+    return h('button', { type: 'button', class: ['model-option', selected && 'selected'], onClick: () => {
+      modal.selected = { cli, name, local: false, provider: agents[cli].provider, company: agents[cli].company }; modal.errors = {}; modal.reveal = true; render(); } },
+      h('span', { class: 'radio' }), h('div', { style: { minWidth: '0' } }, h('div', { class: 'mo-name' }, title), description ? h('div', { class: 'mo-sub' }, description) : null),
+      h('div', { class: 'mo-side' }, isDefault ? badge('Recommended', 'success') : null));
+  };
+  const permissions = callout('neutral', 'shield', h('b', {}, 'You stay in control.'), h('div', {}, 'It reads the files of its folder freely. Anything else (a command, a change of a file, a web page, a file outside its folder) waits for your approval in the conversation: allow it once, until the next run, or deny it.'));
+  if (modal.cli === 'claude-code') {
+    const missing = modal.catalog.cli['claude-code'].missing;
+    return h('div', { class: 'stack' }, cards,
+      missing.length ? callout('warning', 'download', h('b', {}, 'Claude Code needs its Python library.'), h('div', {}, 'It contains Claude Code itself. Install it in a terminal, then check again:'),
+        codeLine(`pip install -U ${missing.join(' ')}`), h('div', {}, button('Check again', { size: 'sm', iconName: 'refresh', busy: ui.busy.catalog, onClick: () => loadCatalog(modal) }))) :
+        h('div', { class: 'model-list' }, agents['claude-code'].models.map(name => name === store.catalog.defaultCliModel ? option('claude-code', name, 'Let Claude Code choose', 'Its default model.', true) :
+          option('claude-code', name, name, 'Anthropic', false))),
+      permissions);
+  }
+  return h('div', { class: 'stack' }, cards, codexAccountPanel(), ui.codex.data?.account?.signedIn ? h('div', { class: 'model-list' },
+    option('codex', store.catalog.defaultCliModel, 'Let Codex choose', 'Its default model for your plan.', true),
+    ...(ui.codex.data.models || []).map(model => option('codex', model.id, model.name, model.description, false))) : null, permissions);
+}
+
+async function loadCodex() {
+  if (ui.codex.loading) return;
+  ui.codex.loading = true;
+  render();
+  try {
+    ui.codex.data = (await api('codexAccount')).codex;
+  } catch (error) {
+    ui.codex.data = { problem: error.message, account: null, models: [] };
+  }
+  ui.codex.loading = false;
+  render();
+}
+
+// Where Codex stands: installed or not, the right version or not, signed in or not, and the sign-in itself while it happens.
+function codexAccountPanel() {
+  const data = ui.codex.data;
+  if (ui.codex.loading && !data) return loading('Asking Codex who is signed in…');
+  if (!data) return null;
+  if (data.problem) {
+    const command = (data.problem.match(/npm install -g \S+/) || [])[0];
+    return callout('warning', 'alert', h('b', {}, 'Codex cannot be used yet.'), h('div', {}, data.problem), command ? codeLine(command) : null,
+      h('div', {}, button('Check again', { size: 'sm', iconName: 'refresh', busy: ui.codex.loading, onClick: loadCodex })));
+  }
+  if (data.account?.signedIn) {
+    const who = data.account.type === 'apiKey' ? 'with an OpenAI API key (billed per use)' : `as ${data.account.email || 'your ChatGPT account'}${data.account.plan ? ` · ${data.account.plan} plan` : ''}`;
+    return callout('success', 'checkCircle', h('b', {}, `Codex is signed in ${who}.`), h('div', {}, `Codex ${data.version} on this computer.`));
+  }
+  return codexSignIn();
+}
+
+function codexSignIn() {
+  const login = store.state.codexLogin;
+  const start = method => act('codexSignIn', { method }, { busy: `codex-${method}` });
+  const cancel = () => act('codexCancel', {}, { busy: 'codexCancel' });
+  if (login?.state === 'waiting' && login.method === 'code') {
+    return h('div', { class: 'card pad sign-in' }, h('div', { class: 'row' }, spinner(), h('h3', {}, 'Type this code on the page of OpenAI')),
+      h('div', { class: 'device-code' }, login.code, button('', { kind: 'ghost', size: 'sm', iconName: 'copy', title: 'Copy the code', onClick: () => copyText(login.code) })),
+      h('ol', { class: 'steps small' }, h('li', {}, 'Open the page: ', extLink(login.url, login.url)), h('li', {}, 'Sign in with your ChatGPT account.'), h('li', {}, 'Type the code above. SwarmUP goes on by itself as soon as Codex is signed in.')),
+      h('div', { class: 'small faint' }, 'If OpenAI refuses the code, turn on the sign-in with a code in the security settings of ChatGPT first, or use the browser sign-in.'),
+      h('div', { class: 'row' }, button('Cancel', { kind: 'ghost', size: 'sm', busy: ui.busy.codexCancel, onClick: cancel })));
+  }
+  if (login?.state === 'waiting') {
+    return h('div', { class: 'card pad sign-in' }, h('div', { class: 'row' }, spinner(), h('h3', {}, 'Sign in on the page that opened in your browser')),
+      h('p', { class: 'small muted' }, 'Sign in with your ChatGPT account and accept. The page then tells Codex on this computer, and SwarmUP goes on by itself.'),
+      h('div', { class: 'row wrap' }, extLink(login.url, 'The page did not open? Open it'), button('Use a code instead', { kind: 'ghost', size: 'sm', busy: ui.busy['codex-code'], onClick: () => start('code') }),
+        button('Cancel', { kind: 'ghost', size: 'sm', busy: ui.busy.codexCancel, onClick: cancel })));
+  }
+  return h('div', { class: 'card pad sign-in' }, h('div', { class: 'row' }, icon('user'), h('h3', {}, 'Sign in to Codex with ChatGPT')),
+    h('p', { class: 'small muted' }, 'Codex uses your ChatGPT plan. You sign in on the page of OpenAI: SwarmUP never sees your password, and Codex keeps the sign-in like it does for itself.'),
+    login?.state === 'failed' ? callout('danger', 'xCircle', login.error) : null,
+    h('div', { class: 'row wrap' }, button('Sign in with ChatGPT', { kind: 'primary', iconName: 'external', busy: ui.busy['codex-browser'], onClick: () => start('browser') }),
+      button('Use a code instead', { kind: 'ghost', busy: ui.busy['codex-code'], onClick: () => start('code'), title: 'For when the browser cannot come back to this computer' })));
 }
 
 
@@ -1482,7 +1720,7 @@ function flowGraph(nodes, stages, leader, options = {}) {
         onClick: () => options.onSelect ? options.onSelect(node.name) : openAgentForm(node.task, store.state.agents.find(agent => agent.name === node.name)?.id) },
         h('div', { class: 'row', style: { gap: '9px' } }, taskIcon(node.task, 'sm'), h('div', { style: { minWidth: '0' } }, h('div', { class: 'node-name' }, node.name, node.isLeader ? h('span', { class: 'leader-mark' }, icon('crown', 'sm')) : null),
           h('div', { class: 'node-role' }, node.role))),
-        h('div', { class: 'node-model' }, node.model ? [icon(node.model.local ? 'cpu' : 'cloud'), shorten(node.model.name, 28)] : [icon('alert'), 'No model yet']),
+        h('div', { class: 'node-model' }, node.model ? [icon(modelIcon(node.model)), shorten(modelName(node.model), 30)] : [icon('alert'), 'No model yet']),
         statusPill(status));
     }),
     h('div', { class: 'node user-node', style: { left: `${user.x}px`, top: `${user.y}px` } }, h('span', { class: 'user-avatar' }, icon('user')), h('b', {}, 'You'), h('span', { class: 'small muted' }, 'approve everything')));
@@ -1551,7 +1789,8 @@ function viewLaunch() {
   const gpu = state.gpu;
   const checks = [
     { ok: !!state.mission, text: state.mission ? `Mission: ${shorten(state.mission, 90)}` : 'Write the mission', fix: () => go('mission') },
-    { ok: agents.length > 0, text: `${plural(agents.length, 'agent')}, led by ${agents[0]?.name || 'nobody'}`, fix: () => go('agents') },
+    state.buildMode === 'leader' && agents.length <= 1 ? { ok: false, text: 'The leader did not build the swarm yet', fix: () => go('mission') } :
+      { ok: agents.length > 0, text: `${plural(agents.length, 'agent')}, led by ${agents[0]?.name || 'nobody'}${state.buildMode === 'leader' ? ', which built the swarm and can propose changes while it runs' : ''}`, fix: () => go('agents') },
     { ok: missingModels.length === 0, text: missingModels.length ? `No model for ${missingModels.map(agent => agent.name).join(', ')}` : 'Every agent has a model', fix: () => go('models') },
     missingPackages.length ? { warn: true, text: `Packages to install for ${missingPackages.map(agent => agent.name).join(', ')}: ${[...new Set(missingPackages.flatMap(agent => agent.missing))].join(', ')}`, fix: () => go('models') } : null,
     gpu && gpu.needed ? { ok: gpu.runnable, warn: !gpu.runnable, text: gpu.runnable ? `The local models need ${gpu.needed} GB of VRAM, and ${gpu.free} GB are free` : gpu.message, fix: () => go('models') } : null,
@@ -1576,7 +1815,8 @@ function viewLaunch() {
         h('div', { class: 'stack tight' }, checks.map(check => h('div', { class: 'row small' }, h('span', { style: { color: check.ok ? 'var(--success)' : check.warn ? 'var(--warning)' : 'var(--danger)' } },
           icon(check.ok ? 'checkCircle' : check.warn ? 'alert' : 'xCircle')), h('span', { class: 'grow' }, check.text), !check.ok ? h('button', { class: 'link-btn', type: 'button', onClick: check.fix }, 'Fix') : null)))),
       callout('success', 'shield', h('b', {}, 'Nothing is done without you.'), h('div', {}, 'Emails are only sent, events booked and files written after you approve the exact result. You can message any agent while it works, and stop the swarm at any time.'))),
-    footer: footer({ onClick: () => go('teamwork') }, { label: 'Start the swarm', iconName: 'rocket', size: 'lg', disabled: missingModels.length > 0, busy: ui.busy.start, onClick: start }),
+    footer: footer({ onClick: () => go('teamwork') }, { label: 'Start the swarm', iconName: 'rocket', size: 'lg', disabled: missingModels.length > 0 || (state.buildMode === 'leader' && agents.length <= 1),
+      busy: ui.busy.start, onClick: start }),
     guide: [
       { q: 'Plan or execute?', icon: 'list', tone: 'tip', text: 'Plan first is the safest: you see what every agent intends to do before anything happens, and correct it in your own words.' },
       { q: 'While it runs', text: ['the map shows who works and who waits', 'a golden light means an agent waits for you', 'the leader asks you questions on the right'] },
@@ -1614,6 +1854,8 @@ function viewRun() {
     content: h('div', { class: 'run' },
       h('div', { class: 'run-left', 'data-scroll': 'run-left' },
         h('div', { class: 'run-bar' }, h('span', { class: 'grow' }),
+          button('Add an agent', { size: 'sm', iconName: 'plus', disabled: !run.canJoin, onClick: () => openModal({ type: 'tasks', live: true }),
+            title: run.canJoin ? 'A new agent joins the swarm now, and every agent is told' : 'The leader started its final work: an agent can join when the run is over' }),
           run.running ? button('Stop the swarm', { kind: 'danger-ghost', size: 'sm', iconName: 'stop', onClick: () => openModal({ type: 'stop' }) }) : null,
           !run.running ? button('Edit the swarm', { size: 'sm', iconName: 'edit', onClick: () => go('launch') }) : null,
           !run.running ? button('New swarm', { size: 'sm', iconName: 'plus', onClick: () => openModal({ type: 'confirmNew' }) }) : null),
@@ -1621,6 +1863,7 @@ function viewRun() {
           h('div', { class: 'grow' }, h('h3', {}, 'The swarm lost its connection and is paused'), h('div', { class: 'small' }, 'Everything done so far is saved. Answer the leader on the right: try again, or cancel.'),
             h('ul', { class: 'small', style: { margin: '6px 0 0', paddingLeft: '18px' } }, Object.entries(run.interruption).map(([name, reason]) => h('li', {}, h('b', {}, name), `: ${reason}`))))) : null,
         !run.running ? resultsCard(run) : null,
+        joiningCard(),
         h('div', { class: 'card' }, h('div', { class: 'card-head' }, icon('activity'), h('h3', { class: 'grow' }, 'The swarm'), graphLegend()),
           h('div', { class: 'card-body', style: { padding: '8px 12px' } }, flowGraph(nodes, run.stages, run.leader, { mode: run.mode, selected: selectedName, onSelect: name => { ui.selected = name; render(); } }))),
         selected ? agentDetail(run, selected) : null),
@@ -1628,6 +1871,85 @@ function viewRun() {
     footer: null,
     guide: null,
   };
+}
+
+// The agents prepared in the live view that did not join yet: their model, then the step to join, or drop them.
+function joiningCard() {
+  const pending = store.state.agents.filter(agent => agent.pending);
+  if (!pending.length) return null;
+  return h('div', { class: 'card pad joining' }, h('div', { class: 'row', style: { marginBottom: '10px' } }, icon('plus'), h('h3', { class: 'grow' }, 'Waiting to join the swarm')),
+    pending.map(agent => h('div', { class: 'row wrap', style: { padding: '6px 0' } }, taskIcon(agent.task, 'sm'), h('b', {}, agent.name), h('span', { class: 'small muted grow' },
+      agent.model ? `${taskOf(agent.task).label} · ${modelName(agent.model)}` : `${taskOf(agent.task).label} · no model yet`),
+      agent.model ? button('Add it now', { kind: 'primary', size: 'sm', iconName: 'plus', onClick: () => openModal({ type: 'join', agentId: agent.id, waits: [], folder: null, errors: {}, error: '' }) }) :
+        button('Choose its model', { kind: 'soft', size: 'sm', iconName: 'cpu', onClick: () => openModelPicker(agent, { live: true }) }),
+      button('Drop it', { kind: 'ghost', size: 'sm', iconName: 'trash', busy: ui.busy[`drop-${agent.id}`], onClick: () => act('removeAgent', { agentId: agent.id }, { busy: `drop-${agent.id}` }) }))));
+}
+
+// The last step to add an agent to the swarm: who it waits for (execute mode), its folder, and when it starts.
+function joinModal(modal) {
+  const run = store.state.run;
+  const agent = store.state.agents.find(item => item.id === modal.agentId);
+  if (!agent) return modalFrame({ title: 'This agent is gone', body: h('p', {}, 'It was dropped meanwhile.'), foot: [h('div', { class: 'spacer' }), button('Close', { onClick: closeModal })] });
+  const plan = run?.mode === 'plan';
+  const others = (run?.agents || []).filter(item => !item.isLeader);
+  const folder = modal.folder ?? agent.folder ?? '';
+  const toggle = name => { modal.waits = modal.waits.includes(name) ? modal.waits.filter(other => other !== name) : [...modal.waits, name]; render(); };
+  const join = async () => {
+    const data = await act('joinLive', { agentId: agent.id, waitsFor: plan ? [] : modal.waits, folder }, { busy: 'joinLive', form: modal });
+    if (!data) { render(); return; }
+    closeModal();
+    ui.selected = agent.name;
+    toast(`${agent.name} joined the swarm. Every agent was told.`, 'success');
+  };
+  const when = !run?.running ? 'It works the next time the swarm runs.' : plan ? 'It writes its plan now, and you review it like the others.' :
+    'It starts as soon as the agents it waits for are done, receives their results, and reports to the leader.';
+  return modalFrame({
+    size: 'wide', iconEl: taskIcon(agent.task, 'lg'), title: `Add ${agent.name} to the swarm`, subtitle: `${taskOf(agent.task).label} · ${modelName(agent.model)}`,
+    body: h('div', { class: 'stack loose' },
+      callout('info', 'info', h('b', {}, when), h('div', {}, 'Every agent of the swarm is told that it joined. Nobody waits for it, so the work already planned goes on as it is.')),
+      plan ? null : h('div', { class: 'field' }, h('label', { class: 'field-label' }, 'Must it wait for other agents?', h('span', { class: 'opt' }, 'optional')),
+        others.length ? h('div', { class: 'pills' }, others.map(other => h('button', { type: 'button', class: ['pill sm', modal.waits.includes(other.name) && 'selected'], onClick: () => toggle(other.name) },
+          h('span', { class: 'check' }, modal.waits.includes(other.name) ? icon('check') : null), other.name, h('span', { class: 'faint' }, ` · ${nodeStatus(other, run.mode).label}`)))) :
+          h('div', { class: 'small faint' }, 'There is no other agent to wait for.'),
+        h('div', { class: 'field-help' }, icon('info'), 'It receives the result of every agent it waits for. One that already finished gives it at once.')),
+      h('div', { class: ['field', modal.errors.folder && 'has-error'] }, h('label', { class: 'field-label' }, 'Its folder', h('span', { class: 'opt' }, 'optional')),
+        h('div', { class: 'input-group' }, h('input', { class: 'input', 'data-key': 'join-folder', value: folder, placeholder: 'No folder', onInput: event => { modal.folder = event.target.value; } }),
+          button('Browse…', { iconName: 'folderOpen', onClick: () => pickPath('folder', folder, path => { modal.folder = path; render(); }) })),
+        modal.errors.folder ? h('div', { class: 'field-error' }, icon('alert'), modal.errors.folder) : h('div', { class: 'field-help' }, icon('info'), agent.folderNote))),
+    foot: [modal.error ? h('div', { class: 'footer-note error' }, icon('alert', 'sm'), modal.error) : null, h('div', { class: 'spacer' }), button('Not now', { kind: 'ghost', onClick: closeModal }),
+      button('Add to the swarm', { kind: 'primary', iconName: 'plus', busy: ui.busy.joinLive, onClick: join })],
+  });
+}
+
+// Removing an agent: what happens to its result, to the agents that wait for it, to its files and to its memory, before the user confirms.
+function removeAgentModal(modal) {
+  const run = store.state.run;
+  const agent = run?.agents.find(item => item.name === modal.agent);
+  if (!agent) return modalFrame({ title: 'This agent already left', body: h('p', {}, 'It is not in the swarm anymore.'), foot: [h('div', { class: 'spacer' }), button('Close', { onClick: closeModal })] });
+  const done = agent.status === 'done';
+  const waiting = run.agents.filter(other => (other.waitsFor || []).includes(agent.name)).map(other => other.name);
+  const facts = [
+    done ? 'Its result stays: what it made is kept, and the leader already has it.' : run.running ? 'It stops at its next step. What it left half done in your files is put back.' : 'It will not work in the next run.',
+    waiting.length ? `${waiting.join(', ')} ${done ? 'still receive its result' : 'go on without it'}.` : null,
+    agent.model?.local ? `Its model frees about ${agent.model.vram} GB of memory on your GPUs as soon as its last step ended.` : 'Its model is let go as soon as its last step ended.',
+    'Every agent of the swarm is told that it left, so none of them counts on it anymore.',
+  ].filter(Boolean);
+  const remove = async () => {
+    if (await act('removeLive', { agent: agent.name, reason: modal.reason }, { busy: 'removeLive' })) {
+      closeModal();
+      ui.selected = null;
+      toast(`${agent.name} left the swarm.`, 'success');
+    }
+  };
+  return modalFrame({
+    size: 'wide', iconEl: h('span', { class: 'task-icon lg', style: { '--task': '#E5484D', '--task-soft': '#E5484D26' } }, icon('trash', 'lg')), title: `Remove ${agent.name} from the swarm?`,
+    subtitle: `${agent.role} · ${nodeStatus(agent, run.mode).label}`,
+    body: h('div', { class: 'stack' }, h('ul', { class: 'steps' }, facts.map(fact => h('li', {}, fact))),
+      h('div', { class: 'field' }, h('label', { class: 'field-label' }, 'Why?', h('span', { class: 'opt' }, 'optional, the leader and the agents read it')),
+        h('input', { class: 'input', 'data-key': 'remove-reason', value: modal.reason || '', placeholder: done ? 'For example: it is done, free its memory' : 'For example: it is not needed anymore',
+          onInput: event => { modal.reason = event.target.value; } }))),
+    foot: [h('div', { class: 'spacer' }), button('Keep it', { kind: 'ghost', onClick: closeModal }), button('Remove it', { kind: 'danger', iconName: 'trash', busy: ui.busy.removeLive, onClick: remove })],
+  });
 }
 
 function usageOf(run) {
@@ -1660,9 +1982,11 @@ function resultsCard(run) {
           agent.status === 'done' ? clamped(run.mode === 'plan' ? agent.plan || agent.result : agent.result, `result-${agent.name}`, 360, 'small muted pre') :
             h('div', { class: 'small', style: { color: 'var(--danger-text)' } }, agent.error)),
         statusPill(nodeStatus(agent, run.mode)))),
+      (run.removed || []).length ? h('div', { style: { marginTop: '14px' } }, h('h4', { style: { marginBottom: '6px' } }, 'Removed during the run'),
+        run.removed.map(item => h('div', { class: 'row small', style: { padding: '3px 0' } }, icon('trash', 'sm'), h('b', {}, item.name), h('span', { class: 'muted' }, `${item.role}, ${item.status} when it left · ${item.reason || 'no reason given'}`)))) : null,
       usage.length ? h('div', { style: { marginTop: '14px' } }, h('h4', { style: { marginBottom: '6px' } }, 'Tokens used'), h('table', { class: 'usage-table' },
         h('tr', {}, h('th', {}, 'Agent'), h('th', {}, 'Model'), h('th', {}, 'Calls'), h('th', {}, 'Read'), h('th', {}, 'Written')),
-        usage.map(agent => h('tr', {}, h('td', {}, agent.name), h('td', {}, agent.model?.name || ''), h('td', {}, formatNumber(agent.usage.calls)), h('td', {}, formatNumber(agent.usage.input)),
+        usage.map(agent => h('tr', {}, h('td', {}, agent.name), h('td', {}, modelName(agent.model)), h('td', {}, formatNumber(agent.usage.calls)), h('td', {}, formatNumber(agent.usage.input)),
           h('td', {}, formatNumber(agent.usage.output))))), h('div', { class: 'small faint', style: { marginTop: '6px' } }, 'API models are billed for the tokens they read and write.')) : null) : null);
 }
 
@@ -1684,8 +2008,9 @@ function agentDetail(run, agent) {
   };
   return h('div', { class: 'card' },
     h('div', { class: 'card-head' }, taskIcon(agent.task, 'lg'),
-      h('div', { class: 'grow', style: { minWidth: '0' } }, h('div', { class: 'row', style: { gap: '7px' } }, h('h2', {}, agent.name), agent.isLeader ? badge('Leader', 'honey', 'crown') : null),
-        h('div', { class: 'small muted' }, agent.role, agent.model ? ` · ${agent.model.name}` : '')), statusPill(status)),
+      h('div', { class: 'grow', style: { minWidth: '0' } }, h('div', { class: 'row', style: { gap: '7px' } }, h('h2', {}, agent.name), agent.isLeader ? badge('Leader', 'honey', 'crown') : null,
+        agent.removable ? button('', { kind: 'ghost', size: 'sm', iconName: 'trash', title: `Remove ${agent.name} from the swarm`, onClick: () => openModal({ type: 'removeAgent', agent: agent.name, reason: '' }) }) : null),
+        h('div', { class: 'small muted' }, agent.role, agent.model ? ` · ${modelName(agent.model)}` : '')), statusPill(status)),
     h('div', { class: 'card-body' },
       h('div', { class: 'detail-section' }, h('h4', {}, 'Its task'), h('p', { class: 'muted' }, agent.description),
         agent.waitsFor.length && !agent.isLeader ? h('p', { class: 'small', style: { marginTop: '6px' } }, icon('clock', 'sm'), ` Waits for ${agent.waitsFor.join(', ')} and receives their results.`) : null),
@@ -1759,8 +2084,106 @@ function conversation(run) {
   ];
 }
 
+// A coding agent asks for a permission: what it wants to do, exactly, where and why, with allow once, allow until the next run, or deny.
+function permissionCard(question, run, inModal) {
+  const request = question.payload || {};
+  const why = ui.composer[question.id] || '';
+  const send = async decision => {
+    const data = await act('answer', { id: question.id, answer: { decision, message: decision === 'deny' ? why : '' } }, { busy: `answer-${question.id}` });
+    if (data) delete ui.composer[question.id];
+  };
+  const style = speakerStyle(question.speaker, run);
+  return h('div', { class: 'question-card permission' },
+    h('div', { class: 'q-head' }, icon('shield', 'sm'), `${question.speaker} asks for your permission`, h('span', { class: 'grow' }), h('span', { class: 'faint small' }, question.time.slice(0, 5))),
+    h('div', { class: 'q-text' }, `It wants to ${request.action}:`),
+    h('pre', { class: 'permission-detail' }, request.detail || ''),
+    h('div', { class: 'small muted' }, icon('folder', 'sm'), ` In ${request.folder || 'its folder'}`, request.reason ? h('span', {}, ` · ${request.reason}`) : null),
+    inModal && question.context.length ? h('div', { class: 'q-context' }, question.context.map(text => h('div', {}, pretty(text)))) : null,
+    h('div', { class: 'row wrap' }, question.replies.map(reply => button(reply.label, { kind: reply.style === 'primary' ? 'primary' : reply.style === 'danger' ? 'danger-ghost' : 'ghost',
+      size: 'sm', iconName: reply.value === 'once' ? 'check' : reply.value === 'run' ? 'checkCircle' : 'x', busy: ui.busy[`answer-${question.id}`], onClick: () => send(reply.value) }))),
+    h('input', { class: 'input', 'data-key': `q-${question.id}`, value: why, placeholder: 'If you deny it, you can tell it why or what to do instead (optional)',
+      onInput: event => { ui.composer[question.id] = event.target.value; }, onKeydown: event => { if (event.key === 'Enter' && why.trim()) send('deny'); } }));
+}
+
+// A coding agent asks its own questions: options to choose (one, or several), or words of the user.
+function formCard(question, run) {
+  const questions = question.payload || [];
+  const form = ui.forms[question.id] = ui.forms[question.id] || Object.fromEntries(questions.map(item => [item.id, { picked: [], other: '' }]));
+  const toggle = (item, label) => {
+    const state = form[item.id];
+    state.picked = item.multiple ? (state.picked.includes(label) ? state.picked.filter(other => other !== label) : [...state.picked, label]) : [label];
+    render();
+  };
+  const send = async () => {
+    const answers = Object.fromEntries(questions.map(item => [item.id, form[item.id].other.trim() ? [...(item.multiple ? form[item.id].picked : []), form[item.id].other.trim()] : form[item.id].picked]));
+    const data = await act('answer', { id: question.id, answer: answers }, { busy: `answer-${question.id}` });
+    if (data) delete ui.forms[question.id];
+  };
+  return h('div', { class: 'question-card' },
+    h('div', { class: 'q-head' }, icon('help', 'sm'), `${question.speaker} asks you`, h('span', { class: 'grow' }), h('span', { class: 'faint small' }, question.time.slice(0, 5))),
+    questions.map(item => h('div', { class: 'stack tight' }, item.header ? h('h4', {}, item.header) : null, h('div', { class: 'q-text' }, item.question),
+      item.options?.length ? h('div', { class: 'pills' }, item.options.map(option => h('button', { type: 'button', class: ['pill sm', form[item.id].picked.includes(option.label) && 'selected'],
+        title: option.description || null, onClick: () => toggle(item, option.label) }, h('span', { class: 'check' }, form[item.id].picked.includes(option.label) ? icon('check') : null), option.label))) : null,
+      h('input', { class: 'input', type: item.secret ? 'password' : 'text', autocomplete: 'off', 'data-key': `f-${question.id}-${item.id}`, value: form[item.id].other,
+        placeholder: item.options?.length ? 'Or your own answer' : 'Your answer', onInput: event => { form[item.id].other = event.target.value; } }))),
+    h('div', {}, button('Send the answers', { kind: 'primary', size: 'sm', iconName: 'send', busy: ui.busy[`answer-${question.id}`], onClick: send })));
+}
+
+// An agent the leader proposes: its task, its model, who it waits for, why, its settings, and what the user will be asked for.
+function proposedAgent(agent, number = null) {
+  return h('div', { class: 'proposed-agent' }, taskIcon(agent.task),
+    h('div', { class: 'grow stack tight', style: { minWidth: '0' } },
+      h('div', { class: 'row wrap', style: { gap: '6px' } }, number ? h('span', { class: 'faint small' }, `${number}.`) : null, h('b', {}, agent.name), h('span', { class: 'small muted' }, agent.label),
+        badge(agent.model, { cli: 'honey', local: 'primary', api: 'info' }[agent.modelKind], { cli: 'terminal', local: 'cpu', api: 'cloud' }[agent.modelKind])),
+      h('div', { class: 'small' }, agent.description),
+      h('div', { class: 'small muted' }, icon(agent.waitsFor.length ? 'clock' : 'zap', 'sm'), agent.waitsFor.length ? ` Waits for ${agent.waitsFor.join(', ')} and receives their results` : ' Starts right away'),
+      agent.why ? h('div', { class: 'small why' }, icon('crown', 'sm'), h('span', {}, agent.why)) : null,
+      agent.settings.length ? h('dl', { class: 'kv small' }, agent.settings.map(item => [h('dt', {}, item.label), h('dd', {}, item.value)])) : null,
+      agent.needs.length ? h('div', { class: 'small needs' }, icon('key', 'sm'), h('span', {}, `You will be asked for: ${agent.needs.join('; ')}.`)) : null));
+}
+
+// The leader proposes the swarm, or a change of the swarm while it runs. The user approves, rejects, or says what to change (the leader writes it again).
+function proposalCard(question, run, inModal) {
+  const proposal = question.payload || {};
+  const draft = ui.composer[question.id] || '';
+  const busy = ui.busy[`answer-${question.id}`];
+  const send = async (decision, message = '') => {
+    const data = await act('answer', { id: question.id, answer: { decision, message } }, { busy: `answer-${question.id}` });
+    if (data) delete ui.composer[question.id];
+  };
+  const titles = { build: 'proposes a swarm for your mission', add: 'proposes to add an agent', remove: 'proposes to remove an agent', model: 'proposes to change a model' };
+  const details = proposal.details || {};
+  let body;
+  if (proposal.action === 'build') {
+    body = h('div', { class: 'stack tight' }, (proposal.agents || []).map((agent, index) => proposedAgent(agent, index + 1)));
+  } else if (proposal.action === 'add') {
+    body = proposedAgent(details);
+  } else if (proposal.action === 'remove') {
+    const facts = [`${details.role}, ${details.status === 'done' ? 'done: its result stays, and the agents that need it keep it' : `${details.status}: it stops at its next step, and what it left half done is put back`}.`,
+      details.model ? `Its model (${details.model}) frees its memory.` : null,
+      details.waitedBy?.length && details.status !== 'done' ? `${details.waitedBy.join(', ')} wait for it, and go on without it.` : null, 'Every agent of the swarm is told.'].filter(Boolean);
+    body = h('div', { class: 'stack tight' }, h('div', { class: 'row' }, icon('trash', 'sm'), h('b', {}, `Remove ${proposal.agent}`)), h('ul', { class: 'steps small' }, facts.map(fact => h('li', {}, fact))));
+  } else {
+    body = h('div', { class: 'stack tight' }, h('div', { class: 'row wrap' }, icon('cpu', 'sm'), h('b', {}, proposal.agent), h('span', { class: 'muted small' }, details.from || 'no model'), icon('arrowRight', 'sm'), h('b', { class: 'small' }, details.to)),
+      h('div', { class: 'small muted' }, 'It has not started yet, so it starts with the new model.'));
+  }
+  return h('div', { class: 'question-card proposal' },
+    h('div', { class: 'q-head' }, icon('crown', 'sm'), `${question.speaker} ${titles[proposal.action] || 'proposes a change'}`, h('span', { class: 'grow' }), h('span', { class: 'faint small' }, question.time.slice(0, 5))),
+    proposal.why ? h('div', { class: 'why-box' }, h('span', { class: 'faint small' }, proposal.action === 'build' ? 'The leader says' : 'Why'), h('div', {}, proposal.why)) : null,
+    h('div', { class: 'proposal-body', 'data-scroll': inModal ? `proposal-${question.id}` : null }, body),
+    h('div', { class: 'row wrap' }, button(proposal.action === 'build' ? 'Approve this swarm' : 'Approve', { kind: 'primary', size: 'sm', iconName: 'check', busy, onClick: () => send('approve') }),
+      button('Reject', { kind: 'danger-ghost', size: 'sm', iconName: 'x', busy, onClick: () => send('reject') })),
+    h('div', { class: 'composer-row row', style: { alignItems: 'flex-end' } },
+      h('textarea', { class: 'textarea', rows: 1, 'data-key': `q-${question.id}`, value: draft, placeholder: proposal.action === 'build' ? 'Or tell the leader what to change, in your own words…' : 'Or reject it and tell the leader why…',
+        onInput: event => { ui.composer[question.id] = event.target.value; }, onKeydown: event => { if ((event.ctrlKey || event.metaKey) && event.key === 'Enter' && draft.trim()) send('reject', draft.trim()); } }),
+      button(proposal.action === 'build' ? 'Ask for changes' : 'Send', { kind: 'soft', size: 'sm', iconName: 'send', busy, disabled: !draft.trim(), onClick: () => send('reject', draft.trim()) })));
+}
+
 // A question of an agent or of the leader, with buttons for the usual answers and a box for the others.
 function questionCard(question, run, inModal) {
+  if (question.kind === 'permission') return permissionCard(question, run, inModal);
+  if (question.kind === 'form') return formCard(question, run);
+  if (question.kind === 'proposal') return proposalCard(question, run, inModal);
   const draft = ui.composer[question.id] || '';
   const send = async value => {
     const data = await act('answer', { id: question.id, answer: value }, { busy: `answer-${question.id}` });
@@ -1795,6 +2218,7 @@ async function openResume(id) {
   if (!data) return;
   const form = data.resume;
   ui.resume = { form, values: Object.fromEntries(form.agents.map(agent => [agent.name, { accounts: [] }])), keys: {}, tokens: {}, errors: {}, error: '' };
+  if (form.codex) loadCodex();
   go('resume');
 }
 
@@ -1815,13 +2239,16 @@ function viewResume() {
           key.source ? h('span', { class: 'opt' }, key.source === 'environment' ? `found in ${key.variable}` : 'given earlier') : h('span', { class: 'req' }, '*')),
           h('input', { class: 'input', type: 'password', 'data-key': `rk-${provider}`, autocomplete: 'off', value: resume.keys[provider] || '', placeholder: key.source ? 'Leave empty to use it' : 'Paste it here',
             onInput: event => { resume.keys[provider] = event.target.value; } }), fieldError(`key.${provider}`), !key.source ? h('div', { class: 'field-help' }, icon('lock'), extLink(key.page, 'Create a key')) : null))) : null,
+      form.codex ? h('div', { class: 'card pad enter' }, h('div', { class: 'row', style: { marginBottom: '12px' } }, icon('terminal'), h('h3', {}, 'Codex')),
+        ui.codex.data || ui.codex.loading ? codexAccountPanel() : h('div', {}, button('Check the sign-in of Codex', { iconName: 'refresh', onClick: loadCodex })),
+        resume.errors.codex ? fieldError('codex') : null) : null,
       form.gated.length ? h('div', { class: 'card pad enter' }, h('div', { class: 'row', style: { marginBottom: '12px' } }, icon('lock'), h('h3', {}, 'Hugging Face tokens'), h('span', { class: 'opt small faint' }, 'optional')),
         form.gated.map(name => h('div', { class: 'field' }, h('label', { class: 'field-label' }, name), h('input', { class: 'input', type: 'password', 'data-key': `rt-${name}`, value: resume.tokens[name] || '',
           placeholder: 'hf_… (empty if you logged in with huggingface-cli)', onInput: event => { resume.tokens[name] = event.target.value; } })))) : null,
       form.agents.map(agent => h('div', { class: 'card agent-row enter-2' }, taskIcon(agent.task),
         h('div', { class: 'stack' }, h('div', { class: 'agent-row-head' }, h('span', { class: 'agent-row-name' }, agent.name), h('span', { class: 'small muted' }, agent.role), h('span', { class: 'grow' }),
           badge(agent.status, agent.status === 'done' ? 'success' : agent.status === 'failed' ? 'danger' : 'warning')),
-          agent.model ? h('div', { class: 'small muted row' }, icon(agent.model.local ? 'cpu' : 'cloud', 'sm'), agent.model.name) : null,
+          agent.model ? h('div', { class: 'small muted row' }, icon(modelIcon(agent.model), 'sm'), modelName(agent.model)) : null,
           agent.missing.length ? callout('warning', 'download', `Install first: pip install -U ${agent.missing.join(' ')}`) : null,
           agent.fields.length ? agent.fields.map(field => h('div', { class: ['field', resume.errors[`${agent.name}.${field.key}`] && 'has-error'] },
             h('label', { class: 'field-label' }, field.ask, field.required ? h('span', { class: 'req' }, '*') : h('span', { class: 'opt' }, agent.finished ? 'not needed: it already finished' : 'optional')),
@@ -1913,6 +2340,7 @@ function helpModal() {
   const terms = [
     ['users', 'Swarm', 'A small team of AI agents that work for you. They work at the same time, unless one needs the result of another.'],
     ['crown', 'Leader', 'The first agent. Besides its own task, it works last, summarises the work of the others, and passes your corrections to the agents they concern.'],
+    ['sparkles', 'Built by the leader', 'Instead of building the swarm yourself, let the leader propose it: the agents, their tasks and their models. It can also propose changes while the swarm runs. You approve every proposal.'],
     ['cpu', 'Model', 'The AI that does the thinking of an agent. Every agent has its own.'],
     ['gauge', 'VRAM', 'The memory of your graphics cards (GPUs). A local model must fit in it. The bigger the model, the more it needs.'],
     ['cloud', 'API', 'A model that runs on the servers of a company. You need an API key from that company, and you pay for what you use.'],
@@ -1947,7 +2375,9 @@ function confirmModal({ title, text, confirm, danger = false, run, iconName = 'a
 }
 
 function questionModal(question) {
-  return modalFrame({ size: 'wide', iconEl: h('span', { class: 'task-icon lg', style: { '--task': '#F4A62A', '--task-soft': '#F4A62A26' } }, icon('bell', 'lg')), title: `${question.speaker || 'SwarmUP'} needs your answer`, closable: false,
+  const proposal = question.kind === 'proposal';
+  return modalFrame({ size: 'wide', iconEl: h('span', { class: 'task-icon lg', style: { '--task': '#F4A62A', '--task-soft': '#F4A62A26' } }, icon(proposal ? 'crown' : 'bell', 'lg')),
+    title: proposal ? `${question.speaker} has a proposal for you` : `${question.speaker || 'SwarmUP'} needs your answer`, closable: false,
     body: questionCard(question, store.state.run, true) });
 }
 
@@ -1960,6 +2390,7 @@ function renderModal() {
     const modal = ui.modal;
     const builders = {
       tasks: taskPickerModal, agent: agentFormModal, browse: browseModal, model: modelPickerModal, help: helpModal, stop: stopModal, cancel: cancelModal,
+      join: joinModal, removeAgent: removeAgentModal,
       quit: () => confirmModal({ title: 'Quit SwarmUP?', iconName: 'power', confirm: 'Quit', danger: true, text: store.state.run?.running ? 'The swarm is running. It is saved now, and you can continue it at the next start.' : 'Your team is kept only while SwarmUP runs: what you built here is lost when you quit, except a swarm that was interrupted.',
         run: async () => { const data = await act('quit', {}, { busy: 'confirm' }); if (data) document.body.replaceChildren(h('div', { class: 'splash' }, h('div', { class: 'splash-logo' }, logo()), h('div', { class: 'splash-text' }, data.message))); } }),
       confirmNew: () => confirmModal({ title: 'Start a new swarm?', iconName: 'plus', confirm: 'Start a new swarm', danger: true, text: 'The mission, the agents and their models are cleared. The API keys you gave stay in memory.',
