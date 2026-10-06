@@ -12,7 +12,7 @@
 # While the swarm runs you can type commands (type help): look at an agent, send it a message, approve, reject or correct it, or start it earlier.
 # The state of the swarm is saved all the time. If the connection is lost the swarm pauses and asks you to continue or cancel, and if the program
 # or the computer stops, the next start offers to continue the swarm where it was (or to cancel it, after a summary of what it did).
-# The graphical interface will do the same with clicks, from the same functions of src/ (tasks_library.py, models_library.py, harness_utils.py).
+# The graphical interface will do the same with clicks, from the same functions of src/backend (tasks_library.py, models_library.py and the modules of swarm-utils).
 # Local models are downloaded to the Hugging Face cache (the HF_HOME environment variable), and API keys come from the environment variables
 # of their provider (see API_KEYS in models_library.py) or are typed here. Keys and passwords are only kept in memory.
 import getpass
@@ -26,15 +26,26 @@ from pathlib import Path
 
 # The modules of SwarmUP are in the folders of src/backend. Their names have hyphens, so they are not packages: each folder goes on the path.
 sys.path[:0] = [str(folder) for folder in sorted((Path(__file__).resolve().parent.parent / "src" / "backend").iterdir()) if folder.is_dir() and not folder.name.startswith(("_", "."))]
-from harness_utils import (FETCH_ERRORS, ConnectionLost, Loop, MessagingError, MissionCosts, Swarm, checkBudget, checkEmailLogin, checkMessenger, checkVram, describeError,
-                           describeCached, findPublishers, findTelegramChats, findUnfinishedSwarms, formatDollars, getModelCost, keepFresh, nextOccurrence, readGpus)
-from leader_utils import LeaderCatalog, LeaderManager, designSwarm
-from model_clients import (ModelError, CodexLogin, LocalModel, checkCodex, createModel, findMissingPackages, getApiKey, getHubFolder, isDownloaded, listCodexModels,
-                           lookupHuggingFace, readCodexAccount)
+from base_loop import Loop
+from codex_agent import CodexLogin, checkCodex, listCodexModels, readCodexAccount
+from gpu_check import checkVram, readGpus
+from harness_utils import ConnectionLost, FETCH_ERRORS, describeError
+from internet_cache import describeCached, getModelCost, keepFresh
+from leader_catalog import LeaderCatalog
+from leader_manager import LeaderManager
+from leader_utils import designSwarm
+from message_loops import checkEmailLogin, nextOccurrence
+from messengers import MessagingError, checkMessenger, findTelegramChats
+from mission_costs import MissionCosts, checkBudget, formatDollars
+from model_clients import LocalModel, createModel
+from model_support import ModelError, findMissingPackages, getApiKey, getHubFolder, isDownloaded, lookupHuggingFace
 from models_library import (API_KEYS, DEFAULT_CLI_MODEL, MODELS_API, MODELS_CLI, MODELS_LOCAL, RECOMMENDED_API, RECOMMENDED_LOCAL, getModelInfo, getProvider, isGated)
+from saved_swarms import findUnfinishedSwarms
 from sources_library import ALL_NEWS_OUTLETS, MESSAGING_APPS, NEWS_OUTLETS, PAPER_PUBLISHERS
+from swarm_harness import Swarm
 from tasks_library import (ADVANCED_FIELDS, DEFAULT_LOOPS, LEADER_TASK, TASKS, answerKey, buildLoop, checkAgentName, describeLoop, getDefault, getHelp, getTask, isAsked,
                            messengerSettings, parseAnswer, parseChoices, publicAnswers, restoreAnswers, secretFields, suggestFolder, suggestName)
+from writing_loops import findPublishers
 
 LINE = "=" * 72
 SHOW_ALL, MANUAL, BACK = "Show all the models of the library", "Type the name of another model myself", "Go back"

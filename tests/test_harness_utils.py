@@ -12,17 +12,29 @@ import urllib.error
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from patching import everywhere
 from pathlib import Path
 from unittest import mock
 
 # The modules of SwarmUP are in the folders of src/backend. Their names have hyphens, so they are not packages: each folder goes on the path.
 sys.path[:0] = [str(folder) for folder in sorted((Path(__file__).resolve().parent.parent / "src" / "backend").iterdir()) if folder.is_dir() and not folder.name.startswith(("_", "."))]
+import checking_loops
+import gpu_check
 import harness_utils
-from harness_utils import (NO_GPU_MESSAGE, USER_NAME, AuthorLoop, CalendarLoop, CoderLoop, ConnectionLost, DocumentFormatLoop, EmailLoop, LiteratureSurveyLoop,
-                           Loop, MathCheckLoop, MessagingError, NewsLoop, Swarm, addToContext, checkMessenger, describeError, fetchUrl, findTelegramChats,
-                           getFromContext, loadContext, checkVram, readAbstract, readFeed, readGpus, retrieveContext, sendMessage, splitMessage)
+import internet_cache
+import message_loops
+import messengers
+import writing_loops
+from base_loop import Loop
+from checking_loops import CoderLoop, MathCheckLoop
+from gpu_check import NO_GPU_MESSAGE, checkVram, readGpus
+from harness_utils import ConnectionLost, USER_NAME, addToContext, describeError, fetchUrl, getFromContext, loadContext, readAbstract, readFeed, retrieveContext
+from message_loops import CalendarLoop, EmailLoop, NewsLoop
+from messengers import MessagingError, checkMessenger, findTelegramChats, sendMessage, splitMessage
 from models_library import getModelInfo
 from sources_library import MESSAGING_APPS
+from swarm_harness import Swarm
+from writing_loops import AuthorLoop, DocumentFormatLoop, LiteratureSurveyLoop
 
 RSS = """<?xml version="1.0"?><rss version="2.0"><channel><title>T</title>
 <item><title>First &amp; best</title><link>http://x.test/1</link><description><![CDATA[<p>Hello <b>world</b> &amp; all</p>]]></description></item>
@@ -71,7 +83,7 @@ class LoopTestCase(unittest.TestCase):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
         self.folder = Path(folder.name)
-        patcher = mock.patch.object(harness_utils, "AGENT_FILES", self.folder)
+        patcher = everywhere(harness_utils, "AGENT_FILES", self.folder)
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -414,8 +426,8 @@ class EmailTests(LoopTestCase):
 
     # Replaces the mail servers by pretend ones. emails maps the id of an email in the inbox to its raw bytes.
     def useMail(self, emails=None):
-        patchers = [mock.patch.dict(os.environ, self.settings), mock.patch.object(harness_utils.smtplib, "SMTP"),
-                    mock.patch.object(harness_utils.imaplib, "IMAP4_SSL")]
+        patchers = [mock.patch.dict(os.environ, self.settings), everywhere(harness_utils.smtplib, "SMTP"),
+                    everywhere(message_loops.imaplib, "IMAP4_SSL")]
         started = [patcher.start() for patcher in patchers]
         for patcher in patchers:
             self.addCleanup(patcher.stop)
@@ -576,7 +588,7 @@ class NewsTests(LoopTestCase):
             if url == "https://empty.test/feed":
                 return []
             raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
-        return mock.patch.object(harness_utils, "readFeed", read)
+        return everywhere(harness_utils, "readFeed", read)
 
     def makeLoop(self, replies, answers, **options):
         return self.script(NewsLoop(FakeAgent(replies), **options), answers)
@@ -639,7 +651,7 @@ class NewsTests(LoopTestCase):
             sent.append((app, dict(settings), text))
             if failure:
                 raise failure
-        patcher = mock.patch.object(harness_utils, "sendMessage", send)
+        patcher = everywhere(harness_utils, "sendMessage", send)
         patcher.start()
         self.addCleanup(patcher.stop)
         return sent
@@ -697,11 +709,11 @@ class AuthorTests(LoopTestCase):
 
 class PaperSearchTests(unittest.TestCase):
     def fetching(self, body):
-        return mock.patch.object(harness_utils, "fetchUrl", lambda url, login=None: body if isinstance(body, bytes) else body.encode())
+        return everywhere(harness_utils, "fetchUrl", lambda url, login=None: body if isinstance(body, bytes) else body.encode())
 
     def testGoogleScholarResultsAreParsed(self):
         with self.fetching(SCHOLAR_PAGE):
-            papers = harness_utils.searchGoogleScholar("graph neural networks")
+            papers = writing_loops.searchGoogleScholar("graph neural networks")
         self.assertEqual([paper["title"] for paper in papers], ["Graph neural networks in nature", "A & B survey"])
         self.assertEqual(papers[0]["link"], "https://www.nature.com/articles/s1")
         self.assertIn("Nature Reviews", papers[0]["summary"])
@@ -711,30 +723,30 @@ class PaperSearchTests(unittest.TestCase):
     def testGoogleScholarCaptchaIsAClearError(self):
         with self.fetching("<html><body>Our systems have detected unusual traffic. Please solve this captcha.</body></html>"):
             with self.assertRaises(ValueError) as caught:
-                harness_utils.searchGoogleScholar("anything")
+                writing_loops.searchGoogleScholar("anything")
         self.assertIn("captcha", str(caught.exception))
 
     def testCrossrefResultsAreParsed(self):
         body = json.dumps({"message": {"items": [{"title": ["A <i>nice</i> paper"], "abstract": "<jats:p>The abstract.</jats:p>", "URL": "https://doi.org/10.1/a"},
                                                  {"title": ["No link"]}, {"URL": "https://doi.org/10.1/b"}]}})
         with self.fetching(body):
-            self.assertEqual(harness_utils.searchCrossref("x"), [{"title": "A nice paper", "summary": "The abstract.", "link": "https://doi.org/10.1/a"}])
+            self.assertEqual(writing_loops.searchCrossref("x"), [{"title": "A nice paper", "summary": "The abstract.", "link": "https://doi.org/10.1/a"}])
         with self.fetching("{}"):
-            self.assertEqual(harness_utils.searchCrossref("x"), [])
+            self.assertEqual(writing_loops.searchCrossref("x"), [])
 
     def testOpenReviewKeepsPapersAndDropsReviews(self):
         paper = {"id": "r1", "forum": "f1", "content": {"title": {"value": "A paper"}, "abstract": {"value": "Its abstract"}, "venue": {"value": "ICLR 2025"}}}
         review = {"id": "r2", "forum": "f1", "content": {"summary": {"value": "A review"}, "rating": {"value": 8}}}
         with self.fetching(json.dumps({"notes": [review, paper]})):
-            papers = harness_utils.searchOpenReview("x")
+            papers = writing_loops.searchOpenReview("x")
         self.assertEqual(papers, [{"title": "A paper", "summary": "ICLR 2025. Its abstract", "link": "https://openreview.net/forum?id=f1"}])
 
     def testArxivResultsAreParsed(self):
         with self.fetching(ATOM):
-            self.assertEqual(harness_utils.searchArxiv("atom paper")[0]["link"], "http://a.test/abs/1")
+            self.assertEqual(writing_loops.searchArxiv("atom paper")[0]["link"], "http://a.test/abs/1")
 
     def testOpenReviewIsOneOfTheSearches(self):
-        self.assertEqual(list(harness_utils.PAPER_SEARCHES), ["Google Scholar", "arXiv", "Crossref", "OpenReview"])
+        self.assertEqual(list(writing_loops.PAPER_SEARCHES), ["Google Scholar", "arXiv", "Crossref", "OpenReview"])
 
 
 class LiteratureTests(LoopTestCase):
@@ -748,7 +760,7 @@ class LiteratureTests(LoopTestCase):
         return self.script(loop, answers)
 
     def patchSearches(self, **searches):
-        patcher = mock.patch.dict(harness_utils.PAPER_SEARCHES, searches, clear=True)
+        patcher = mock.patch.dict(writing_loops.PAPER_SEARCHES, searches, clear=True)
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -792,7 +804,7 @@ class LiteratureTests(LoopTestCase):
         self.patchSearches(A=lambda s: [self.paper("Short", "https://a.test/short"), self.paper("Long", "https://a.test/long", "y" * 450)])
         loop = self.makeLoop([], [], ["A"])
         loop.papers = loop.searchPapers()
-        with mock.patch.object(harness_utils, "fetchUrl", fetch):
+        with everywhere(harness_utils, "fetchUrl", fetch):
             loop.readPublisherPages()
         self.assertEqual(visited, ["https://a.test/short"])
         self.assertTrue(loop.papers[0]["summary"].startswith("A real abstract"))
@@ -804,7 +816,7 @@ class LiteratureTests(LoopTestCase):
         self.patchSearches(A=lambda s: [self.paper("Short", "https://a.test/short", "kept")])
         loop = self.makeLoop([], [], ["A"])
         loop.papers = loop.searchPapers()
-        with mock.patch.object(harness_utils, "fetchUrl", fetch):
+        with everywhere(harness_utils, "fetchUrl", fetch):
             loop.readPublisherPages()
         self.assertEqual(loop.papers[0]["summary"], "kept")
         self.assertIn("error 500", self.saidText(loop))
@@ -827,7 +839,7 @@ class LiteratureTests(LoopTestCase):
         loop = self.makeLoop([], [], ["A"])
         loop.nextLogin = ("me", "secret")
         loop.papers = loop.searchPapers()
-        with mock.patch.object(harness_utils, "fetchUrl", fetch):
+        with everywhere(harness_utils, "fetchUrl", fetch):
             loop.readPublisherPages()
         self.assertEqual(loop.logins_asked, ["publisher.test"])
         self.assertTrue(all(paper["summary"].startswith("A real abstract") for paper in loop.papers))
@@ -839,7 +851,7 @@ class LiteratureTests(LoopTestCase):
         self.patchSearches(A=lambda s: [self.paper("One", "https://doi.org/10.1/one"), self.paper("Two", "https://doi.org/10.1/two")])
         loop = self.makeLoop([], [], ["A"])
         loop.papers = loop.searchPapers()
-        with mock.patch.object(harness_utils, "fetchUrl", fetch):
+        with everywhere(harness_utils, "fetchUrl", fetch):
             loop.readPublisherPages()
         self.assertEqual(loop.logins_asked, ["publisher.test"])
         self.assertEqual([paper["summary"] for paper in loop.papers], ["short", "short"])
@@ -851,7 +863,7 @@ class LiteratureTests(LoopTestCase):
         loop = self.makeLoop([], [], ["A"])
         loop.nextLogin = ("me", "wrong")
         loop.papers = loop.searchPapers()
-        with mock.patch.object(harness_utils, "fetchUrl", fetch):
+        with everywhere(harness_utils, "fetchUrl", fetch):
             loop.readPublisherPages()
         self.assertEqual(sum(login == ("me", "wrong") for url, login in calls), 1)
         self.assertEqual(loop.logins_asked, ["publisher.test"])
@@ -861,7 +873,7 @@ class LiteratureTests(LoopTestCase):
         self.patchSearches(A=lambda s: [self.paper("One", "https://doi.org/10.1/one")])
         loop = self.makeLoop(["https://doi.org/10.1/one"], ["yes"], ["A"])
         loop.nextLogin = ("me", "secret")
-        with mock.patch.object(harness_utils, "fetchUrl", fetch):
+        with everywhere(harness_utils, "fetchUrl", fetch):
             loop.run()
         self.assertNotIn("secret", (self.folder / "literature_contexts.json").read_text(encoding="utf-8"))
 
@@ -1004,7 +1016,7 @@ class CoderTests(LoopTestCase):
 
     def testEndlessLoopsAreStopped(self):
         loop, path = self.makeLoop(["while True: pass", "print('done')"], ["yes", "yes"])
-        with mock.patch.object(harness_utils, "RUN_TIMEOUT", 1):
+        with everywhere(harness_utils, "RUN_TIMEOUT", 1):
             self.assertEqual(loop.run(), "print('done')")
         self.assertIn("ran for more than 1 seconds", loop.agent.prompts[1])
 
@@ -1028,7 +1040,7 @@ class CoderTests(LoopTestCase):
 def isolateInternetCache(case):
     folder = tempfile.TemporaryDirectory()
     case.addCleanup(folder.cleanup)
-    for patcher in (mock.patch.object(harness_utils, "AGENT_FILES", Path(folder.name)), mock.patch.dict(harness_utils.internetCache, clear=True)):
+    for patcher in (everywhere(harness_utils, "AGENT_FILES", Path(folder.name)), mock.patch.dict(internet_cache.internetCache, clear=True)):
         patcher.start()
         case.addCleanup(patcher.stop)
     return Path(folder.name)
@@ -1050,105 +1062,105 @@ class ModelCostTests(unittest.TestCase):
                 raise self.failure
             return json.dumps(self.prices).encode()
         isolateInternetCache(self)
-        patcher = mock.patch.object(harness_utils, "fetchUrl", fetch)
+        patcher = everywhere(harness_utils, "fetchUrl", fetch)
         patcher.start()
         self.addCleanup(patcher.stop)
 
     def age(self, seconds):
-        harness_utils.internetCache["model-prices"]["fetchedAt"] -= seconds
+        internet_cache.internetCache["model-prices"]["fetchedAt"] -= seconds
 
     def testPricesAreInDollarsPerMillionTokens(self):
-        cost = harness_utils.getModelCost("claude", "claude-opus-5-5")
+        cost = internet_cache.getModelCost("claude", "claude-opus-5-5")
         self.assertEqual((cost["input"], cost["output"], cost["cachedInput"], cost["context"]), (4.0, 20.0, 0.4, 1000000))
         self.assertEqual(cost["unit"], "US dollars per 1 million tokens")
         self.assertEqual(cost["page"], "https://platform.claude.com/docs/en/about-claude/pricing")
         self.assertNotIn("error", cost)
 
     def testNumbersAreCleanAndMissingDetailsAreNone(self):
-        cost = harness_utils.getModelCost("gpt", "gpt-4o-mini")
+        cost = internet_cache.getModelCost("gpt", "gpt-4o-mini")
         self.assertEqual((cost["input"], cost["output"], cost["cachedInput"], cost["context"]), (0.15, 0.6, None, None))
 
     def testNamesWithTheProviderInFrontAreFound(self):
-        self.assertEqual(harness_utils.getModelCost("gemini", "gemini-3.8-flash")["output"], 3.75)
+        self.assertEqual(internet_cache.getModelCost("gemini", "gemini-3.8-flash")["output"], 3.75)
 
     def testOnlyDeepSeekCarriesAPeakHoursNote(self):
-        self.assertIn("peak hours", harness_utils.getModelCost("deepseek", "deepseek-v4-pro")["note"])
-        self.assertEqual(harness_utils.getModelCost("gpt", "gpt-4o-mini")["note"], "")
+        self.assertIn("peak hours", internet_cache.getModelCost("deepseek", "deepseek-v4-pro")["note"])
+        self.assertEqual(internet_cache.getModelCost("gpt", "gpt-4o-mini")["note"], "")
 
     def testUnknownModelsAndEntriesWithoutPricesExplainThemselves(self):
         for model in ("a-model-nobody-knows", "sample_spec", "embedding-only", "broken"):
-            cost = harness_utils.getModelCost("gpt", model)
+            cost = internet_cache.getModelCost("gpt", model)
             self.assertIn("No price is published", cost["error"], model)
             self.assertEqual(cost["page"], "https://developers.openai.com/api/docs/pricing")
-        self.assertEqual(harness_utils.getModelCost("a-new-provider", "x")["page"], "")
+        self.assertEqual(internet_cache.getModelCost("a-new-provider", "x")["page"], "")
 
     def testThePriceListIsDownloadedOnceAnHourAndAllowedToBeBig(self):
-        harness_utils.getModelCost("gpt", "gpt-4o-mini")
-        harness_utils.getModelCost("claude", "claude-opus-5-5")
+        internet_cache.getModelCost("gpt", "gpt-4o-mini")
+        internet_cache.getModelCost("claude", "claude-opus-5-5")
         self.assertEqual(len(self.downloads), 1)
-        self.assertEqual(self.downloads[0][1], harness_utils.PRICE_FILE_LIMIT)
-        self.assertGreater(harness_utils.PRICE_FILE_LIMIT, harness_utils.MAX_DOWNLOAD)
+        self.assertEqual(self.downloads[0][1], internet_cache.PRICE_FILE_LIMIT)
+        self.assertGreater(internet_cache.PRICE_FILE_LIMIT, harness_utils.MAX_DOWNLOAD)
         self.age(4000)
-        harness_utils.getModelCost("gpt", "gpt-4o-mini")
+        internet_cache.getModelCost("gpt", "gpt-4o-mini")
         self.assertEqual(len(self.downloads), 2)
 
     def testPriceChangesAreSeenAfterTheHour(self):
-        self.assertEqual(harness_utils.getModelCost("gpt", "gpt-4o-mini")["input"], 0.15)
+        self.assertEqual(internet_cache.getModelCost("gpt", "gpt-4o-mini")["input"], 0.15)
         self.prices = {**self.prices, "gpt-4o-mini": {"input_cost_per_token": 3e-07, "output_cost_per_token": 6e-07}}
         self.age(4000)
-        self.assertEqual(harness_utils.getModelCost("gpt", "gpt-4o-mini")["input"], 0.3)
+        self.assertEqual(internet_cache.getModelCost("gpt", "gpt-4o-mini")["input"], 0.3)
 
     def testNoInternetIsReportedInPlainWordsNotRaised(self):
         self.failure = urllib.error.URLError("no network")
-        cost = harness_utils.getModelCost("claude", "claude-opus-5-5")
+        cost = internet_cache.getModelCost("claude", "claude-opus-5-5")
         self.assertIn("could not be fetched: the website could not be reached", cost["error"])
         self.assertEqual(cost["page"], "https://platform.claude.com/docs/en/about-claude/pricing")
 
     def testBrokenPriceFileIsReportedNotRaised(self):
         self.prices = "this is not what was expected"
-        self.assertIn("could not be fetched", harness_utils.getModelCost("gpt", "gpt-4o-mini")["error"])
+        self.assertIn("could not be fetched", internet_cache.getModelCost("gpt", "gpt-4o-mini")["error"])
         self.failure = ValueError("bad data")
-        self.assertIn("bad data", harness_utils.getModelCost("gpt", "gpt-4o-mini")["error"])
+        self.assertIn("bad data", internet_cache.getModelCost("gpt", "gpt-4o-mini")["error"])
 
     def testWithoutInternetThePricesOfTheLastConnectionAreUsedEvenAfterARestart(self):
-        self.assertEqual(harness_utils.getModelCost("gpt", "gpt-4o-mini")["input"], 0.15)
-        self.assertIsNone(harness_utils.describeCached("model-prices")["error"] or None)
-        harness_utils.internetCache.clear()
+        self.assertEqual(internet_cache.getModelCost("gpt", "gpt-4o-mini")["input"], 0.15)
+        self.assertIsNone(internet_cache.describeCached("model-prices")["error"] or None)
+        internet_cache.internetCache.clear()
         self.age_on_disk(7200)
         self.failure = urllib.error.URLError("no network")
-        self.assertEqual(harness_utils.getModelCost("gpt", "gpt-4o-mini")["input"], 0.15)
-        state = harness_utils.describeCached("model-prices")
+        self.assertEqual(internet_cache.getModelCost("gpt", "gpt-4o-mini")["input"], 0.15)
+        state = internet_cache.describeCached("model-prices")
         self.assertTrue(state["offline"])
         self.assertIn("could not be reached", state["error"])
         self.assertRegex(state["fetchedAt"], r"^\d{4}-\d\d-\d\d \d\d:\d\d$")
         downloads = len(self.downloads)
-        harness_utils.getModelCost("claude", "claude-opus-5-5")
+        internet_cache.getModelCost("claude", "claude-opus-5-5")
         self.assertEqual(len(self.downloads), downloads, "an offline program does not ask the internet again at every step")
-        harness_utils.internetCache["model-prices"]["failedAt"] -= harness_utils.CACHE_RETRY_SECONDS + 1
+        internet_cache.internetCache["model-prices"]["failedAt"] -= internet_cache.CACHE_RETRY_SECONDS + 1
         self.failure = None
         self.prices = {**self.prices, "gpt-4o-mini": {"input_cost_per_token": 3e-07, "output_cost_per_token": 6e-07}}
-        self.assertEqual(harness_utils.getModelCost("gpt", "gpt-4o-mini")["input"], 0.3)
-        self.assertFalse(harness_utils.describeCached("model-prices")["offline"])
+        self.assertEqual(internet_cache.getModelCost("gpt", "gpt-4o-mini")["input"], 0.3)
+        self.assertFalse(internet_cache.describeCached("model-prices")["offline"])
 
     def age_on_disk(self, seconds):
-        path = harness_utils.cachePath("model-prices")
+        path = internet_cache.cachePath("model-prices")
         data = json.loads(path.read_text(encoding="utf-8"))
         data["fetchedAt"] -= seconds
         path.write_text(json.dumps(data), encoding="utf-8")
 
     def testWithoutInternetAndWithoutAnyListThePriceIsUnknown(self):
         self.failure = urllib.error.URLError("no network")
-        self.assertIn("could not be fetched", harness_utils.getModelCost("gpt", "gpt-4o-mini")["error"])
-        self.assertEqual(harness_utils.describeCached("model-prices")["fetchedAt"], None)
+        self.assertIn("could not be fetched", internet_cache.getModelCost("gpt", "gpt-4o-mini")["error"])
+        self.assertEqual(internet_cache.describeCached("model-prices")["fetchedAt"], None)
 
     def testThePricesAreRefreshedInTheBackgroundWhileTheProgramRuns(self):
         calls, stop = [], threading.Event()
-        with mock.patch.object(harness_utils, "loadModelPrices", lambda: calls.append(1)), mock.patch.dict(harness_utils.refresher, {"thread": None}), \
-                mock.patch.object(harness_utils, "REFRESH_CHECK_SECONDS", 0.01):
-            harness_utils.keepFresh(stop)
-            thread = harness_utils.refresher["thread"]
-            harness_utils.keepFresh(stop)
-            self.assertIs(harness_utils.refresher["thread"], thread)
+        with everywhere(harness_utils, "loadModelPrices", lambda: calls.append(1)), mock.patch.dict(internet_cache.refresher, {"thread": None}), \
+                everywhere(harness_utils, "REFRESH_CHECK_SECONDS", 0.01):
+            internet_cache.keepFresh(stop)
+            thread = internet_cache.refresher["thread"]
+            internet_cache.keepFresh(stop)
+            self.assertIs(internet_cache.refresher["thread"], thread)
             for attempt in range(500):
                 if len(calls) >= 3:
                     break
@@ -1159,10 +1171,10 @@ class ModelCostTests(unittest.TestCase):
         self.assertFalse(thread.is_alive())
 
     def testTheLastPricesAreKeptWhenARefreshFails(self):
-        harness_utils.getModelCost("gpt", "gpt-4o-mini")
+        internet_cache.getModelCost("gpt", "gpt-4o-mini")
         self.age(4000)
         self.failure = urllib.error.HTTPError("u", 503, "Unavailable", {}, None)
-        cost = harness_utils.getModelCost("gpt", "gpt-4o-mini")
+        cost = internet_cache.getModelCost("gpt", "gpt-4o-mini")
         self.assertEqual(cost["input"], 0.15)
         self.assertNotIn("error", cost)
 
@@ -1403,8 +1415,8 @@ class SwarmTests(LoopTestCase):
             threading.Event().wait(0.03)
             log.append(("ask", question))
             return "yes"
-        with mock.patch.object(harness_utils, "print", lambda message: log.append(("show", message)), create=True), \
-                mock.patch.object(harness_utils, "input", fakeInput, create=True):
+        with everywhere(harness_utils, "print", lambda message: log.append(("show", message)), create=True), \
+                everywhere(harness_utils, "input", fakeInput, create=True):
             swarm.run()
         starts = [index for index, entry in enumerate(log) if entry[0] == "show" and "Summary of the results" in entry[1]]
         self.assertEqual(len(starts), 2)
@@ -1787,7 +1799,7 @@ class SwarmTests(LoopTestCase):
             raise RuntimeError("the user interface crashed")
         swarm = self.makeSwarm(Writer=self.worker("text"))
         swarm.addListener(broken)
-        with mock.patch.object(harness_utils.traceback, "print_exc") as report:
+        with everywhere(internet_cache.traceback, "print_exc") as report:
             self.assertEqual(swarm.run(), "final")
         self.assertGreater(len(seen), 4)
         self.assertEqual(report.call_count, len(seen))
@@ -2036,8 +2048,8 @@ class TaskDescriptionTests(LoopTestCase):
 
 class EmailSetupTests(LoopTestCase):
     def testAWorkingLoginForSendingAndReadingIsAccepted(self):
-        with mock.patch.object(harness_utils.smtplib, "SMTP") as smtp, mock.patch.object(harness_utils.imaplib, "IMAP4_SSL") as imap:
-            self.assertEqual(harness_utils.checkEmailLogin("me@example.com", "pw", "smtp.test", "imap.test"), "")
+        with everywhere(harness_utils.smtplib, "SMTP") as smtp, everywhere(message_loops.imaplib, "IMAP4_SSL") as imap:
+            self.assertEqual(message_loops.checkEmailLogin("me@example.com", "pw", "smtp.test", "imap.test"), "")
         smtp.assert_called_with("smtp.test", 587, timeout=harness_utils.FETCH_TIMEOUT)
         smtp.return_value.__enter__.return_value.starttls.assert_called_once()
         smtp.return_value.__enter__.return_value.login.assert_called_with("me@example.com", "pw")
@@ -2045,30 +2057,30 @@ class EmailSetupTests(LoopTestCase):
         imap.return_value.__enter__.return_value.login.assert_called_with("me@example.com", "pw")
 
     def testNoImapServerMeansTheInboxIsNotTested(self):
-        with mock.patch.object(harness_utils.smtplib, "SMTP"), mock.patch.object(harness_utils.imaplib, "IMAP4_SSL") as imap:
-            self.assertEqual(harness_utils.checkEmailLogin("me@example.com", "pw", "smtp.test"), "")
+        with everywhere(harness_utils.smtplib, "SMTP"), everywhere(message_loops.imaplib, "IMAP4_SSL") as imap:
+            self.assertEqual(message_loops.checkEmailLogin("me@example.com", "pw", "smtp.test"), "")
         imap.assert_not_called()
 
     def testEachWayToFailIsExplained(self):
-        smtp = mock.patch.object(harness_utils.smtplib, "SMTP")
+        smtp = everywhere(harness_utils.smtplib, "SMTP")
         with smtp as started:
             started.return_value.__enter__.return_value.login.side_effect = harness_utils.smtplib.SMTPAuthenticationError(535, b"bad credentials")
-            message = harness_utils.checkEmailLogin("me@example.com", "wrong", "smtp.test")
+            message = message_loops.checkEmailLogin("me@example.com", "wrong", "smtp.test")
         self.assertIn("refused the address or the password", message)
         self.assertIn("app password", message)
-        with mock.patch.object(harness_utils.smtplib, "SMTP", side_effect=OSError("Name or service not known")):
-            self.assertIn("Could not send through smtp.test: Name or service not known", harness_utils.checkEmailLogin("me@example.com", "pw", "smtp.test"))
-        with mock.patch.object(harness_utils.smtplib, "SMTP"), mock.patch.object(harness_utils.imaplib, "IMAP4_SSL", side_effect=OSError("timed out")):
-            message = harness_utils.checkEmailLogin("me@example.com", "pw", "smtp.test", "imap.test")
+        with everywhere(harness_utils.smtplib, "SMTP", side_effect=OSError("Name or service not known")):
+            self.assertIn("Could not send through smtp.test: Name or service not known", message_loops.checkEmailLogin("me@example.com", "pw", "smtp.test"))
+        with everywhere(harness_utils.smtplib, "SMTP"), everywhere(message_loops.imaplib, "IMAP4_SSL", side_effect=OSError("timed out")):
+            message = message_loops.checkEmailLogin("me@example.com", "pw", "smtp.test", "imap.test")
         self.assertIn("Sending works, but imap.test could not be used to read the replies: timed out", message)
-        with mock.patch.object(harness_utils.smtplib, "SMTP"), mock.patch.object(harness_utils.imaplib, "IMAP4_SSL") as imap:
-            imap.return_value.__enter__.return_value.login.side_effect = harness_utils.imaplib.IMAP4.error("LOGIN failed")
-            self.assertIn("LOGIN failed", harness_utils.checkEmailLogin("me@example.com", "pw", "smtp.test", "imap.test"))
+        with everywhere(harness_utils.smtplib, "SMTP"), everywhere(message_loops.imaplib, "IMAP4_SSL") as imap:
+            imap.return_value.__enter__.return_value.login.side_effect = message_loops.imaplib.IMAP4.error("LOGIN failed")
+            self.assertIn("LOGIN failed", message_loops.checkEmailLogin("me@example.com", "pw", "smtp.test", "imap.test"))
 
     def testTheImapServerOfTheSettingsIsUsedWithoutAnEnvironmentVariable(self):
         loop = self.script(EmailLoop(FakeAgent(), "me@example.com", "sara@example.com", "Meeting", "x"), [])
         loop.settings.update(EMAIL_PASSWORD="pw", EMAIL_IMAP_SERVER="imap.settings")
-        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(harness_utils.imaplib, "IMAP4_SSL") as imap:
+        with mock.patch.dict(os.environ, {}, clear=True), everywhere(message_loops.imaplib, "IMAP4_SSL") as imap:
             inbox = imap.return_value.__enter__.return_value
             inbox.search.return_value = ("OK", [b""])
             self.assertEqual(loop.fetchLatestEmail(), "")
@@ -2085,18 +2097,18 @@ class NewsScheduleTests(LoopTestCase):
         return f"{datetime.now() + timedelta(hours=offsetHours):%H:%M}"
 
     def testTheNextTimeIsTodayIfItIsStillToComeAndTomorrowIfNot(self):
-        ahead = (harness_utils.nextOccurrence(self.clock(1)) - datetime.now()).total_seconds()
-        behind = (harness_utils.nextOccurrence(self.clock(-1)) - datetime.now()).total_seconds()
+        ahead = (message_loops.nextOccurrence(self.clock(1)) - datetime.now()).total_seconds()
+        behind = (message_loops.nextOccurrence(self.clock(-1)) - datetime.now()).total_seconds()
         self.assertTrue(3500 < ahead < 3700, ahead)
         self.assertTrue(82700 < behind < 82900, behind)
-        moment = harness_utils.nextOccurrence(" 07:30 ")
+        moment = message_loops.nextOccurrence(" 07:30 ")
         self.assertEqual((moment.hour, moment.minute, moment.second), (7, 30, 0))
         self.assertGreater(moment, datetime.now())
 
     def testBadTimesAreExplained(self):
         for bad in ("7h30", "25:00", "12:75", "", "noon", "12:30:10"):
             with self.assertRaisesRegex(ValueError, "HH:MM, like 07:30"):
-                harness_utils.nextOccurrence(bad)
+                message_loops.nextOccurrence(bad)
             if bad:
                 with self.assertRaises(ValueError):
                     NewsLoop(FakeAgent(), collectAt=bad)
@@ -2118,14 +2130,14 @@ class PublisherTests(LoopTestCase):
             if seen is not None:
                 seen.append(url)
             return body.encode()
-        return mock.patch.object(harness_utils, "fetchUrl", fetch)
+        return everywhere(harness_utils, "fetchUrl", fetch)
 
     def testASearchInAPublisherOnlyAsksForItsPapers(self):
         seen = []
         body = json.dumps({"message": {"items": [{"title": ["A paper"], "abstract": "<p>Abstract</p>", "URL": "https://doi.org/10.1038/x"}]}})
         with self.fetching(body, seen):
-            papers = harness_utils.searchCrossref("graphs", 297)
-            harness_utils.searchCrossref("graphs")
+            papers = writing_loops.searchCrossref("graphs", 297)
+            writing_loops.searchCrossref("graphs")
         self.assertEqual(papers, [{"title": "A paper", "summary": "Abstract", "link": "https://doi.org/10.1038/x"}])
         asked = urllib.parse.parse_qs(urllib.parse.urlparse(seen[0]).query)
         self.assertEqual(asked["filter"], ["member:297,type:journal-article,type:proceedings-article"])
@@ -2137,12 +2149,12 @@ class PublisherTests(LoopTestCase):
                  {"id": 2, "primary-name": "No count"}, {"id": 3}, {"primary-name": "No id"}]
         seen = []
         with self.fetching(json.dumps({"message": {"items": items}}), seen):
-            found = harness_utils.findPublishers("  springer ")
+            found = writing_loops.findPublishers("  springer ")
         self.assertEqual([(publisher["name"], publisher["id"], publisher["papers"]) for publisher in found],
                          [("Springer Science and Business Media LLC", 297, 18972840), ("Springer Global Publication", 1, 40), ("No count", 2, 0)])
         self.assertEqual(urllib.parse.parse_qs(urllib.parse.urlparse(seen[0]).query)["query"], ["springer"])
         with self.fetching("{}"):
-            self.assertEqual(harness_utils.findPublishers("nobody"), [])
+            self.assertEqual(writing_loops.findPublishers("nobody"), [])
 
     def testTheSurveyCanBeRestrictedToPublishersAndTheyAreMergedWithTheSearches(self):
         seen = []
@@ -2150,7 +2162,7 @@ class PublisherTests(LoopTestCase):
             seen.append((subject, publisher))
             return [{"title": f"Paper of {publisher}", "summary": "s", "link": f"https://p{publisher}.test/1"},
                     {"title": "Shared paper", "summary": "s", "link": f"https://shared{publisher}.test"}]
-        with mock.patch.object(harness_utils, "searchCrossref", crossref), mock.patch.dict(harness_utils.PAPER_SEARCHES, {"arXiv": lambda subject: [{"title": "shared  PAPER", "summary": "s", "link": "https://arxiv.test/1"}]}):
+        with everywhere(harness_utils, "searchCrossref", crossref), mock.patch.dict(writing_loops.PAPER_SEARCHES, {"arXiv": lambda subject: [{"title": "shared  PAPER", "summary": "s", "link": "https://arxiv.test/1"}]}):
             loop = self.script(LiteratureSurveyLoop(FakeAgent(), "graphs", 100, searches=("arXiv",), publishers={"IEEE": 263, "ACM": 320}), [])
             papers = loop.searchPapers()
             only = self.script(LiteratureSurveyLoop(FakeAgent(), "graphs", 100, searches=(), publishers={"IEEE": 263}), [])
@@ -2162,22 +2174,22 @@ class PublisherTests(LoopTestCase):
     def testAFailingPublisherIsSkippedByName(self):
         def broken(subject, publisher=None):
             raise urllib.error.HTTPError("u", 429, "Too Many", {}, None)
-        with mock.patch.object(harness_utils, "searchCrossref", broken):
+        with everywhere(harness_utils, "searchCrossref", broken):
             loop = self.script(LiteratureSurveyLoop(FakeAgent(), "graphs", 100, searches=(), publishers={"IEEE": 263}), [])
             self.assertEqual(loop.searchPapers(), [])
         self.assertIn("Skipping the search on IEEE: the website says it received too many requests", self.saidText(loop))
 
     def testPublisherCanBeGivenWithoutChangingTheOtherArguments(self):
         loop = LiteratureSurveyLoop(FakeAgent(), "graphs", 100)
-        self.assertEqual((loop.searches, loop.publishers, loop.numberOfLoops), (tuple(harness_utils.PAPER_SEARCHES), {}, 5))
+        self.assertEqual((loop.searches, loop.publishers, loop.numberOfLoops), (tuple(writing_loops.PAPER_SEARCHES), {}, 5))
         loop = LiteratureSurveyLoop(FakeAgent(), "graphs", 100, ("arXiv",), 3, {"IEEE": 263})
         self.assertEqual((loop.searches, loop.publishers, loop.numberOfLoops), (("arXiv",), {"IEEE": 263}, 3))
 
 
 class GpuReadingTests(unittest.TestCase):
     def smi(self, output="", code=0, error=None):
-        run = mock.patch.object(harness_utils.subprocess, "run", side_effect=error, return_value=subprocess.CompletedProcess([], code, stdout=output, stderr=""))
-        finder = mock.patch.object(harness_utils, "findNvidiaSmi", return_value="nvidia-smi")
+        run = everywhere(checking_loops.subprocess, "run", side_effect=error, return_value=subprocess.CompletedProcess([], code, stdout=output, stderr=""))
+        finder = everywhere(harness_utils, "findNvidiaSmi", return_value="nvidia-smi")
         self.addCleanup(run.stop)
         self.addCleanup(finder.stop)
         finder.start()
@@ -2185,41 +2197,41 @@ class GpuReadingTests(unittest.TestCase):
 
     def testNvidiaGpusAreReadInGb(self):
         self.smi("NVIDIA RTX A5000, 24564, 24098\nNVIDIA RTX A5000, 24564, 23915\n")
-        self.assertEqual(harness_utils.readNvidiaGpus(), [{"name": "NVIDIA RTX A5000", "total": 25.8, "free": 25.3},
+        self.assertEqual(gpu_check.readNvidiaGpus(), [{"name": "NVIDIA RTX A5000", "total": 25.8, "free": 25.3},
                                                           {"name": "NVIDIA RTX A5000", "total": 25.8, "free": 25.1}])
 
     def testLinesThatCannotBeReadAreSkippedAndNamesMayHaveCommas(self):
         self.smi("GPU A, 8192, 100\nGPU B, [N/A], [N/A]\nbroken\nVendor, Inc GPU, 4096, 4096\n\n")
-        self.assertEqual([gpu["name"] for gpu in harness_utils.readNvidiaGpus()], ["GPU A", "Vendor, Inc GPU"])
+        self.assertEqual([gpu["name"] for gpu in gpu_check.readNvidiaGpus()], ["GPU A", "Vendor, Inc GPU"])
 
     def testNoToolOrAFailingToolMeansNoGpu(self):
-        with mock.patch.object(harness_utils, "findNvidiaSmi", return_value=None):
-            self.assertEqual(harness_utils.readNvidiaGpus(), [])
+        with everywhere(harness_utils, "findNvidiaSmi", return_value=None):
+            self.assertEqual(gpu_check.readNvidiaGpus(), [])
         for failure in (FileNotFoundError("gone"), subprocess.TimeoutExpired("nvidia-smi", 10), PermissionError("no")):
             self.smi(error=failure)
-            self.assertEqual(harness_utils.readNvidiaGpus(), [], failure)
+            self.assertEqual(gpu_check.readNvidiaGpus(), [], failure)
         self.smi("NVIDIA RTX A5000, 24564, 24098\n", code=9)
-        self.assertEqual(harness_utils.readNvidiaGpus(), [])
+        self.assertEqual(gpu_check.readNvidiaGpus(), [])
 
     def testTheToolIsStartedWithATimeoutAndWithoutAWindowOnWindows(self):
         run = self.smi("GPU, 1000, 1000")
-        with mock.patch.object(harness_utils.subprocess, "CREATE_NO_WINDOW", 134217728, create=True):
-            harness_utils.readNvidiaGpus()
+        with everywhere(checking_loops.subprocess, "CREATE_NO_WINDOW", 134217728, create=True):
+            gpu_check.readNvidiaGpus()
         self.assertEqual(run.call_args.kwargs["creationflags"], 134217728)
-        self.assertEqual(run.call_args.kwargs["timeout"], harness_utils.GPU_TIMEOUT)
+        self.assertEqual(run.call_args.kwargs["timeout"], gpu_check.GPU_TIMEOUT)
         self.assertEqual(run.call_args.args[0][0], "nvidia-smi")
 
     def testNvidiaSmiIsFoundInTheInstallFolderOfWindowsWhenItIsNotInThePath(self):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
-        with mock.patch.object(harness_utils.shutil, "which", return_value=None), mock.patch.dict(os.environ, {"ProgramFiles": folder.name}):
-            self.assertIsNone(harness_utils.findNvidiaSmi())
+        with everywhere(gpu_check.shutil, "which", return_value=None), mock.patch.dict(os.environ, {"ProgramFiles": folder.name}):
+            self.assertIsNone(gpu_check.findNvidiaSmi())
             tool = Path(folder.name) / "NVIDIA Corporation" / "NVSMI" / "nvidia-smi.exe"
             tool.parent.mkdir(parents=True)
             tool.write_text("")
-            self.assertEqual(harness_utils.findNvidiaSmi(), str(tool))
-        with mock.patch.object(harness_utils.shutil, "which", return_value="/usr/bin/nvidia-smi"):
-            self.assertEqual(harness_utils.findNvidiaSmi(), "/usr/bin/nvidia-smi")
+            self.assertEqual(gpu_check.findNvidiaSmi(), str(tool))
+        with everywhere(gpu_check.shutil, "which", return_value="/usr/bin/nvidia-smi"):
+            self.assertEqual(gpu_check.findNvidiaSmi(), "/usr/bin/nvidia-smi")
 
     def makeCard(self, drm, name, total="17163091968", used="1163091968", product=None):
         device = Path(drm) / name / "device"
@@ -2237,24 +2249,24 @@ class GpuReadingTests(unittest.TestCase):
         self.makeCard(folder.name, "card2", total="garbage")
         self.makeCard(folder.name, "card3", total="8589934592", used="0")
         (Path(folder.name) / "version").write_text("drm")
-        with mock.patch.object(harness_utils, "DRM_FOLDER", Path(folder.name)):
-            self.assertEqual(harness_utils.readAmdGpus(), [{"name": "AMD Radeon RX 7900 XT", "total": 17.2, "free": 16.0},
+        with everywhere(harness_utils, "DRM_FOLDER", Path(folder.name)):
+            self.assertEqual(gpu_check.readAmdGpus(), [{"name": "AMD Radeon RX 7900 XT", "total": 17.2, "free": 16.0},
                                                            {"name": "AMD GPU card3", "total": 8.6, "free": 8.6}])
 
     def testWithoutTheLinuxFolderThereIsNoAmdGpu(self):
-        with mock.patch.object(harness_utils, "DRM_FOLDER", Path("/this/folder/does/not/exist")):
-            self.assertEqual(harness_utils.readAmdGpus(), [])
+        with everywhere(harness_utils, "DRM_FOLDER", Path("/this/folder/does/not/exist")):
+            self.assertEqual(gpu_check.readAmdGpus(), [])
 
     def testAllTheVendorsAreJoined(self):
-        with mock.patch.object(harness_utils, "readNvidiaGpus", return_value=[{"name": "N", "total": 24.0, "free": 20.0}]), \
-                mock.patch.object(harness_utils, "readAmdGpus", return_value=[{"name": "A", "total": 16.0, "free": 16.0}]):
-            self.assertEqual([gpu["name"] for gpu in harness_utils.queryGpus()], ["N", "A"])
+        with everywhere(harness_utils, "readNvidiaGpus", return_value=[{"name": "N", "total": 24.0, "free": 20.0}]), \
+                everywhere(harness_utils, "readAmdGpus", return_value=[{"name": "A", "total": 16.0, "free": 16.0}]):
+            self.assertEqual([gpu["name"] for gpu in gpu_check.queryGpus()], ["N", "A"])
 
     def testTheGpusAreNotReadAgainWithinAFewSeconds(self):
-        with mock.patch.dict(harness_utils.gpuCache, {"loaded": 0, "gpus": []}), mock.patch.object(harness_utils, "queryGpus", return_value=[{"name": "G"}]) as query:
+        with mock.patch.dict(gpu_check.gpuCache, {"loaded": 0, "gpus": []}), everywhere(harness_utils, "queryGpus", return_value=[{"name": "G"}]) as query:
             self.assertEqual((readGpus(), readGpus(), readGpus()), ([{"name": "G"}],) * 3)
             self.assertEqual(query.call_count, 1)
-            harness_utils.gpuCache["loaded"] -= harness_utils.GPU_REFRESH_SECONDS + 1
+            gpu_check.gpuCache["loaded"] -= gpu_check.GPU_REFRESH_SECONDS + 1
             readGpus()
             self.assertEqual(query.call_count, 2)
 
@@ -2285,12 +2297,12 @@ class SwarmVramTests(unittest.TestCase):
     def setUp(self):
         self.assertEqual((self.NINE["vram"], self.FOUR["vram"], self.TWO["vram"], self.SMALL["vram"]), (23.3, 11.3, 5.5, 2.2))
         self.gpus = []
-        patcher = mock.patch.object(harness_utils, "readGpus", lambda: self.gpus)
+        patcher = everywhere(harness_utils, "readGpus", lambda: self.gpus)
         patcher.start()
         self.addCleanup(patcher.stop)
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
-        patcher = mock.patch.object(harness_utils, "AGENT_FILES", Path(folder.name))
+        patcher = everywhere(harness_utils, "AGENT_FILES", Path(folder.name))
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -2450,7 +2462,7 @@ class SwarmVramTests(unittest.TestCase):
             swarm.run()
 
     def testTheGpusAreNotReadWhenNoLocalModelIsUsed(self):
-        with mock.patch.object(harness_utils, "readGpus", side_effect=AssertionError("the GPUs must not be read")):
+        with everywhere(harness_utils, "readGpus", side_effect=AssertionError("the GPUs must not be read")):
             swarm = Swarm("Test mission")
             leader = self.agent()
             leader.run = lambda: "final"
@@ -2521,7 +2533,7 @@ class MessagingTests(unittest.TestCase):
         self.server.requests.clear()
         self.server.mode, self.server.updates = "ok", []
         for name, place in (("TELEGRAM_API", "/telegram"), ("WHATSAPP_API", "/whatsapp")):
-            patcher = mock.patch.object(harness_utils, name, self.base + place)
+            patcher = everywhere(harness_utils, name, self.base + place)
             patcher.start()
             self.addCleanup(patcher.stop)
 
@@ -2550,7 +2562,7 @@ class MessagingTests(unittest.TestCase):
         sendMessage("Telegram", self.TELEGRAM, text)
         parts = [request["body"]["text"] for request in self.server.requests]
         self.assertGreater(len(parts), 1)
-        self.assertTrue(all(len(part) <= harness_utils.MESSAGE_LIMIT for part in parts))
+        self.assertTrue(all(len(part) <= messengers.MESSAGE_LIMIT for part in parts))
         self.assertEqual(" ".join(" ".join(parts).split()), " ".join(text.split()))
         self.assertTrue(all(part.startswith("Story") or part.startswith("word") for part in parts))
 
@@ -2596,12 +2608,12 @@ class MessagingTests(unittest.TestCase):
             findTelegramChats("123:SECRET-TOKEN")
 
     def testALostInternetIsALostConnectionAndAnUnreachableAppIsAnError(self):
-        with mock.patch.object(harness_utils, "TELEGRAM_API", "http://127.0.0.1:1"):
-            with mock.patch.object(harness_utils, "isOnline", lambda: False):
+        with everywhere(harness_utils, "TELEGRAM_API", "http://127.0.0.1:1"):
+            with everywhere(harness_utils, "isOnline", lambda: False):
                 with self.assertRaises(ConnectionLost):
                     sendMessage("Telegram", self.TELEGRAM, "x")
                 self.assertIn("connection was lost", checkMessenger("Telegram", self.TELEGRAM))
-            with mock.patch.object(harness_utils, "isOnline", lambda: True):
+            with everywhere(harness_utils, "isOnline", lambda: True):
                 with self.assertRaisesRegex(MessagingError, "Telegram could not be reached"):
                     sendMessage("Telegram", self.TELEGRAM, "x")
 
@@ -2613,8 +2625,8 @@ class MessagingTests(unittest.TestCase):
         self.assertEqual(self.server.requests, [])
 
     def testTheListOfTheUserAndTheSendersHaveTheSameApps(self):
-        self.assertEqual(set(MESSAGING_APPS), set(harness_utils.MESSENGERS))
-        self.assertEqual(set(MESSAGING_APPS), set(harness_utils.MESSENGER_CHECKS))
+        self.assertEqual(set(MESSAGING_APPS), set(messengers.MESSENGERS))
+        self.assertEqual(set(MESSAGING_APPS), set(messengers.MESSENGER_CHECKS))
         for app, details in MESSAGING_APPS.items():
             self.assertTrue(details["info"].strip() and details["fields"], app)
             self.assertTrue(all(field["ask"].strip() and field["kind"] in ("secret", "text", "phone") for field in details["fields"]), app)
@@ -2645,7 +2657,7 @@ class ConnectionTests(LoopTestCase):
             tried.append(target)
             raise OSError("no")
         proxies = {"http": "http://proxy.test:3128", "https": "https://secure-proxy.test", "no": "localhost"}
-        with mock.patch.object(harness_utils.urllib.request, "getproxies", lambda: proxies), mock.patch.object(harness_utils.socket, "create_connection", connect):
+        with everywhere(harness_utils.urllib.request, "getproxies", lambda: proxies), everywhere(harness_utils.socket, "create_connection", connect):
             self.assertFalse(harness_utils.isOnline())
         self.assertEqual(tried, [("proxy.test", 3128), ("secure-proxy.test", 443), *harness_utils.CONNECTION_HOSTS])
 
@@ -2654,28 +2666,28 @@ class ConnectionTests(LoopTestCase):
             def close(self):
                 pass
         tried = []
-        with mock.patch.object(harness_utils.urllib.request, "getproxies", lambda: {}), \
-                mock.patch.object(harness_utils.socket, "create_connection", lambda target, timeout: tried.append(target) or Connection()):
+        with everywhere(harness_utils.urllib.request, "getproxies", lambda: {}), \
+                everywhere(harness_utils.socket, "create_connection", lambda target, timeout: tried.append(target) or Connection()):
             self.assertTrue(harness_utils.isOnline())
         self.assertEqual(tried, [harness_utils.CONNECTION_HOSTS[0]])
 
     def testOnlyARealOutageIsALostConnection(self):
-        with mock.patch.object(harness_utils, "isOnline", lambda: False):
+        with everywhere(harness_utils, "isOnline", lambda: False):
             lost = ConnectionLost("gone")
             self.assertIs(harness_utils.asConnectionLost(lost), lost)
             self.assertIsInstance(harness_utils.asConnectionLost(OSError("unreachable")), ConnectionLost)
             self.assertIsNone(harness_utils.asConnectionLost(urllib.error.HTTPError("http://x.test", 500, "boom", {}, None)))
             self.assertIsNone(harness_utils.asConnectionLost(harness_utils.smtplib.SMTPAuthenticationError(535, b"refused")))
             self.assertIsNone(harness_utils.asConnectionLost(ValueError("bad")))
-        with mock.patch.object(harness_utils, "isOnline", lambda: True):
+        with everywhere(harness_utils, "isOnline", lambda: True):
             self.assertIsNone(harness_utils.asConnectionLost(OSError("this one website is down")))
 
     def testRaiseIfOfflineTurnsTheErrorIntoALostConnectionOnlyWhenOffline(self):
         error = OSError("unreachable")
-        with mock.patch.object(harness_utils, "isOnline", lambda: False), self.assertRaises(ConnectionLost) as caught:
+        with everywhere(harness_utils, "isOnline", lambda: False), self.assertRaises(ConnectionLost) as caught:
             harness_utils.raiseIfOffline(error)
         self.assertIs(caught.exception.__cause__, error)
-        with mock.patch.object(harness_utils, "isOnline", lambda: True):
+        with everywhere(harness_utils, "isOnline", lambda: True):
             harness_utils.raiseIfOffline(error)
 
     def makeLoop(self):
@@ -2701,12 +2713,12 @@ class ConnectionTests(LoopTestCase):
             if len(calls) == 1:
                 raise OSError("unreachable")
             return "fine"
-        with mock.patch.object(harness_utils, "isOnline", lambda: False):
+        with everywhere(harness_utils, "isOnline", lambda: False):
             self.assertEqual(loop.keepTrying(step), "fine")
         self.assertEqual(len(loop.waited), 1)
         self.assertIsInstance(loop.waited[0], ConnectionLost)
         calls.clear(), loop.waited.clear()
-        with mock.patch.object(harness_utils, "isOnline", lambda: True), self.assertRaises(OSError):
+        with everywhere(harness_utils, "isOnline", lambda: True), self.assertRaises(OSError):
             loop.keepTrying(step)
         self.assertEqual(loop.waited, [])
 
@@ -2718,7 +2730,7 @@ class ConnectionTests(LoopTestCase):
 
     def testWithoutASwarmNothingChangesAndNothingIsAsked(self):
         loop = Loop(FakeAgent())
-        with mock.patch.object(harness_utils, "isOnline", side_effect=AssertionError("the connection must not be asked")):
+        with everywhere(harness_utils, "isOnline", side_effect=AssertionError("the connection must not be asked")):
             with self.assertRaises(OSError):
                 loop.keepTrying(lambda: failing(OSError("down")))
             with self.assertRaises(ConnectionLost):
@@ -2727,9 +2739,9 @@ class ConnectionTests(LoopTestCase):
 
     def testAnEmptyResultIsALostConnectionOnlyInsideASwarmWhenTheInternetIsGone(self):
         loop = self.makeLoop()
-        with mock.patch.object(harness_utils, "isOnline", lambda: False), self.assertRaisesRegex(ConnectionLost, "lost while reading"):
+        with everywhere(harness_utils, "isOnline", lambda: False), self.assertRaisesRegex(ConnectionLost, "lost while reading"):
             loop.checkOnline("reading")
-        with mock.patch.object(harness_utils, "isOnline", lambda: True):
+        with everywhere(harness_utils, "isOnline", lambda: True):
             loop.checkOnline("reading")
 
     def testTheCallsThatManageTheSwarmNeverWaitButTheOwnCallsDo(self):
@@ -2751,10 +2763,10 @@ class ConnectionTests(LoopTestCase):
         loop.onConnectionLost = lambda error: failing(harness_utils.SwarmStopped("stop"))
         def dead(url, limit=10, discover=True):
             raise urllib.error.URLError("unreachable")
-        with mock.patch.object(harness_utils, "readFeed", dead):
-            with mock.patch.object(harness_utils, "isOnline", lambda: False), self.assertRaises(harness_utils.SwarmStopped):
+        with everywhere(harness_utils, "readFeed", dead):
+            with everywhere(harness_utils, "isOnline", lambda: False), self.assertRaises(harness_utils.SwarmStopped):
                 loop.run()
-            with mock.patch.object(harness_utils, "isOnline", lambda: True):
+            with everywhere(harness_utils, "isOnline", lambda: True):
                 self.assertIsNone(loop.run())
         self.assertIn("No headlines could be fetched", self.saidText(loop))
 
@@ -2831,7 +2843,7 @@ class ProgressTests(LoopTestCase):
         self.assertTrue(loop.sendOnce("sent", lambda: None, "sending"))
 
     def testAnApprovedEmailIsNotDraftedAgainAndIsSentOnceAfterAResume(self):
-        smtp = mock.patch.object(harness_utils.smtplib, "SMTP")
+        smtp = everywhere(harness_utils.smtplib, "SMTP")
         started = smtp.start()
         self.addCleanup(smtp.stop)
         loop = self.script(EmailLoop(FakeAgent(), "me@example.com", "sara@example.com", "Meeting", "Ask"), [])
@@ -2928,7 +2940,7 @@ class FolderTests(LoopTestCase):
         [copy] = list(self.work.glob("news_briefing_*.md"))
         self.assertEqual(copy.read_text(encoding="utf-8"), "Briefing")
         paper = {"title": "Real", "summary": "x" * 500, "link": "https://a.test/1"}
-        with mock.patch.dict(harness_utils.PAPER_SEARCHES, {"A": lambda subject: [paper]}, clear=True):
+        with mock.patch.dict(writing_loops.PAPER_SEARCHES, {"A": lambda subject: [paper]}, clear=True):
             loop = self.script(LiteratureSurveyLoop(FakeAgent(["See Real https://a.test/1."]), "graphs", 100, searches=("A",)), ["yes"])
             loop.setFolder(self.work)
             loop.run()

@@ -5,9 +5,9 @@
 
 
 # ==============
-# Task prompts of the loops in harness_utils.py.
+# Task prompts of the loops (message_loops.py, writing_loops.py and checking_loops.py).
 # The {names} between braces are filled in by the loops, so a prompt can be improved without touching any code.
-# Short intermediate prompts (asking for changes, checking rules...) stay in harness_utils.py.
+# Short intermediate prompts (asking for changes, checking rules...) stay in the loops.
 # ==============
 EMAIL_PROMPT = """Write an email in {language} from {sender} to {receiver} with the subject "{subject}".
 What the email must say: {request}

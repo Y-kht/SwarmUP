@@ -7,8 +7,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 # The modules of SwarmUP are in the folders of src/backend. Their names have hyphens, so they are not packages: each folder goes on the path.
 sys.path[:0] = [str(folder) for folder in sorted((Path(__file__).resolve().parent.parent / "src" / "backend").iterdir()) if folder.is_dir() and not folder.name.startswith(("_", "."))]
-from harness_utils import REMOVED_MESSAGE, Loop, Swarm
+from base_loop import Loop
 from models_library import getModelInfo
+from swarm_harness import Swarm
+from swarm_review import REMOVED_MESSAGE
 from test_harness_utils import DraftLoop, LoopTestCase
 from test_saved_swarms import waitUntil
 

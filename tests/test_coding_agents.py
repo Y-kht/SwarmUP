@@ -7,19 +7,25 @@ import threading
 import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from patching import everywhere
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
 # The modules of SwarmUP are in the folders of src/backend. Their names have hyphens, so they are not packages: each folder goes on the path.
 sys.path[:0] = [str(folder) for folder in sorted((Path(__file__).resolve().parent.parent / "src" / "backend").iterdir()) if folder.is_dir() and not folder.name.startswith(("_", "."))]
+import codex_agent
+import coding_agents
 import harness_utils
-import model_clients
-from harness_utils import Loop
-from model_clients import ClaudeCodeModel, CodexModel, ModelError, checkCodex, createModel, describeClaudeCodeRequest, describeRunRules, findMissingPackages, isSafeRead, unwrapCommand
+import model_support
+from base_loop import Loop
+from codex_agent import CodexModel, checkCodex, isSafeRead, unwrapCommand
+from coding_agents import ClaudeCodeModel, describeClaudeCodeRequest, describeRunRules
+from model_clients import createModel
+from model_support import ModelError, findMissingPackages
 from models_library import DEFAULT_CLI_MODEL, getModelInfo
 
-HAS_CLAUDE_SDK = model_clients.importlib.util.find_spec("claude_agent_sdk") is not None
+HAS_CLAUDE_SDK = model_support.importlib.util.find_spec("claude_agent_sdk") is not None
 CODEX = checkCodex()
 
 
@@ -138,7 +144,7 @@ class FolderTestCase(unittest.TestCase):
         self.folder = self.root / "work"
         self.folder.mkdir()
         (self.folder / "notes.txt").write_text("bees", encoding="utf-8")
-        patcher = mock.patch.object(harness_utils, "AGENT_FILES", self.root / "agent-files")
+        patcher = everywhere(harness_utils, "AGENT_FILES", self.root / "agent-files")
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -153,7 +159,7 @@ class ModelInfoTests(unittest.TestCase):
             getModelInfo("x", cli="other")
 
     def testClaudeCodeNeedsItsLibraryAndAKey(self):
-        with mock.patch.object(model_clients.importlib.util, "find_spec", return_value=None):
+        with everywhere(model_support.importlib.util, "find_spec", return_value=None):
             self.assertEqual(findMissingPackages(getModelInfo("", cli="claude-code")), ["claude-agent-sdk"])
         self.assertEqual(findMissingPackages(getModelInfo("", cli="codex")), [])
         with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}), self.assertRaises(ModelError):
@@ -197,14 +203,14 @@ class CodexVersionTests(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", "the fake program is a shell script")
     def testOnlyTheTestedVersionsOfCodexAreUsed(self):
-        tested = ".".join(str(part) for part in model_clients.CODEX_TESTED)
+        tested = ".".join(str(part) for part in codex_agent.CODEX_TESTED)
         with mock.patch.dict(os.environ, {"SWARMUP_CODEX": self.fakeCodex(f"{tested}.7"), "SWARMUP_ALLOW_UNTESTED_CODEX": ""}):
             self.assertEqual(checkCodex()["problem"], "")
         with mock.patch.dict(os.environ, {"SWARMUP_CODEX": self.fakeCodex("0.1.0"), "SWARMUP_ALLOW_UNTESTED_CODEX": ""}):
             self.assertIn(f"npm install -g @openai/codex@{tested}", checkCodex()["problem"])
         with mock.patch.dict(os.environ, {"SWARMUP_CODEX": self.fakeCodex("0.1.0"), "SWARMUP_ALLOW_UNTESTED_CODEX": "1"}):
             self.assertEqual(checkCodex()["problem"], "")
-        with mock.patch.dict(os.environ, {"SWARMUP_CODEX": ""}), mock.patch.object(model_clients.shutil, "which", return_value=None):
+        with mock.patch.dict(os.environ, {"SWARMUP_CODEX": ""}), everywhere(codex_agent.shutil, "which", return_value=None):
             self.assertIn("npm install -g @openai/codex", checkCodex()["problem"])
 
 
@@ -232,10 +238,10 @@ class PermissionWordsTests(FolderTestCase):
         self.assertEqual(loop.askQuestions(questions), {"q1": ["B"], "q2": ["my own words"]})
 
     def testWithoutALoopNothingIsAllowed(self):
-        self.assertEqual(model_clients.askPermission(None, {"action": "x"})["decision"], "deny")
+        self.assertEqual(coding_agents.askPermission(None, {"action": "x"})["decision"], "deny")
         loop = Loop(None)
         loop.askPermission = lambda request: ""
-        self.assertEqual(model_clients.askPermission(loop, {"action": "x"})["decision"], "deny")
+        self.assertEqual(coding_agents.askPermission(loop, {"action": "x"})["decision"], "deny")
 
 
 @unittest.skipUnless(HAS_CLAUDE_SDK, "claude-agent-sdk is not installed")
@@ -364,7 +370,7 @@ class CodexTests(FolderTestCase):
         model, loop, server = self.agent([("tool", "exec_command", {"cmd": "touch made.txt"}), ("text", "Done.")], ["once"])
         loop.folder = None
         model.input("Work.")
-        self.assertTrue((harness_utils.AGENT_FILES / model_clients.WORKSPACES_FOLDER / "Tester" / "made.txt").exists())
+        self.assertTrue((harness_utils.AGENT_FILES / coding_agents.WORKSPACES_FOLDER / "Tester" / "made.txt").exists())
         self.assertFalse((self.folder / "made.txt").exists())
 
 

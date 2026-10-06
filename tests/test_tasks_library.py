@@ -8,12 +8,15 @@ from pathlib import Path
 
 # The modules of SwarmUP are in the folders of src/backend. Their names have hyphens, so they are not packages: each folder goes on the path.
 sys.path[:0] = [str(folder) for folder in sorted((Path(__file__).resolve().parent.parent / "src" / "backend").iterdir()) if folder.is_dir() and not folder.name.startswith(("_", "."))]
-import harness_utils
-from harness_utils import AGENT_RULES, AuthorLoop, CalendarLoop, CoderLoop, DocumentFormatLoop, EmailLoop, LiteratureSurveyLoop, MathCheckLoop, NewsLoop, loadRules
+import writing_loops
+from checking_loops import CoderLoop, MathCheckLoop
+from harness_utils import AGENT_RULES, loadRules
+from message_loops import CalendarLoop, EmailLoop, NewsLoop
 from models_library import RECOMMENDED_API, RECOMMENDED_LOCAL
 from sources_library import EMAIL_PROVIDERS, MESSAGING_APPS
 from tasks_library import (ADVANCED_FIELDS, NO_MESSENGER, OTHER_PROVIDER, TASKS, answerKey, buildLoop, checkAgentName, describeLoop, getDefault, getHelp, isAsked,
                            messengerSettings, parseAnswer, parseChoices, publicAnswers, restoreAnswers, secretFields, suggestFolder, suggestName)
+from writing_loops import AuthorLoop, DocumentFormatLoop, LiteratureSurveyLoop
 
 KINDS = {"text", "email", "secret", "number", "file", "path", "folder", "phone", "time", "command", "choice", "choices", "outlets", "publishers", "accounts"}
 
@@ -77,7 +80,7 @@ class CatalogTests(unittest.TestCase):
         self.assertTrue(news["outlets"]["required"])
         literature = {field["key"]: field for field in TASKS["literature"]["fields"]}
         self.assertEqual((literature["publishers"]["kind"], literature["accounts"]["kind"]), ("publishers", "accounts"))
-        self.assertEqual(literature["searches"]["default"], list(harness_utils.PAPER_SEARCHES))
+        self.assertEqual(literature["searches"]["default"], list(writing_loops.PAPER_SEARCHES))
 
 
 class BuildTests(unittest.TestCase):

@@ -3,11 +3,13 @@ import re
 import shlex
 from pathlib import Path
 
-from harness_utils import (EMAIL_PATTERN, PAPER_SEARCHES, PHONE_PATTERN, USER_NAME, AuthorLoop, CalendarLoop, CoderLoop, DocumentFormatLoop, EmailLoop,
-                           LeaderLoop, LiteratureSurveyLoop, MathCheckLoop, NewsLoop, nextOccurrence)
+from checking_loops import CoderLoop, MathCheckLoop
+from harness_utils import PHONE_PATTERN, USER_NAME
+from message_loops import CalendarLoop, EMAIL_PATTERN, EmailLoop, NewsLoop, nextOccurrence
 from sources_library import EMAIL_PROVIDERS, MESSAGING_APPS
+from writing_loops import AuthorLoop, DocumentFormatLoop, LeaderLoop, LiteratureSurveyLoop, PAPER_SEARCHES
 
-# The tasks a user can give to an agent, each one a loop of harness_utils.py. For every task: what the user is told (info),
+# The tasks a user can give to an agent, each one a loop of message_loops.py, writing_loops.py or checking_loops.py. For every task: what the user is told (info),
 # the questions to ask (fields), how to build the loop once the model is chosen (build), and which recommendations of
 # models_library.py to show (recommend). The command line test uses this now, and the graphical interface will use it later.
 #
@@ -49,7 +51,7 @@ def answerKey(app, key):
     return f"{app.lower()}{key[0].upper()}{key[1:]}"
 
 
-# What a messaging app needs ({key: value}, as the sender of harness_utils.py wants it), from the answers.
+# What a messaging app needs ({key: value}, as the sender of messengers.py wants it), from the answers.
 def messengerSettings(answers):
     app = answers.get("messenger")
     return {field["key"]: answers.get(answerKey(app, field["key"])) or "" for field in MESSAGING_APPS[app]["fields"]} if app in MESSAGING_APPS else {}

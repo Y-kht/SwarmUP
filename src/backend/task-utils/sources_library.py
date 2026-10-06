@@ -231,7 +231,7 @@ ALL_NEWS_OUTLETS = {name: url for outlets in NEWS_OUTLETS.values() for name, url
 # The publishers a literature survey can be restricted to, by the number (member) that Crossref gives to each of them.
 # A search in a publisher only returns papers of that publisher (Springer Nature includes Nature, Springer and BMC for example).
 # Every number below was checked with the Crossref API on 3 October 2026. The user can look for any other publisher by its name
-# with findPublishers in harness_utils.py, which returns the number of the publishers Crossref knows.
+# with findPublishers in writing_loops.py, which returns the number of the publishers Crossref knows.
 PAPER_PUBLISHERS = {
     "Springer Nature": 297,
     "Elsevier": 78,
@@ -290,7 +290,7 @@ EMAIL_PROVIDERS = {
 }
 
 # The messaging apps a news briefing can be sent to. For each one: what the user is told (info), and the questions to ask (fields),
-# in the same form as the fields of tasks_library.py. harness_utils.py has the code that sends to each one (MESSENGERS), under the same name.
+# in the same form as the fields of tasks_library.py. messengers.py has the code that sends to each one (MESSENGERS), under the same name.
 # The tokens are only kept in memory while the program runs, and never saved. The API of each app was read on 4 October 2026.
 MESSAGING_APPS = {
     "Telegram": {

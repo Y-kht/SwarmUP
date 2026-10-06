@@ -1,3 +1,4 @@
+import importlib
 import importlib.util
 import json
 import os
@@ -7,19 +8,21 @@ import threading
 import unittest
 import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from patching import everywhere
 from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 # The modules of SwarmUP are in the folders of src/backend. Their names have hyphens, so they are not packages: each folder goes on the path.
 sys.path[:0] = [str(folder) for folder in sorted((Path(__file__).resolve().parent.parent / "src" / "backend").iterdir()) if folder.is_dir() and not folder.name.startswith(("_", "."))]
-import harness_utils
+import internet_cache
 import model_clients
-from test_harness_utils import isolateInternetCache
+import model_support
 from harness_utils import ConnectionLost
-from model_clients import (ApiModel, LocalModel, ModelConnectionError, ModelError, createModel, findMissingPackages, getApiKey, getHubFolder, isDownloaded,
-                           lookupHuggingFace)
+from model_clients import ApiModel, LocalModel, createModel
+from model_support import ModelConnectionError, ModelError, findMissingPackages, getApiKey, getHubFolder, isDownloaded, lookupHuggingFace
 from models_library import getModelInfo
+from test_harness_utils import isolateInternetCache
 
 HAS_ANTHROPIC = importlib.util.find_spec("anthropic") is not None
 HAS_OPENAI = importlib.util.find_spec("openai") is not None
@@ -106,7 +109,7 @@ class ProviderTestCase(unittest.TestCase):
         self.server.requests.clear()
         self.server.mode = "ok"
         urls = {"claude": self.url, "gpt": f"{self.url}/openai", "gemini": f"{self.url}/gemini", "deepseek": f"{self.url}/deepseek"}
-        for patcher in (mock.patch.dict(model_clients.BASE_URLS, urls), mock.patch.object(model_clients, "API_RETRIES", 0)):
+        for patcher in (mock.patch.dict(model_clients.BASE_URLS, urls), everywhere(model_clients, "API_RETRIES", 0)):
             patcher.start()
             self.addCleanup(patcher.stop)
 
@@ -117,6 +120,7 @@ class ClaudeTests(ProviderTestCase):
         model = ApiModel("claude", "claude-opus-5-5", "key-123")
         self.assertEqual(model.input("Say hi"), "The answer.")
         request = self.server.requests[0]
+        self.assertEqual(request["headers"]["accept-encoding"], "gzip, deflate")
         self.assertEqual(request["path"], "/v1/messages")
         self.assertEqual(request["headers"]["x-api-key"], "key-123")
         self.assertIn("anthropic-version", request["headers"])
@@ -160,9 +164,10 @@ class ClaudeTests(ProviderTestCase):
 
     def testATimeoutIsALostConnectionToo(self):
         import anthropic
-        import httpx
-        timeout = anthropic.APITimeoutError(request=httpx.Request("POST", "http://127.0.0.1:1"))
-        with mock.patch.object(ApiModel, "askClaude", side_effect=timeout), self.assertRaisesRegex(ModelConnectionError, "took too long to answer"):
+        # The HTTP library of the SDK: httpx, or httpx2 for the newest versions.
+        http = importlib.import_module("httpx" if importlib.util.find_spec("httpx") else "httpx2")
+        timeout = anthropic.APITimeoutError(request=http.Request("POST", "http://127.0.0.1:1"))
+        with everywhere(ApiModel, "askClaude", side_effect=timeout), self.assertRaisesRegex(ModelConnectionError, "took too long to answer"):
             ApiModel("claude", "claude-x", "key").input("x")
 
 
@@ -175,6 +180,7 @@ class OpenAiCompatibleTests(ProviderTestCase):
             request = self.server.requests[-1]
             self.assertEqual(request["path"], path)
             self.assertEqual(request["headers"]["authorization"], f"Bearer key-{provider}")
+            self.assertEqual(request["headers"]["accept-encoding"], "gzip, deflate")
             self.assertEqual(request["body"]["model"], f"{provider}-model")
             self.assertEqual(request["body"]["messages"], [{"role": "user", "content": "Say hi"}])
             self.assertEqual(totals(model.usage), {"calls": 1, "input": 7, "output": 3})
@@ -209,12 +215,12 @@ class OpenAiCompatibleTests(ProviderTestCase):
 
 class ApiSetupTests(unittest.TestCase):
     def testAMissingLibraryTellsTheUserWhatToInstall(self):
-        real = model_clients.importlib.import_module
+        real = model_support.importlib.import_module
         def fake(name, *arguments):
             if name in ("anthropic", "openai"):
                 raise ImportError(name)
             return real(name, *arguments)
-        with mock.patch.object(model_clients.importlib, "import_module", fake):
+        with everywhere(model_support.importlib, "import_module", fake):
             with self.assertRaisesRegex(ModelError, "pip install -U anthropic"):
                 ApiModel("claude", "claude-x", "key").input("x")
             with self.assertRaisesRegex(ModelError, "pip install -U openai"):
@@ -222,13 +228,13 @@ class ApiSetupTests(unittest.TestCase):
 
     def testThePackagesAModelNeedsAreKnownBeforeItRuns(self):
         installed = {"openai", "torch", "transformers", "accelerate"}
-        with mock.patch.object(model_clients.importlib.util, "find_spec", lambda name: object() if name in installed else None):
+        with everywhere(model_support.importlib.util, "find_spec", lambda name: object() if name in installed else None):
             self.assertEqual(findMissingPackages(getModelInfo("claude-opus-5-5")), ["anthropic"])
             self.assertEqual(findMissingPackages(getModelInfo("gpt-6-astra")), [])
             self.assertEqual(findMissingPackages(getModelInfo("deepseek-v4-pro")), [])
             self.assertEqual(findMissingPackages(getModelInfo("Qwen/Qwen3.5-9B")), [])
             self.assertEqual(findMissingPackages(getModelInfo("Qwen/Qwen3.5-9B", bits=4)), ["bitsandbytes"])
-        with mock.patch.object(model_clients.importlib.util, "find_spec", lambda name: None):
+        with everywhere(model_support.importlib.util, "find_spec", lambda name: None):
             self.assertEqual(findMissingPackages(getModelInfo("Qwen/Qwen3.5-9B")), ["torch", "transformers", "accelerate"])
 
     def testTheKeyComesFromTheEnvironmentOrFromTheUser(self):
@@ -274,9 +280,9 @@ class HuggingFaceLookupTests(unittest.TestCase):
         self.asking(error=OSError("no network"))
         self.assertEqual(lookupHuggingFace("Qwen/Qwen3-8B"), {"billions": 8.2, "gated": False})
         self.assertEqual(len(seen), 1)
-        harness_utils.internetCache["huggingface-qwen/qwen3-8b"]["fetchedAt"] -= model_clients.HUGGING_FACE_REFRESH_SECONDS + 1
+        internet_cache.internetCache["huggingface-qwen/qwen3-8b"]["fetchedAt"] -= model_support.HUGGING_FACE_REFRESH_SECONDS + 1
         self.assertEqual(lookupHuggingFace("Qwen/Qwen3-8B")["billions"], 8.2)
-        self.assertTrue(harness_utils.describeCached("huggingface-qwen/qwen3-8b")["offline"])
+        self.assertTrue(internet_cache.describeCached("huggingface-qwen/qwen3-8b")["offline"])
 
     def asking(self, body=None, error=None):
         seen = []
@@ -285,7 +291,7 @@ class HuggingFaceLookupTests(unittest.TestCase):
             if error:
                 raise error
             return json.dumps(body).encode() if not isinstance(body, bytes) else body
-        patcher = mock.patch.object(model_clients, "fetchUrl", fetch)
+        patcher = everywhere(model_clients, "fetchUrl", fetch)
         patcher.start()
         self.addCleanup(patcher.stop)
         return seen
@@ -401,14 +407,14 @@ class FakeLibraries:
 
 class LocalModelTests(unittest.TestCase):
     def setUp(self):
-        patcher = mock.patch.object(model_clients, "isOnline", lambda: True)
+        patcher = everywhere(model_clients, "isOnline", lambda: True)
         patcher.start()
         self.addCleanup(patcher.stop)
 
     def testADownloadThatFailsBecauseTheInternetIsGoneIsALostConnection(self):
         libraries = FakeLibraries()
-        with libraries.patch(), mock.patch.object(libraries.transformers.AutoModelForCausalLM, "from_pretrained", side_effect=OSError("We couldn't connect to 'https://huggingface.co'")):
-            with mock.patch.object(model_clients, "isOnline", lambda: False), self.assertRaisesRegex(ModelConnectionError, "Qwen/Qwen3-8B could not be loaded because it needs the internet"):
+        with libraries.patch(), everywhere(libraries.transformers.AutoModelForCausalLM, "from_pretrained", side_effect=OSError("We couldn't connect to 'https://huggingface.co'")):
+            with everywhere(model_clients, "isOnline", lambda: False), self.assertRaisesRegex(ModelConnectionError, "Qwen/Qwen3-8B could not be loaded because it needs the internet"):
                 LocalModel("Qwen/Qwen3-8B").input("x")
             with self.assertRaises(ModelError) as failure:
                 LocalModel("Qwen/Qwen3-8B").input("x")
@@ -438,7 +444,7 @@ class LocalModelTests(unittest.TestCase):
     def testTheUserIsOnlyWarnedAboutTheDownloadWhenThereIsOne(self):
         for downloaded, warned in ((False, True), (True, False)):
             reports = []
-            with FakeLibraries().patch(), mock.patch.object(model_clients, "isDownloaded", lambda name: downloaded):
+            with FakeLibraries().patch(), everywhere(model_clients, "isDownloaded", lambda name: downloaded):
                 LocalModel("Qwen/Qwen3.5-9B", report=reports.append).input("x")
             self.assertEqual("downloaded" in reports[0], warned)
             self.assertTrue(reports[0].startswith("Loading Qwen/Qwen3.5-9B on the GPUs."))
@@ -463,12 +469,12 @@ class LocalModelTests(unittest.TestCase):
         with FakeLibraries(cuda=False).patch():
             with self.assertRaisesRegex(ModelError, "does not see any GPU"):
                 LocalModel("Qwen/Qwen3.5-9B").input("x")
-        real = model_clients.importlib.import_module
+        real = model_support.importlib.import_module
         def fake(name, *arguments):
             if name == "transformers":
                 raise ImportError(name)
             return real(name, *arguments)
-        with FakeLibraries().patch(), mock.patch.object(model_clients.importlib, "import_module", fake):
+        with FakeLibraries().patch(), everywhere(model_support.importlib, "import_module", fake):
             with self.assertRaisesRegex(ModelError, "pip install -U transformers"):
                 LocalModel("Qwen/Qwen3.5-9B").input("x")
 
@@ -481,16 +487,16 @@ class LocalModelTests(unittest.TestCase):
     def testAFailedDownloadAndAFullGpuAreToldInWords(self):
         libraries = FakeLibraries()
         with libraries.patch():
-            with mock.patch.object(libraries.transformers.AutoModelForCausalLM, "from_pretrained", side_effect=OSError("401 Client Error. You are trying to access a gated repo.\nMore")):
+            with everywhere(libraries.transformers.AutoModelForCausalLM, "from_pretrained", side_effect=OSError("401 Client Error. You are trying to access a gated repo.\nMore")):
                 with self.assertRaisesRegex(ModelError, r"meta-llama/Llama-3.2-1B-Instruct could not be downloaded or opened \(401 Client Error.*gated model: accept its license on https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct"):
                     LocalModel("meta-llama/Llama-3.2-1B-Instruct").input("x")
                 with self.assertRaises(ModelError) as plain:
                     LocalModel("Qwen/Qwen3-8B").input("x")
                 self.assertNotIn("accept its license", str(plain.exception))
-            with mock.patch.object(libraries.transformers.AutoModelForCausalLM, "from_pretrained", side_effect=RuntimeError("CUDA out of memory. Tried to allocate 2 GiB")):
+            with everywhere(libraries.transformers.AutoModelForCausalLM, "from_pretrained", side_effect=RuntimeError("CUDA out of memory. Tried to allocate 2 GiB")):
                 with self.assertRaisesRegex(ModelError, "GPUs ran out of memory with Qwen/Qwen3-8B"):
                     LocalModel("Qwen/Qwen3-8B").input("x")
-            with mock.patch.object(libraries.transformers.AutoModelForCausalLM, "from_pretrained", side_effect=RuntimeError("something else")):
+            with everywhere(libraries.transformers.AutoModelForCausalLM, "from_pretrained", side_effect=RuntimeError("something else")):
                 with self.assertRaisesRegex(RuntimeError, "something else"):
                     LocalModel("Qwen/Qwen3-8B").input("x")
 
@@ -514,7 +520,7 @@ class LocalModelTests(unittest.TestCase):
             threading.Event().wait(0.05)
             original(self)
             active[0] -= 1
-        with libraries.patch(), mock.patch.object(LocalModel, "load", slowLoad):
+        with libraries.patch(), everywhere(LocalModel, "load", slowLoad):
             threads = [threading.Thread(target=LocalModel(f"owner/model-{number}").input, args=("x",)) for number in range(4)]
             for thread in threads:
                 thread.start()

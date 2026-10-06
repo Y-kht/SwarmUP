@@ -7,6 +7,7 @@ import time
 import unittest
 from collections import Counter
 from datetime import datetime
+from patching import everywhere
 from pathlib import Path
 from unittest import mock
 
@@ -14,9 +15,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # The modules of SwarmUP are in the folders of src/backend. Their names have hyphens, so they are not packages: each folder goes on the path.
 sys.path[:0] = [str(folder) for folder in sorted((Path(__file__).resolve().parent.parent / "src" / "backend").iterdir()) if folder.is_dir() and not folder.name.startswith(("_", "."))]
 import harness_utils
-from harness_utils import (STOPPED_MESSAGE, AuthorLoop, CoderLoop, ConnectionLost, EmailLoop, Loop, NewsLoop, Swarm, findUnfinishedSwarms, saveSwarmState,
-                           swarmStatePath)
+import message_loops
+import saved_swarms
+import writing_loops
+from base_loop import Loop
+from checking_loops import CoderLoop
+from harness_utils import ConnectionLost, STOPPED_MESSAGE
+from message_loops import EmailLoop, NewsLoop
+from saved_swarms import findUnfinishedSwarms, saveSwarmState, swarmStatePath
+from swarm_harness import Swarm
 from test_harness_utils import DraftLoop, FakeAgent, LoopTestCase, TimedDraftLoop
+from writing_loops import AuthorLoop
 
 
 def waitUntil(condition, what, seconds=10):
@@ -134,14 +143,14 @@ class SavedStateTests(SavedSwarmCase):
     def testNothingIsWrittenBeforeTheSwarmRuns(self):
         swarm = self.swarmOf(Leader=self.plainLoop())
         swarm.sendUserMessage("Leader", "hello")
-        self.assertFalse((self.folder / harness_utils.RUNS_FOLDER).exists())
+        self.assertFalse((self.folder / saved_swarms.RUNS_FOLDER).exists())
 
     def testNoPasswordTokenOrAccountIsEverWritten(self):
         gate = threading.Event()
         email = EmailLoop(FakeAgent(), "me@example.com", "sara@example.com", "Meeting", "Ask")
         email.settings.update(EMAIL_PASSWORD="hunter2-secret", EMAIL_SMTP_SERVER="smtp.test")
         news = NewsLoop(FakeAgent(), messenger="Telegram", messengerSettings={"token": "123:BOT-SECRET", "chat": "42"})
-        survey = harness_utils.LiteratureSurveyLoop(FakeAgent(), "graphs", 100)
+        survey = writing_loops.LiteratureSurveyLoop(FakeAgent(), "graphs", 100)
         survey.logins["publisher.test"] = ("me", "account-secret")
         for loop in (email, news, survey):
             loop.run = lambda: gate.wait(10) and "done"
@@ -157,7 +166,7 @@ class SavedStateTests(SavedSwarmCase):
     def testAWriteThatIsCutShortNeverBreaksTheSavedState(self):
         saveSwarmState("abc", {"version": 1, "number": 1})
         path = swarmStatePath("abc")
-        with mock.patch.object(harness_utils.os, "replace", side_effect=OSError("power cut")), self.assertRaises(OSError):
+        with everywhere(message_loops.os, "replace", side_effect=OSError("power cut")), self.assertRaises(OSError):
             saveSwarmState("abc", {"version": 1, "number": 2})
         self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["number"], 1)
         saveSwarmState("abc", {"version": 1, "number": 3})
@@ -178,7 +187,7 @@ class SavedStateTests(SavedSwarmCase):
         leave("stale", state="running", heartbeat=now - 200)
         leave("wrongVersion", version=99, heartbeat=now - 4)
         leave("noMembers", members={}, heartbeat=now - 5)
-        runs = self.folder / harness_utils.RUNS_FOLDER
+        runs = self.folder / saved_swarms.RUNS_FOLDER
         (runs / "swarm_broken.json").write_text("{not json", encoding="utf-8")
         (runs / "swarm_half.json.tmp").write_text("{}", encoding="utf-8")
         (runs / "notes.txt").write_text("hello", encoding="utf-8")
@@ -191,7 +200,7 @@ class SavedStateTests(SavedSwarmCase):
 
     def testTheStateIsRenewedEveryFewSeconds(self):
         gate = threading.Event()
-        with mock.patch.object(harness_utils, "HEARTBEAT_SECONDS", 0.02):
+        with everywhere(harness_utils, "HEARTBEAT_SECONDS", 0.02):
             swarm = self.swarmOf(Leader=self.plainLoop("final"), Slow=self.plainLoop(gate=gate))
             swarm.startInBackground()
             waitUntil(lambda: self.readState(swarm), "the first state")
@@ -205,7 +214,7 @@ class SavedStateTests(SavedSwarmCase):
         said = []
         leader.notifyUser = said.append
         swarm = self.swarmOf(Leader=leader, Worker=self.plainLoop())
-        with mock.patch.object(harness_utils, "saveSwarmState", side_effect=OSError("disk full")):
+        with everywhere(harness_utils, "saveSwarmState", side_effect=OSError("disk full")):
             self.assertEqual(swarm.run(), "final")
         waitUntil(lambda: any("could not be saved (disk full)" in line for line in said), "the warning")
         time.sleep(0.05)
@@ -216,13 +225,13 @@ class SavedStateTests(SavedSwarmCase):
         said = []
         leader.notifyUser = said.append
         swarm = self.swarmOf(Leader=leader, Worker=self.plainLoop())
-        with mock.patch.object(swarm, "describeState", side_effect=ValueError("Circular reference detected")):
+        with everywhere(swarm, "describeState", side_effect=ValueError("Circular reference detected")):
             self.assertEqual(swarm.run(), "final")
         waitUntil(lambda: any("could not be saved (Circular reference detected)" in line for line in said), "the warning")
 
     def testAProgramCutShortByAnErrorLeavesTheStateAsInterrupted(self):
         swarm = self.swarmOf(Leader=self.plainLoop("final"))
-        with mock.patch.object(swarm, "runExecution", side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
+        with everywhere(swarm, "runExecution", side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
             swarm.run()
         [found] = findUnfinishedSwarms()
         self.assertEqual((found["id"], found["state"], found["running"]), (swarm.id, "interrupted", False))
@@ -429,7 +438,7 @@ class ResumeTests(SavedSwarmCase):
 
 class RememberedWorkTests(SavedSwarmCase):
     def testAnApprovedEmailIsSentExactlyOnceWhateverHappensToTheProgram(self):
-        smtp = mock.patch.object(harness_utils.smtplib, "SMTP")
+        smtp = everywhere(harness_utils.smtplib, "SMTP")
         started = smtp.start()
         self.addCleanup(smtp.stop)
         server = started.return_value.__enter__.return_value
@@ -554,12 +563,12 @@ class LostConnectionTests(SavedSwarmCase):
         self.assertEqual(swarm.getInterruption(), {"Writer": "The internet connection was lost."})
         self.assertEqual(self.readState(swarm)["state"], "paused")
         self.assertIn("The swarm lost its connection and is paused. Everything done so far is saved, so nothing is lost.", human.text())
-        with mock.patch.object(harness_utils, "isOnline", lambda: False):
+        with everywhere(harness_utils, "isOnline", lambda: False):
             human.replies.put("continue")
             self.assertEqual(human.next(), question)
         self.assertIn("There is still no internet connection", human.text())
         self.assertEqual(swarm.getStatus("Writer"), "paused")
-        with mock.patch.object(harness_utils, "isOnline", lambda: True):
+        with everywhere(harness_utils, "isOnline", lambda: True):
             human.replies.put("continue")
             self.assertEqual(swarm.wait(10), {"result": "final"})
         self.assertEqual(len(model.prompts), 2)
@@ -583,13 +592,13 @@ class LostConnectionTests(SavedSwarmCase):
         self.assertEqual(question, "Type continue to try again, or cancel to stop here:")
         self.assertTrue(human.questions.empty())
         self.assertEqual({swarm.getStatus("Writer"), swarm.getStatus("Other")}, {"paused"})
-        with mock.patch.object(harness_utils, "isOnline", lambda: True):
+        with everywhere(harness_utils, "isOnline", lambda: True):
             human.replies.put("continue")
             self.assertEqual(swarm.wait(10), {"result": "final"})
         self.assertEqual(sorted(name for name, status in swarm.getStatuses().items() if status == "done"), ["Leader", "Other", "Writer"])
 
     def testAConnectionLostAfterTheApprovalDoesNotLoseTheApprovedEmail(self):
-        smtp = mock.patch.object(harness_utils.smtplib, "SMTP")
+        smtp = everywhere(harness_utils.smtplib, "SMTP")
         started = smtp.start()
         self.addCleanup(smtp.stop)
         server = started.return_value.__enter__.return_value
@@ -600,12 +609,12 @@ class LostConnectionTests(SavedSwarmCase):
         leader = human.attach(self.plainLoop("final"))
         leader.agent = FakeAgent(["Summary of Emailer"])
         swarm = self.swarmOf(Leader=leader, Emailer=human.attach(emailer))
-        with mock.patch.dict(os.environ, {}, clear=False), mock.patch.object(harness_utils, "isOnline", lambda: False):
+        with mock.patch.dict(os.environ, {}, clear=False), everywhere(harness_utils, "isOnline", lambda: False):
             os.environ.pop("EMAIL_IMAP_SERVER", None)
             swarm.startInBackground()
             self.assertTrue(human.next().startswith("Type continue"))
             self.assertEqual(self.readState(swarm)["members"]["Emailer"]["state"]["progress"], {"mail": "Hello Sara", "sent": "sending"})
-        with mock.patch.object(harness_utils, "isOnline", lambda: True):
+        with everywhere(harness_utils, "isOnline", lambda: True):
             human.replies.put("continue")
             self.assertEqual(swarm.wait(10), {"result": "final"})
         self.assertEqual(server.send_message.call_count, 2)
@@ -651,7 +660,7 @@ class LostConnectionTests(SavedSwarmCase):
         human.next()
         human.replies.put("cancel")
         human.next()
-        with mock.patch.object(harness_utils, "isOnline", lambda: True):
+        with everywhere(harness_utils, "isOnline", lambda: True):
             human.replies.put("continue")
             self.assertEqual(swarm.wait(10), {"result": "final"})
         self.assertEqual(swarm.getInfo("Writer")["result"], "A text")
@@ -670,7 +679,7 @@ class LostConnectionTests(SavedSwarmCase):
         self.assertEqual(human.next(), first)
         self.assertIn("Nothing was changed, the swarm is still paused.", human.text())
         self.assertEqual(swarm.getStatus("Writer"), "paused")
-        with mock.patch.object(harness_utils, "isOnline", lambda: True):
+        with everywhere(harness_utils, "isOnline", lambda: True):
             human.replies.put("continue")
             self.assertEqual(swarm.wait(10), {"result": "final"})
         self.assertTrue(second.startswith("Type stop"))
@@ -694,7 +703,7 @@ class LostConnectionTests(SavedSwarmCase):
         swarm, human = self.cancelling("Summary of Leader, Writer and Mailer.")
         swarm.startInBackground()
         question = human.next()
-        with mock.patch.object(harness_utils, "isOnline", lambda: False):
+        with everywhere(harness_utils, "isOnline", lambda: False):
             with self.assertRaisesRegex(ValueError, "still no internet connection"):
                 swarm.continueWork()
         self.assertEqual(swarm.summarizeChanges(), "Summary of Leader, Writer and Mailer.")

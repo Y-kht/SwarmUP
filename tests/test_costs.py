@@ -1,17 +1,24 @@
 import sys
 import unittest
+from patching import everywhere
 from pathlib import Path
 from types import SimpleNamespace
-from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 # The modules of SwarmUP are in the folders of src/backend. Their names have hyphens, so they are not packages: each folder goes on the path.
 sys.path[:0] = [str(folder) for folder in sorted((Path(__file__).resolve().parent.parent / "src" / "backend").iterdir()) if folder.is_dir() and not folder.name.startswith(("_", "."))]
+import codex_agent
 import harness_utils
+import internet_cache
 import model_clients
-from harness_utils import MissionCosts, Swarm, callCost, checkBudget, formatDollars, isDeepseekPeak, priceOfModel
-from model_clients import ClaudeCodeModel, readOpenAiUsage, recordCall
+import model_support
+import writing_loops
+from coding_agents import ClaudeCodeModel
+from mission_costs import MissionCosts, callCost, checkBudget, formatDollars, isDeepseekPeak, priceOfModel
+from model_clients import readOpenAiUsage
+from model_support import recordCall
 from models_library import getModelInfo
+from swarm_harness import Swarm
 from test_leader_utils import fixedPrices, usePrices
 from test_live_swarm import GatedLoop
 
@@ -175,8 +182,8 @@ class MissionCostTests(unittest.TestCase):
         costs.track("A", getModelInfo("claude-haiku-4-5"), client)
         costs.priceOf(getModelInfo("claude-haiku-4-5"))
         self.assertEqual(costs.report()["spent"], 1.0)
-        with mock.patch.object(harness_utils, "PRICE_REFRESH_SECONDS", 0):
-            with mock.patch.object(harness_utils, "loadModelPrices", lambda: {**fixedPrices(), "claude-haiku-4-5": {**fixedPrices()["claude-haiku-4-5"], "input": 2.0}}):
+        with everywhere(harness_utils, "PRICE_REFRESH_SECONDS", 0):
+            with everywhere(harness_utils, "loadModelPrices", lambda: {**fixedPrices(), "claude-haiku-4-5": {**fixedPrices()["claude-haiku-4-5"], "input": 2.0}}):
                 client.usage["records"].append(call(input=1000000))
                 self.assertEqual(costs.report(wait=True)["spent"], 1.0 + 2.0)
         self.assertEqual(costs.state()["clients"][0]["usage"]["records"][0]["billed"], 1.0)
@@ -222,27 +229,27 @@ class InternetCacheTests(unittest.TestCase):
             if not answers:
                 raise OSError("no network")
             return answers.pop(0)
-        with mock.patch.object(harness_utils, "fetchUrl", fetch):
-            first = harness_utils.findPublishers("Oxford")
-            harness_utils.internetCache["crossref-publishers-oxford"]["fetchedAt"] -= harness_utils.PUBLISHERS_REFRESH_SECONDS + 1
-            self.assertEqual(harness_utils.findPublishers(" oxford "), first)
+        with everywhere(harness_utils, "fetchUrl", fetch):
+            first = writing_loops.findPublishers("Oxford")
+            internet_cache.internetCache["crossref-publishers-oxford"]["fetchedAt"] -= writing_loops.PUBLISHERS_REFRESH_SECONDS + 1
+            self.assertEqual(writing_loops.findPublishers(" oxford "), first)
         self.assertEqual(first[0]["id"], 286)
-        self.assertTrue(harness_utils.describeCached("crossref-publishers-oxford")["offline"])
+        self.assertTrue(internet_cache.describeCached("crossref-publishers-oxford")["offline"])
 
     def testTheModelsOfCodexAreAskedEveryTimeAndTheLastListIsGivenWhenCodexCannotAnswer(self):
         answers = [[{"id": "gpt-6-luna"}], [{"id": "gpt-6-luna"}, {"id": "gpt-6.1-sol"}]]
         class Connection:
             def request(self, method, params):
                 if not answers:
-                    raise model_clients.ModelError("Codex cannot reach OpenAI.")
+                    raise model_support.ModelError("Codex cannot reach OpenAI.")
                 return {"data": answers.pop(0)}
             def close(self):
                 pass
-        with mock.patch.object(model_clients, "openCodex", lambda: Connection()):
-            self.assertEqual([model["id"] for model in model_clients.listCodexModels()], ["gpt-6-luna"])
-            self.assertEqual([model["id"] for model in model_clients.listCodexModels()], ["gpt-6-luna", "gpt-6.1-sol"])
-            harness_utils.internetCache["codex-models"]["failedAt"] = 0
-            self.assertEqual([model["id"] for model in model_clients.listCodexModels()], ["gpt-6-luna", "gpt-6.1-sol"])
+        with everywhere(model_clients, "openCodex", lambda: Connection()):
+            self.assertEqual([model["id"] for model in codex_agent.listCodexModels()], ["gpt-6-luna"])
+            self.assertEqual([model["id"] for model in codex_agent.listCodexModels()], ["gpt-6-luna", "gpt-6.1-sol"])
+            internet_cache.internetCache["codex-models"]["failedAt"] = 0
+            self.assertEqual([model["id"] for model in codex_agent.listCodexModels()], ["gpt-6-luna", "gpt-6.1-sol"])
 
 
 if __name__ == "__main__":

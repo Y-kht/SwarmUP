@@ -18,12 +18,16 @@ from pathlib import Path
 
 # The modules of SwarmUP are in the folders of src/backend. Their names have hyphens, so they are not packages: each folder goes on the path.
 sys.path[:0] = [str(folder) for folder in sorted((Path(__file__).resolve().parent.parent / "src" / "backend").iterdir()) if folder.is_dir() and not folder.name.startswith(("_", "."))]
+import gpu_check
 import harness_utils
-from harness_utils import (FETCH_ERRORS, PAPER_SEARCHES, LiteratureSurveyLoop, NewsLoop, describeError, fetchUrl, getModelCost, readAbstract,
-                           readFeed, searchCrossref)
-from model_clients import LocalModel, getHubFolder
+from harness_utils import FETCH_ERRORS, describeError, fetchUrl, readAbstract, readFeed
+from internet_cache import getModelCost
+from message_loops import NewsLoop
+from model_clients import LocalModel
+from model_support import getHubFolder
 from models_library import API_KEYS, MODELS_API, MODELS_LOCAL, PRICING_PAGES, getVram
 from sources_library import EMAIL_PROVIDERS, NEWS_OUTLETS, PAPER_PUBLISHERS
+from writing_loops import LiteratureSurveyLoop, PAPER_SEARCHES, searchCrossref
 
 STALE_DAYS = 120
 problems = []
@@ -168,14 +172,14 @@ def checkCosts():
 
 
 def checkGpus():
-    gpus = harness_utils.queryGpus()
+    gpus = gpu_check.queryGpus()
     for gpu in gpus:
         print(f"  {gpu['name']}: {gpu['total']} GB in total, {gpu['free']} GB free now")
-    status = harness_utils.checkVram(0.0, gpus)
+    status = gpu_check.checkVram(0.0, gpus)
     sizes = [size for family in MODELS_LOCAL.values() for size in family.values()]
     print(f"  all the GPUs: {status['total']} GB in total, {status['free']} GB free, {status['used']} GB used by other jobs")
     print(f"  listed local models that fit in the total: {sum(getVram(size) <= status['total'] for size in sizes)} of {len(sizes)}, in the free memory: {sum(getVram(size) <= status['free'] for size in sizes)}")
-    report(f"gpus: {len(gpus)} GPU(s) found", bool(gpus), "" if gpus else harness_utils.NO_GPU_MESSAGE)
+    report(f"gpus: {len(gpus)} GPU(s) found", bool(gpus), "" if gpus else gpu_check.NO_GPU_MESSAGE)
 
 
 # Every publisher of the list must still exist at Crossref and have papers. Crossref asks for a gentle pace, so they are asked one after the other,

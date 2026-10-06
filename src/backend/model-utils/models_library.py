@@ -7,7 +7,7 @@
 # The user will see next to the model's name the expected VRAM required to run the model locally.
 # Their devices VRAM will be checked first. If it cannot host the model,
 # they will be asked to choose a smaller model or change to an API hosted model.
-# getModelInfo gives the VRAM of a chosen model, and harness_utils.py reads the GPUs (readGpus) and checks what they can host
+# getModelInfo gives the VRAM of a chosen model, and gpu_check.py reads the GPUs (readGpus) and checks what they can host
 # (checkVram). A Swarm adds up the VRAM of the models of its agents, so the swarm as a whole must fit in the GPUs.
 # Every name below was checked on 3 October 2026: the local ones on huggingface.co (tests/live_checks.py checks them again)
 # and the API ones in the documentation of their provider. Models are replaced quickly, so expect to update the lists.
@@ -171,7 +171,7 @@ API_KEYS = {
 }
 
 # Coding agents that run on the computer of the user, linked to SwarmUP as a third kind of model: they think for an agent like a model,
-# and they can also read files, run commands and search the web, each time with the approval of the user (model_clients.py).
+# and they can also read files, run commands and search the web, each time with the approval of the user (coding_agents.py and codex_agent.py).
 # Claude Code is used with an Anthropic API key only: Anthropic does not allow third-party products to use a Claude subscription
 # (https://code.claude.com/docs/en/agent-sdk/overview). Codex is used with the ChatGPT plan of the user, signed in through Codex itself.
 # DEFAULT_CLI_MODEL lets the agent choose its own model. The models of Codex depend on the plan, so Codex lists them itself.
@@ -184,7 +184,7 @@ MODELS_CLI = {
 }
 
 # The costs are not written here because they change often. The info button of a model fetches them with getModelCost
-# in harness_utils.py, and shows the official page of the provider for the details.
+# in internet_cache.py, and shows the official page of the provider for the details.
 PRICING_PAGES = {
     "gpt": "https://developers.openai.com/api/docs/pricing",
     "claude": "https://platform.claude.com/docs/en/about-claude/pricing",

@@ -7,6 +7,7 @@ import tempfile
 import threading
 import unittest
 from datetime import datetime
+from patching import everywhere
 from pathlib import Path
 from unittest import mock
 
@@ -15,9 +16,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path[:0] = [str(folder) for folder in sorted((Path(__file__).resolve().parent.parent / "src" / "backend").iterdir()) if folder.is_dir() and not folder.name.startswith(("_", "."))]
 import full_command_line_user_test as cli
 import harness_utils
-from harness_utils import Loop, Swarm, findUnfinishedSwarms, saveSwarmState, swarmStatePath
-from models_library import getModelInfo
+from base_loop import Loop
 from harness_utils import ConnectionLost
+from models_library import getModelInfo
+from saved_swarms import findUnfinishedSwarms, saveSwarmState, swarmStatePath
+from swarm_harness import Swarm
 from tasks_library import NO_MESSENGER
 from test_harness_utils import DraftLoop, FakeAgent
 from test_leader_utils import usePrices
@@ -62,7 +65,7 @@ class GpuTestCase(unittest.TestCase):
         usePrices(self)
         self.currentGpus = [dict(gpu) for gpu in self.gpus]
         for target in (harness_utils, cli):
-            patcher = mock.patch.object(target, "readGpus", lambda: self.currentGpus)
+            patcher = everywhere(target, "readGpus", lambda: self.currentGpus)
             patcher.start()
             self.addCleanup(patcher.stop)
 
@@ -200,7 +203,7 @@ class SwarmTestCase(GpuTestCase):
         super().setUp()
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
-        patcher = mock.patch.object(harness_utils, "AGENT_FILES", Path(folder.name))
+        patcher = everywhere(harness_utils, "AGENT_FILES", Path(folder.name))
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -424,7 +427,7 @@ class CommandTests(SwarmTestCase):
 
     def testQuitLeavesTheProgram(self):
         swarm = self.makeSwarm()
-        with mock.patch.object(cli.os, "_exit") as leave:
+        with everywhere(cli.os, "_exit") as leave:
             self.assertIn("Your swarm is saved: start the program again to continue it.", self.run_(swarm, "quit"))
         leave.assert_called_once_with(0)
 
@@ -469,7 +472,7 @@ class TaskQuestionsTests(unittest.TestCase):
         def login(sender, password, smtp, imap):
             tests.append((sender, password, smtp, imap))
             return "smtp.gmail.com refused the address or the password." if len(tests) == 1 else ""
-        with mock.patch.object(cli, "checkEmailLogin", login):
+        with everywhere(cli, "checkEmailLogin", login):
             spec = cli.fillTask(script.console(), "email", [])
         self.assertEqual(spec["answers"], {"provider": "Gmail", "sender": "me@gmail.com", "password": "new-password", "smtp": "smtp.gmail.com", "imap": "imap.gmail.com",
                                            "receiver": "sara@example.com", "subject": "Meeting", "request": "move it to Friday", "language": "English"})
@@ -519,7 +522,7 @@ class TaskQuestionsTests(unittest.TestCase):
     def testTheNewsAgentCanSendItsBriefingToTelegram(self):
         checks = []
         script = Script(self.newsScript("2", "42", "", "", ""), ["123:SECRET-TOKEN"])
-        with mock.patch.object(cli, "checkMessenger", lambda app, settings: checks.append((app, settings)) or ""):
+        with everywhere(cli, "checkMessenger", lambda app, settings: checks.append((app, settings)) or ""):
             spec = cli.fillTask(script.console(), "news", [])
         self.assertEqual(spec["answers"], {"outlets": ["BBC Top Stories"], "topics": "", "collectAt": None, "maxWords": 250, "language": "English",
                                            "messenger": "Telegram", "telegramToken": "123:SECRET-TOKEN", "telegramChat": "42"})
@@ -548,7 +551,7 @@ class TaskQuestionsTests(unittest.TestCase):
             looked.append(token)
             return [] if len(looked) == 1 else [{"id": 42, "name": "Sara"}]
         script = Script(self.newsScript("2", "", "", "", "", "1", "n", "", ""), ["123:SECRET-TOKEN"])
-        with mock.patch.object(cli, "findTelegramChats", find):
+        with everywhere(cli, "findTelegramChats", find):
             spec = cli.fillTask(script.console(), "news", [])
         self.assertEqual(spec["answers"]["telegramChat"], "42")
         self.assertEqual(looked, ["123:SECRET-TOKEN", "123:SECRET-TOKEN"])
@@ -559,13 +562,13 @@ class TaskQuestionsTests(unittest.TestCase):
 
     def testTheChatNumberCanAlwaysBeWrittenInsteadOfLookedUp(self):
         script = Script(self.newsScript("2", "", "skip", "", "7", "n", "", ""), ["123:SECRET-TOKEN"])
-        with mock.patch.object(cli, "findTelegramChats", side_effect=AssertionError("nothing to look up")):
+        with everywhere(cli, "findTelegramChats", side_effect=AssertionError("nothing to look up")):
             spec = cli.fillTask(script.console(), "news", [])
         self.assertEqual(spec["answers"]["telegramChat"], "7")
 
     def testAFailedLookupOfTheChatIsToldAndTheUserCanWriteTheNumber(self):
         script = Script(self.newsScript("2", "", "", "n", "7", "n", "", ""), ["123:SECRET-TOKEN"])
-        with mock.patch.object(cli, "findTelegramChats", side_effect=cli.MessagingError("Telegram refused the bot token.")):
+        with everywhere(cli, "findTelegramChats", side_effect=cli.MessagingError("Telegram refused the bot token.")):
             spec = cli.fillTask(script.console(), "news", [])
         self.assertEqual(spec["answers"]["telegramChat"], "7")
         self.assertIn("Telegram refused the bot token.", script.said)
@@ -585,7 +588,7 @@ class TaskQuestionsTests(unittest.TestCase):
         problems = ["Telegram refused the bot token. Copy it again from @BotFather.", ""]
         checks = []
         script = Script(self.newsScript("2", "42", "", "", "43", "", "", ""), ["wrong-token", "right-token"])
-        with mock.patch.object(cli, "checkMessenger", lambda app, settings: checks.append(dict(settings)) or problems.pop(0)):
+        with everywhere(cli, "checkMessenger", lambda app, settings: checks.append(dict(settings)) or problems.pop(0)):
             spec = cli.fillTask(script.console(), "news", [])
         self.assertEqual((spec["answers"]["telegramToken"], spec["answers"]["telegramChat"]), ("right-token", "43"))
         self.assertEqual(checks, [{"token": "wrong-token", "chat": "42"}, {"token": "right-token", "chat": "43"}])
@@ -640,7 +643,7 @@ class TaskQuestionsTests(unittest.TestCase):
     def testTheLiteratureAgentGetsItsSearchesItsPublishersAndItsAccounts(self):
         found = [{"name": "Oxford University Press (OUP)", "id": 286, "papers": 2387000}, {"name": "Oxford Academic", "id": 5, "papers": 12}]
         script = Script(["graphs", "", "1,3", "1,4", "y", "oxford", "1", "y", "nobody", "y", "ghost", "n", "y", "ieeexplore.ieee.org", "me", "n", "", ""], ["hunter2-secret"])
-        with mock.patch.object(cli, "findPublishers", lambda name: found if name == "oxford" else []):
+        with everywhere(cli, "findPublishers", lambda name: found if name == "oxford" else []):
             spec = cli.fillTask(script.console(), "literature", [])
         self.assertEqual(spec["answers"], {"subject": "graphs", "length": 500, "searches": ["Google Scholar", "Crossref"], "accounts": {"ieeexplore.ieee.org": ("me", "hunter2-secret")},
                                            "publishers": {"Springer Nature": 297, "IEEE": 263, "Oxford University Press (OUP)": 286}})
@@ -710,7 +713,7 @@ class ModelFlowCase(GpuTestCase):
                    "isDownloaded": lambda name: self.downloaded[0], "getHubFolder": lambda: Path(folder.name) / "hub",
                    "getModelCost": lambda provider, model: {**COST, "model": model}}
         for name, replacement in patches.items():
-            patcher = mock.patch.object(cli, name, replacement)
+            patcher = everywhere(cli, name, replacement)
             patcher.start()
             self.addCleanup(patcher.stop)
         environment = mock.patch.dict(cli.os.environ, {}, clear=False)
@@ -818,7 +821,7 @@ class LocalModelTests(ModelFlowCase):
 
     def testALocalModelCanBeTypedAndItsSizeIsFoundOnHuggingFace(self):
         script = Script(["1", "5", "badname", "someone/custom-7b", "1"])
-        with mock.patch.object(cli, "lookupHuggingFace", lambda name: {"billions": 7.0, "gated": False}):
+        with everywhere(cli, "lookupHuggingFace", lambda name: {"billions": 7.0, "gated": False}):
             info, model = self.choose(script)
         self.assertEqual((info["name"], info["billions"], info["vram"]), ("someone/custom-7b", 7.0, 16.8))
         self.assertIn("It is written owner/name, like Qwen/Qwen3-8B.", script.said)
@@ -830,7 +833,7 @@ class LocalModelTests(ModelFlowCase):
             if name == "someone/ghost":
                 raise cli.ModelError("There is no model called someone/ghost on Hugging Face. Check how it is written.")
             return {"billions": None, "gated": False}
-        with mock.patch.object(cli, "lookupHuggingFace", lookup):
+        with everywhere(cli, "lookupHuggingFace", lookup):
             info, model = self.choose(script)
         self.assertIn("There is no model called someone/ghost", script.text())
         self.assertIn("Found on Hugging Face. Its size is not published.", script.said)
@@ -927,7 +930,7 @@ class ApiModelTests(ModelFlowCase):
     def testTheKeyOfTheEnvironmentIsUsedWithoutAskingAndAPriceCanBeUnavailable(self):
         cli.os.environ["OPENAI_API_KEY"] = "from-env"
         script = Script(["2", "2", "y", "n"])
-        with mock.patch.object(cli, "getModelCost", lambda provider, model: {"model": model, "error": "No price is published for this model yet.", "page": "https://prices.test"}):
+        with everywhere(cli, "getModelCost", lambda provider, model: {"model": model, "error": "No price is published for this model yet.", "page": "https://prices.test"}):
             info, model = self.choose(script)
         self.assertEqual(info["name"], "gpt-6-luna")
         self.assertIn("Using the API key found in OPENAI_API_KEY.", script.text())
@@ -938,7 +941,7 @@ class ApiModelTests(ModelFlowCase):
         script = Script(["2", "1", "n", "y"], ["sk-ant"])
         def failing(self, prompt):
             raise cli.ModelError("Anthropic refused the API key. Check that it is correct and still active.")
-        with mock.patch.object(FakeModel, "input", failing):
+        with everywhere(FakeModel, "input", failing):
             info, model = self.choose(script)
         self.assertIn("It did not work: Anthropic refused the API key.", script.text())
         self.assertEqual(info["name"], "claude-sonnet-5-5")
@@ -1024,7 +1027,7 @@ class ProgramCase(GpuTestCase):
                          "getModelCost": lambda provider, model: {**COST, "model": model}}}
         for target, replacements in patches.items():
             for name, replacement in replacements.items():
-                patcher = mock.patch.object(target, name, replacement)
+                patcher = everywhere(target, name, replacement)
                 patcher.start()
                 self.addCleanup(patcher.stop)
         usePrices(self)
@@ -1177,7 +1180,7 @@ class EndToEndTests(ProgramCase):
             return leader if info["name"] == "claude-opus-5-5" else ScriptedModel(info["name"])
         for target, name, value in ((cli, "createModel", create), (leader_utils, "checkCodex", lambda: {"problem": "Codex is not installed."}),
                                     (leader_utils, "findMissingPackages", lambda info: []), (leader_utils, "readGpus", lambda: self.currentGpus)):
-            patcher = mock.patch.object(target, name, value)
+            patcher = everywhere(target, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
         script = self.program(["Write a text about bees, and a short version of it.", str(self.folder), "2", "1", "n", "n", "yes", "2", "5"], builder="2")
@@ -1389,7 +1392,7 @@ class InterruptedSwarmTests(ProgramCase):
         leader.run = lambda: gate.wait(10) and "done"
         swarm.addAgent("Leader", leader, "boss", "lead", recipe={"task": "author"})
         console = Script().console()
-        with mock.patch.object(swarm, "wait", side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
+        with everywhere(swarm, "wait", side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
             cli.runSwarm(console, swarm)
         self.assertEqual(json.loads(swarmStatePath(swarm.id).read_text(encoding="utf-8"))["state"], "interrupted")
         gate.set()
@@ -1443,12 +1446,12 @@ class KeyboardTests(ProgramCase):
         self.assertEqual(self.swarm.getStatus("Writer2"), "paused")
         self.assertTrue(any("Writer2 lost its connection and is paused" in line for line in self.said))
         self.assertTrue(any("PAUSED: the connection was lost" in line for line in self.said))
-        with mock.patch.object(harness_utils, "isOnline", lambda: False):
+        with everywhere(harness_utils, "isOnline", lambda: False):
             self.answer("continue")
             self.question("Type continue to try again, or cancel to stop here:")
             self.assertIn("There is still no internet connection", "\n".join(self.said))
             self.assertEqual(self.swarm.getStatus("Writer2"), "paused")
-        with mock.patch.object(harness_utils, "isOnline", lambda: True):
+        with everywhere(harness_utils, "isOnline", lambda: True):
             self.answer("continue")
             self.finish()
         self.assertEqual(self.swarm.getStatuses(), {"Writer": "done", "Writer2": "done"})

@@ -5,19 +5,27 @@ import tempfile
 import threading
 import time
 import unittest
+from patching import everywhere
 from pathlib import Path
-from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 # The modules of SwarmUP are in the folders of src/backend. Their names have hyphens, so they are not packages: each folder goes on the path.
 sys.path[:0] = [str(folder) for folder in sorted((Path(__file__).resolve().parent.parent / "src" / "backend").iterdir()) if folder.is_dir() and not folder.name.startswith(("_", "."))]
 import harness_utils
+import leader_catalog
+import leader_checks
+import leader_parser
 import leader_utils
-from harness_utils import LeaderLoop, Swarm
-from leader_utils import LeaderCatalog, LeaderManager, designSwarm, findSuggestions, isNoChange, parseOutput
+import mission_costs
+from leader_catalog import LeaderCatalog
+from leader_manager import LeaderManager
+from leader_parser import findSuggestions, isNoChange, parseOutput
+from leader_utils import designSwarm
 from models_library import getModelInfo
+from swarm_harness import Swarm
 from test_live_swarm import GatedLoop
 from test_saved_swarms import waitUntil
+from writing_loops import LeaderLoop
 
 GPUS = [{"name": "RTX A5000", "total": 24.0, "free": 23.5}]
 # The prices of the tests, in US dollars per 1 million tokens, so that no test asks the internet for them.
@@ -32,7 +40,7 @@ def fixedPrices():
 
 # Every test that shows or checks a cost uses the prices above instead of the list of the internet.
 def usePrices(case):
-    patcher = mock.patch.object(harness_utils, "loadModelPrices", fixedPrices)
+    patcher = everywhere(harness_utils, "loadModelPrices", fixedPrices)
     patcher.start()
     case.addCleanup(patcher.stop)
 NAMES = ["Leader", "Writer", "Checker", "Researcher"]
@@ -110,7 +118,7 @@ class FolderTestCase(unittest.TestCase):
         (self.folder / "notes" / "ideas.md").write_text("ideas", encoding="utf-8")
         (self.folder / ".secret").write_text("hidden", encoding="utf-8")
         for target, name, value in ((harness_utils, "AGENT_FILES", self.folder / "agent-files"), (leader_utils, "DEBOUNCE_SECONDS", 0.02)):
-            patcher = mock.patch.object(target, name, value)
+            patcher = everywhere(target, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
         usePrices(self)
@@ -212,7 +220,7 @@ class SuggestionTests(unittest.TestCase):
 
     def testOnlyAFewSentencesAreSentBackAtOnce(self):
         text = " ".join(f"We should add a {noun} agent." for noun in ("writer", "coder", "tester", "editor", "planner"))
-        self.assertEqual(len(findSuggestions(text, NAMES, "Leader")), leader_utils.MAX_SUGGESTIONS)
+        self.assertEqual(len(findSuggestions(text, NAMES, "Leader")), leader_parser.MAX_SUGGESTIONS)
 
 
 class CatalogTests(FolderTestCase):
@@ -277,7 +285,7 @@ class CatalogTests(FolderTestCase):
         self.assertEqual(agent["errors"], [])
         self.assertNotIn("password", agent["values"])
         self.assertEqual(([field["key"] for field in agent["needs"]], agent["key"]), (["sender", "password"], "gpt"))
-        shown = leader_utils.describeAgent(agent)
+        shown = leader_checks.describeAgent(agent)
         self.assertNotIn("hunter2", json.dumps(shown))
         self.assertEqual(shown["needs"], ["Your email address (the one the email is sent from)", "Password of that account", "An API key of OpenAI"])
 
@@ -313,13 +321,13 @@ class CatalogTests(FolderTestCase):
         self.assertIn("- codex: Codex, with the ChatGPT plan of the user (cannot be used: Codex is not installed)", models)
         self.assertIn("- claude-code: Claude Code, billed to the Anthropic API key of the user (ready)", models)
         self.assertIn("None can be used: no supported GPU was found", makeCatalog(self.folder, machine(gpus=[])).describeModels())
-        tasks = leader_utils.describeTasks()
+        tasks = leader_catalog.describeTasks()
         self.assertIn("    filePath (the path of a file that exists in the folder; required): Path of the text to check", tasks)
         self.assertIn("    telegramToken (a secret: never write it, the user gives it; only when messenger is Telegram; required)", tasks)
         self.assertIn("    length (a whole number; default: 300): Maximum number of words", tasks)
         self.assertIn("The publishers: Springer Nature, Elsevier", tasks)
         self.assertNotIn("leader", re.findall(r"^- (\w+):", tasks, re.M))
-        self.assertEqual(leader_utils.describeFiles(self.folder.resolve()).splitlines(), ["- paper.tex (29 bytes)", "- notes/ideas.md (5 bytes)"])
+        self.assertEqual(leader_catalog.describeFiles(self.folder.resolve()).splitlines(), ["- paper.tex (29 bytes)", "- notes/ideas.md (5 bytes)"])
         prompt = catalog.buildPrompt()
         for part in ("You are Leader, the leader of a swarm", "Check my paper and write a summary of it.", str(self.folder.resolve()), "- paper.tex", "<swarmup_build>"):
             self.assertIn(part, prompt)
@@ -360,9 +368,9 @@ class BudgetTests(FolderTestCase):
         swarm.addAgent("Leader", makeLeader(LeaderModel()), "leader", "lead", model=getModelInfo("claude-opus-5-5"))
         writer = GatedLoop("text")
         writer.agent.usage = {"calls": 0, "input": 0, "output": 0}
-        harness_utils.MissionCosts.track(swarm.costs, "Writer", getModelInfo("claude-haiku-4-5"), writer.agent)
+        mission_costs.MissionCosts.track(swarm.costs, "Writer", getModelInfo("claude-haiku-4-5"), writer.agent)
         swarm.addAgent("Writer", writer, "writer", "write", model=getModelInfo("claude-haiku-4-5"))
-        from model_clients import recordCall
+        from model_support import recordCall
         recordCall(writer.agent.usage, input=100000, output=20000)
         catalog = makeCatalog(self.folder)
         catalog.costs = swarm.costs

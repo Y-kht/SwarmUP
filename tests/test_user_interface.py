@@ -6,16 +6,25 @@ import tempfile
 import threading
 import time
 import unittest
+from patching import everywhere
 from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 # The modules of SwarmUP are in the folders of src/backend. Their names have hyphens, so they are not packages: each folder goes on the path.
 sys.path[:0] = [str(folder) for folder in sorted((Path(__file__).resolve().parent.parent / "src" / "backend").iterdir()) if folder.is_dir() and not folder.name.startswith(("_", "."))]
+import coding_agents
 import harness_utils
+import interface_views
+import leader_manager
 import leader_utils
 import model_clients
+import model_support
+import saved_swarms
+import session_core
+import session_models
 import user_interface as gui
+import web_server
 from model_clients import ApiModel
 from test_leader_utils import usePrices
 from test_saved_swarms import waitUntil
@@ -64,11 +73,11 @@ class SessionTestCase(unittest.TestCase):
         self.folder = Path(folder.name)
         for target, name, value in ((harness_utils, "AGENT_FILES", self.folder), (harness_utils, "readGpus", lambda: GPUS), (gui, "readGpus", lambda: GPUS),
                                     (gui, "createModel", lambda info, keys=None, token=None, report=None: Model(info))):
-            patcher = mock.patch.object(target, name, value)
+            patcher = everywhere(target, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
         usePrices(self)
-        self.session = gui.Session()
+        self.session = session_core.Session()
         self.addCleanup(lambda: settle(self.session))
 
     def act(self, action, **payload):
@@ -108,25 +117,25 @@ class QuestionTests(unittest.TestCase):
             "Please enter EMAIL_SMTP_SERVER:": ("text", []),
         }
         for text, (kind, values) in cases.items():
-            found, replies = gui.describeQuestion(text)
+            found, replies = interface_views.describeQuestion(text)
             self.assertEqual((found, [reply["value"] for reply in replies]), (kind, values), text)
-        self.assertEqual(gui.describeQuestion("Password for x:", secret=True), ("secret", []))
+        self.assertEqual(interface_views.describeQuestion("Password for x:", secret=True), ("secret", []))
 
     def testTheCommandLineHintIsKeptForEditing(self):
         field = {"key": "testCommand", "kind": "command"}
-        self.assertEqual(gui.describeRawValue(field, ["python", "-m", "pytest", "my tests"]), "python -m pytest 'my tests'" if gui.os.name != "nt" else 'python -m pytest "my tests"')
-        self.assertEqual(gui.describeRawValue({"key": "password", "kind": "secret"}, "hunter2"), "")
+        self.assertEqual(interface_views.describeRawValue(field, ["python", "-m", "pytest", "my tests"]), "python -m pytest 'my tests'" if interface_views.os.name != "nt" else 'python -m pytest "my tests"')
+        self.assertEqual(interface_views.describeRawValue({"key": "password", "kind": "secret"}, "hunter2"), "")
 
 
 class BuilderTests(SessionTestCase):
     def testTheMissionIsNeeded(self):
-        with self.assertRaises(gui.FormError) as caught:
+        with self.assertRaises(interface_views.FormError) as caught:
             self.act("setMission", mission="   ")
         self.assertIn("mission", caught.exception.errors)
         self.assertEqual(self.act("setMission", mission="Write about bees.")["state"]["mission"], "Write about bees.")
 
     def testAnAgentIsCheckedFieldByFieldAndDescribed(self):
-        with self.assertRaises(gui.FormError) as caught:
+        with self.assertRaises(interface_views.FormError) as caught:
             self.act("saveAgent", task="author", values={"subject": "", "length": "zero"})
         self.assertEqual(set(caught.exception.errors), {"subject", "length"})
         agentId = self.addWriter("bees")
@@ -134,7 +143,7 @@ class BuilderTests(SessionTestCase):
         self.assertEqual((agent["id"], agent["name"], agent["isLeader"]), (agentId, "Writer", True))
         self.assertEqual(agent["description"], "Write a text about bees in at most 200 words.")
         self.assertEqual(self.addWriter("honey") and self.session.describe()["agents"][1]["name"], "Writer2")
-        with self.assertRaises(gui.FormError) as caught:
+        with self.assertRaises(interface_views.FormError) as caught:
             self.addWriter("wax", name="writer")
         self.assertIn("already an agent", caught.exception.errors["name"])
 
@@ -159,15 +168,15 @@ class BuilderTests(SessionTestCase):
 
     def testTheTelegramChatIsFoundWhenTheUserDidNotGiveIt(self):
         values = {"outlets": ["BBC World"], "messenger": "Telegram", "telegramToken": "123:abc", "telegramChat": ""}
-        with mock.patch.object(gui, "findTelegramChats", return_value=[{"id": 42, "name": "Me"}]):
+        with everywhere(gui, "findTelegramChats", return_value=[{"id": 42, "name": "Me"}]):
             agentId = self.act("saveAgent", task="news", values=values)["agentId"]
         self.assertEqual(self.session.findSpec(agentId)["answers"]["telegramChat"], "42")
-        with mock.patch.object(gui, "findTelegramChats", return_value=[]), self.assertRaises(gui.FormError) as caught:
+        with everywhere(gui, "findTelegramChats", return_value=[]), self.assertRaises(interface_views.FormError) as caught:
             self.act("saveAgent", task="news", values=values)
         self.assertIn("send it any message", caught.exception.errors["telegramChat"])
 
     def testTheLiteratureReviewerNeedsAPlaceToSearch(self):
-        with self.assertRaises(gui.FormError) as caught:
+        with self.assertRaises(interface_views.FormError) as caught:
             self.act("saveAgent", task="literature", values={"subject": "bees", "searches": [], "publishers": {}})
         self.assertIn("place to search", caught.exception.errors["searches"])
 
@@ -198,11 +207,11 @@ class BuilderTests(SessionTestCase):
         document.parent.mkdir()
         document.write_text("Theorem 1.", encoding="utf-8")
         agentId = self.act("saveAgent", task="math", values={"filePath": str(document)})["agentId"]
-        with self.assertRaises(gui.FormError):
+        with self.assertRaises(interface_views.FormError):
             self.act("setFolder", agentId=agentId, folder=str(self.folder / "missing"))
         other = self.folder / "other"
         other.mkdir()
-        with self.assertRaises(gui.FormError) as caught:
+        with self.assertRaises(interface_views.FormError) as caught:
             self.act("setFolder", agentId=agentId, folder=str(other))
         self.assertIn("not inside", caught.exception.errors["folder"])
         state = self.act("setFolder", agentId=agentId, folder=str(document.parent))["state"]
@@ -240,10 +249,10 @@ class ModelTests(SessionTestCase):
     def testAnApiModelNeedsAKeyThatIsNeverShown(self):
         self.act("setMission", mission="Bees.")
         agentId = self.addWriter()
-        with mock.patch.dict(gui.os.environ, {"ANTHROPIC_API_KEY": ""}), self.assertRaises(gui.FormError) as caught:
+        with mock.patch.dict(interface_views.os.environ, {"ANTHROPIC_API_KEY": ""}), self.assertRaises(interface_views.FormError) as caught:
             self.act("chooseModel", agentId=agentId, name="claude-sonnet-5-5", local=False)
         self.assertIn("apiKey", caught.exception.errors)
-        with mock.patch.object(gui, "createModel", model_clients.createModel):
+        with everywhere(gui, "createModel", model_clients.createModel):
             state = self.act("chooseModel", agentId=agentId, name="claude-sonnet-5-5", local=False, apiKey="sk-secret-123")["state"]
         self.assertIsInstance(self.session.findSpec(agentId)["client"], ApiModel)
         self.assertEqual(state["keys"]["claude"]["source"], "typed")
@@ -252,10 +261,10 @@ class ModelTests(SessionTestCase):
     def testTheMissingPackagesOfAModelAreShown(self):
         self.act("setMission", mission="Bees.")
         agentId = self.addWriter()
-        with mock.patch.object(gui, "findMissingPackages", return_value=["anthropic"]):
+        with everywhere(gui, "findMissingPackages", return_value=["anthropic"]):
             self.chooseApi(agentId)
         self.assertEqual(self.session.describe()["agents"][0]["missing"], ["anthropic"])
-        with mock.patch.object(gui, "findMissingPackages", return_value=[]):
+        with everywhere(gui, "findMissingPackages", return_value=[]):
             self.act("checkPackages")
         self.assertEqual(self.session.describe()["agents"][0]["missing"], [])
 
@@ -329,7 +338,7 @@ class RunTests(SessionTestCase):
         state = self.session.describe()
         self.assertEqual((state["agents"][-1]["name"], state["agents"][-1]["pending"]), ("Waxer", True))
         self.assertNotIn("Waxer", self.session.swarm.getAgents())
-        with self.assertRaises(gui.FormError):
+        with self.assertRaises(interface_views.FormError):
             self.act("joinLive", agentId=agentId, waitsFor=[])
         self.chooseApi(agentId)
         self.assertTrue(self.session.describe()["run"]["canJoin"])
@@ -379,17 +388,17 @@ class RunTests(SessionTestCase):
         self.act("start", mode="plan")
         self.waitForQuestion("review")
         self.session.swarm.saveForExit()
-        saved = json.loads(next((self.folder / harness_utils.RUNS_FOLDER).glob("swarm_*.json")).read_text(encoding="utf-8"))
+        saved = json.loads(next((self.folder / saved_swarms.RUNS_FOLDER).glob("swarm_*.json")).read_text(encoding="utf-8"))
         self.assertNotIn("hunter2", json.dumps(saved))
         settle(self.session)
-        harness_utils.saveSwarmState(saved["id"], saved)
-        later = gui.Session()
+        saved_swarms.saveSwarmState(saved["id"], saved)
+        later = session_core.Session()
         self.addCleanup(lambda: settle(later))
         self.assertEqual([swarm["mission"] for swarm in later.describe()["unfinished"]], ["Say hello."])
         form = later.act("resumeForm", {"id": saved["id"]})["resume"]
         self.assertEqual([field["key"] for field in form["agents"][0]["fields"]], ["password"])
         self.assertEqual(list(form["providers"]), ["claude"])
-        with self.assertRaises(gui.FormError) as caught:
+        with self.assertRaises(interface_views.FormError) as caught:
             later.act("resume", {"id": saved["id"], "secrets": {}})
         self.assertEqual(set(caught.exception.errors), {"Emailer.password", "key.claude"})
         later.act("resume", {"id": saved["id"], "secrets": {"Emailer": {"password": "hunter2"}}, "keys": {"claude": "sk-test"}})
@@ -399,7 +408,7 @@ class RunTests(SessionTestCase):
         later.act("answer", {"id": question["id"], "answer": "yes"})
         waitUntil(lambda: not later.swarm.isRunning() and later.runInfo.get("finishedAt"), "the end of the continued run")
         self.assertEqual(later.describe()["run"]["state"], "succeeded")
-        self.assertEqual(list((self.folder / harness_utils.RUNS_FOLDER).glob("swarm_*.json")), [])
+        self.assertEqual(list((self.folder / saved_swarms.RUNS_FOLDER).glob("swarm_*.json")), [])
 
 
 # A pretend coding agent: before its plan it asks for a permission and asks a question, through the same helpers as Claude Code and Codex.
@@ -416,8 +425,8 @@ class CodingAgent(Model):
 
     def input(self, prompt):
         if "write a plan" in prompt.lower():
-            self.decisions.append(model_clients.askPermission(self.loop, {"action": "run a command", "detail": "npm test", "folder": "/work", "reason": "Check the code"}))
-            self.answers.append(model_clients.askQuestions(self.loop, [{"id": "tone", "header": "Tone", "question": "Which tone?",
+            self.decisions.append(coding_agents.askPermission(self.loop, {"action": "run a command", "detail": "npm test", "folder": "/work", "reason": "Check the code"}))
+            self.answers.append(coding_agents.askQuestions(self.loop, [{"id": "tone", "header": "Tone", "question": "Which tone?",
                                                                          "options": [{"label": "Warm", "description": ""}], "multiple": False, "secret": False}]))
         return super().input(prompt)
 
@@ -430,14 +439,14 @@ class CodingAgentTests(SessionTestCase):
         for name, value in (("createModel", lambda info, keys=None, token=None, report=None: self.agent if info.get("cli") else Model(info)),
                             ("checkCodex", lambda: {"path": "codex", "version": "0.160.0", "problem": ""}), ("readCodexAccount", lambda: dict(self.account)),
                             ("listCodexModels", lambda: [{"id": "gpt-6-luna", "name": "GPT-6 Luna", "description": "", "isDefault": False}])):
-            patcher = mock.patch.object(gui, name, value)
+            patcher = everywhere(gui, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
 
     def chooseCodex(self):
         self.act("setMission", mission="Write about bees.")
         agentId = self.addWriter()
-        self.act("chooseModel", agentId=agentId, name=gui.DEFAULT_CLI_MODEL, cli="codex")
+        self.act("chooseModel", agentId=agentId, name=interface_views.DEFAULT_CLI_MODEL, cli="codex")
         return agentId
 
     def testTheRequestsOfACodingAgentAreAnsweredInTheConversation(self):
@@ -470,13 +479,13 @@ class CodingAgentTests(SessionTestCase):
         self.act("setMission", mission="Write about bees.")
         agentId = self.addWriter()
         self.account = {"signedIn": False, "type": None, "email": None, "plan": None}
-        with self.assertRaises(gui.FormError) as caught:
-            self.act("chooseModel", agentId=agentId, name=gui.DEFAULT_CLI_MODEL, cli="codex")
+        with self.assertRaises(interface_views.FormError) as caught:
+            self.act("chooseModel", agentId=agentId, name=interface_views.DEFAULT_CLI_MODEL, cli="codex")
         self.assertIn("codex", caught.exception.errors)
         self.assertEqual(self.act("codexAccount")["codex"]["account"]["signedIn"], False)
-        with mock.patch.object(gui, "checkCodex", lambda: {"path": None, "version": None, "problem": "Codex is not installed."}):
+        with everywhere(gui, "checkCodex", lambda: {"path": None, "version": None, "problem": "Codex is not installed."}):
             with self.assertRaises(ValueError) as caught:
-                self.act("chooseModel", agentId=agentId, name=gui.DEFAULT_CLI_MODEL, cli="codex")
+                self.act("chooseModel", agentId=agentId, name=interface_views.DEFAULT_CLI_MODEL, cli="codex")
             self.assertIn("not installed", str(caught.exception))
             self.assertEqual(self.act("codexAccount")["codex"]["problem"], "Codex is not installed.")
         with self.assertRaises(ValueError):
@@ -485,15 +494,15 @@ class CodingAgentTests(SessionTestCase):
     def testClaudeCodeIsUsedWithTheAnthropicKeyOnly(self):
         self.act("setMission", mission="Write about bees.")
         agentId = self.addWriter()
-        with mock.patch.dict(gui.os.environ, {"ANTHROPIC_API_KEY": ""}), self.assertRaises(gui.FormError) as caught:
-            self.act("chooseModel", agentId=agentId, name=gui.DEFAULT_CLI_MODEL, cli="claude-code")
+        with mock.patch.dict(interface_views.os.environ, {"ANTHROPIC_API_KEY": ""}), self.assertRaises(interface_views.FormError) as caught:
+            self.act("chooseModel", agentId=agentId, name=interface_views.DEFAULT_CLI_MODEL, cli="claude-code")
         self.assertIn("apiKey", caught.exception.errors)
-        state = self.act("chooseModel", agentId=agentId, name=gui.DEFAULT_CLI_MODEL, cli="claude-code", apiKey="sk-ant-secret")["state"]
+        state = self.act("chooseModel", agentId=agentId, name=interface_views.DEFAULT_CLI_MODEL, cli="claude-code", apiKey="sk-ant-secret")["state"]
         self.assertEqual((state["agents"][0]["model"]["label"], state["keys"]["claude"]["source"]), ("Claude Code · its default model", "typed"))
         self.assertNotIn("sk-ant-secret", json.dumps(state))
-        self.assertTrue(gui.hasCredentials(gui.getModelInfo("", cli="codex"), {}))
-        with mock.patch.dict(gui.os.environ, {"ANTHROPIC_API_KEY": ""}):
-            self.assertFalse(gui.hasCredentials(gui.getModelInfo("", cli="claude-code"), {}))
+        self.assertTrue(interface_views.hasCredentials(session_models.getModelInfo("", cli="codex"), {}))
+        with mock.patch.dict(interface_views.os.environ, {"ANTHROPIC_API_KEY": ""}):
+            self.assertFalse(interface_views.hasCredentials(session_models.getModelInfo("", cli="claude-code"), {}))
 
     def testTheSignInOfCodexIsShownUntilItEnds(self):
         finished = threading.Event()
@@ -506,7 +515,7 @@ class CodingAgentTests(SessionTestCase):
             def cancel(self):
                 finished.set()
         self.account = {"signedIn": False, "type": None, "email": None, "plan": None}
-        with mock.patch.object(gui, "CodexLogin", Login), mock.patch.object(gui.webbrowser, "open") as opened:
+        with everywhere(gui, "CodexLogin", Login), everywhere(session_models.webbrowser, "open") as opened:
             login = self.act("codexSignIn", method="code")["state"]["codexLogin"]
             self.assertEqual((login["state"], login["code"], login["url"]), ("waiting", "ABCD-1234", "https://auth.openai.com/codex/device"))
             self.assertNotIn("login", login)
@@ -532,7 +541,7 @@ class LeaderModeTests(SessionTestCase):
         for target, name, value in ((leader_utils, "checkCodex", lambda: {"problem": "Codex is not installed."}), (leader_utils, "findMissingPackages", lambda info: []),
                                     (leader_utils, "readGpus", lambda: GPUS), (leader_utils, "DEBOUNCE_SECONDS", 0.02),
                                     (gui, "createModel", lambda info, keys=None, token=None, report=None: self.leaderModel if info["name"] == "claude-opus-5-5" else Model(info))):
-            patcher = mock.patch.object(target, name, value)
+            patcher = everywhere(target, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
         (self.folder / "notes.md").write_text("Bees pollinate.", encoding="utf-8")
@@ -575,7 +584,7 @@ class LeaderModeTests(SessionTestCase):
         self.assertIn("The user read the swarm you proposed and wants changes: Add a short version too.", self.leaderModel.prompts[1])
         self.assertIn("notes.md", self.leaderModel.prompts[0])
         self.act("start", mode="execute")
-        self.assertIsInstance(self.session.swarm.manager, leader_utils.LeaderManager)
+        self.assertIsInstance(self.session.swarm.manager, leader_manager.LeaderManager)
         while self.session.swarm.isRunning():
             question = self.waitForQuestion()
             self.act("answer", id=question["id"], answer={"decision": "approve", "message": ""} if question["kind"] == "proposal" else "yes")
@@ -619,12 +628,12 @@ class LeaderModeTests(SessionTestCase):
     def testTheLeaderNeedsItsFolderAndItsModelBeforeItBuilds(self):
         self.act("setMission", mission="Bees.")
         self.act("setBuildMode", mode="leader")
-        with self.assertRaises(gui.FormError) as caught:
+        with self.assertRaises(interface_views.FormError) as caught:
             self.act("buildWithLeader")
         self.assertIn("folder", caught.exception.errors)
         leader = self.session.describe()["agents"][0]
         self.act("setFolder", agentId=leader["id"], folder=str(self.folder))
-        with self.assertRaises(gui.FormError) as caught:
+        with self.assertRaises(interface_views.FormError) as caught:
             self.act("buildWithLeader")
         self.assertIn("model", caught.exception.errors)
         with self.assertRaises(ValueError):
@@ -657,7 +666,7 @@ class CostTests(SessionTestCase):
         self.assertEqual((costs["budget"], costs["spent"], costs["setAside"], costs["left"]), (20.0, 0.0, 30.0, -10.0))
         catalog = self.act("modelCatalog", agentId=first, bits=16)["catalog"]
         self.assertEqual(catalog["budget"]["left"], 5.0)
-        with self.assertRaises(gui.FormError):
+        with self.assertRaises(interface_views.FormError):
             self.act("setBudget", budget="-3")
         self.act("setBudget", budget="")
         self.assertIsNone(self.session.describe()["costs"]["budget"])
@@ -667,9 +676,9 @@ class CostTests(SessionTestCase):
             def input(self, prompt):
                 answer = super().input(prompt)
                 self.usage["calls"] -= 1
-                model_clients.recordCall(self.usage, input=400000, cachedInput=100000, output=200000)
+                model_support.recordCall(self.usage, input=400000, cachedInput=100000, output=200000)
                 return answer
-        with mock.patch.object(gui, "createModel", lambda info, keys=None, token=None, report=None: Billed(info)):
+        with everywhere(gui, "createModel", lambda info, keys=None, token=None, report=None: Billed(info)):
             self.act("setMission", mission="Write a text about bees.")
             writer = self.addWriter()
             self.chooseApi(writer, "claude-haiku-4-5")
@@ -687,30 +696,30 @@ class CostTests(SessionTestCase):
         self.assertAlmostEqual(costs["left"], 1.5 - 1.41)
         warnings = [item["text"] for item in self.session.feed if "of its budget" in item["text"]]
         self.assertEqual(warnings, ["The mission spent $1.41, 80% of its budget of $1.50. The leader and you can remove agents that are not needed anymore."])
-        state = harness_utils.findUnfinishedSwarms() or [self.session.swarm.describeState()]
+        state = saved_swarms.findUnfinishedSwarms() or [self.session.swarm.describeState()]
         self.assertEqual(state[0]["costs"]["clients"][0]["usage"]["records"][0]["cachedInput"], 100000)
 
     def testTheMostAgentsOfTheLeaderIsASettingOfTheUser(self):
         self.assertEqual(self.session.describe()["settings"]["maxAgents"], 10)
         self.assertEqual(self.act("saveSettings", maxAgents=4)["settings"]["maxAgents"], 4)
-        self.assertEqual(gui.Session().describe()["settings"]["maxAgents"], 4)
+        self.assertEqual(session_core.Session().describe()["settings"]["maxAgents"], 4)
         leader = {"answers": {"folder": None}, "name": "Leader", "model": None}
         self.assertEqual(self.session.leaderCatalog(leader).maxAgents, 4)
         for wrong in (0, "many", 1000):
-            with self.assertRaises(gui.FormError):
+            with self.assertRaises(interface_views.FormError):
                 self.act("saveSettings", maxAgents=wrong)
 
 
 class ServerTests(SessionTestCase):
     def setUp(self):
         super().setUp()
-        self.server = gui.makeServer(self.session)
+        self.server = web_server.makeServer(self.session)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
 
     def request(self, method, path, body=None, headers=None):
-        connection = http.client.HTTPConnection(gui.HOST, self.server.server_port, timeout=10)
+        connection = http.client.HTTPConnection(web_server.HOST, self.server.server_port, timeout=10)
         connection.request(method, path, body=json.dumps(body) if body is not None else None, headers=headers or {})
         response = connection.getresponse()
         data = response.read()
@@ -722,9 +731,9 @@ class ServerTests(SessionTestCase):
         self.assertEqual(status, 200)
         self.assertIn(self.session.token.encode(), page)
         self.assertEqual(self.request("POST", "/api/setMission", {"mission": "Bees."})[0], 403)
-        status, data = self.request("POST", "/api/setMission", {"mission": "Bees."}, {gui.TOKEN_HEADER: self.session.token})
+        status, data = self.request("POST", "/api/setMission", {"mission": "Bees."}, {web_server.TOKEN_HEADER: self.session.token})
         self.assertEqual((status, json.loads(data)["state"]["mission"]), (200, "Bees."))
-        status, data = self.request("POST", "/api/setMission", {"mission": ""}, {gui.TOKEN_HEADER: self.session.token})
+        status, data = self.request("POST", "/api/setMission", {"mission": ""}, {web_server.TOKEN_HEADER: self.session.token})
         self.assertEqual((status, json.loads(data)["errors"]), (400, {"mission": "Write the mission of the swarm in a sentence or two."}))
 
     def testOnlyThisComputerAndTheFilesOfTheInterfaceAreServed(self):
@@ -732,11 +741,11 @@ class ServerTests(SessionTestCase):
         self.assertEqual(self.request("GET", "/assets/../user_interface.py")[0], 404)
         self.assertEqual(self.request("GET", "/assets/app.js")[0], 200)
         self.assertEqual(self.request("GET", "/api/catalog")[0], 403)
-        status, data = self.request("GET", "/api/catalog", headers={gui.TOKEN_HEADER: self.session.token})
-        self.assertEqual(len(json.loads(data)["tasks"]), len(gui.TASKS))
+        status, data = self.request("GET", "/api/catalog", headers={web_server.TOKEN_HEADER: self.session.token})
+        self.assertEqual(len(json.loads(data)["tasks"]), len(interface_views.TASKS))
 
     def testThePollAnswersAtOnceWhenTheBrowserIsBehind(self):
-        status, data = self.request("GET", "/api/poll?version=-1&feed=0", headers={gui.TOKEN_HEADER: self.session.token})
+        status, data = self.request("GET", "/api/poll?version=-1&feed=0", headers={web_server.TOKEN_HEADER: self.session.token})
         self.assertEqual((status, json.loads(data)["state"]["version"]), (200, self.session.version))
 
 
@@ -756,7 +765,7 @@ class WindowTests(unittest.TestCase):
         self.assertEqual(window.create_file_dialog.call_args.kwargs["save_filename"], "new.py")
 
     def testWithoutPywebviewTheWindowOfABrowserIsLookedFor(self):
-        with mock.patch.object(gui.shutil, "which", side_effect=lambda name: "/usr/bin/chromium" if name == "chromium" else None):
+        with everywhere(interface_views.shutil, "which", side_effect=lambda name: "/usr/bin/chromium" if name == "chromium" else None):
             self.assertEqual(gui.findAppBrowser(), "/usr/bin/chromium")
 
 
