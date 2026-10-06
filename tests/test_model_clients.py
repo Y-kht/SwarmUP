@@ -10,9 +10,12 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from unittest import mock
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 # The modules of SwarmUP are in the folders of src/backend. Their names have hyphens, so they are not packages: each folder goes on the path.
 sys.path[:0] = [str(folder) for folder in sorted((Path(__file__).resolve().parent.parent / "src" / "backend").iterdir()) if folder.is_dir() and not folder.name.startswith(("_", "."))]
+import harness_utils
 import model_clients
+from test_harness_utils import isolateInternetCache
 from harness_utils import ConnectionLost
 from model_clients import (ApiModel, LocalModel, ModelConnectionError, ModelError, createModel, findMissingPackages, getApiKey, getHubFolder, isDownloaded,
                            lookupHuggingFace)
@@ -78,6 +81,11 @@ class FakeProvider(BaseHTTPRequestHandler):
                                     "usage": {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}}).encode())
 
 
+
+# The totals of the tokens of a model client, without the record of each call.
+def totals(usage):
+    return {key: usage[key] for key in ("calls", "input", "output")}
+
 class ProviderTestCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -117,9 +125,9 @@ class ClaudeTests(ProviderTestCase):
         self.assertEqual(request["body"]["messages"], [{"role": "user", "content": "Say hi"}])
         self.assertTrue(request["body"]["stream"])
         self.assertFalse({"temperature", "top_p", "top_k", "thinking"} & set(request["body"]))
-        self.assertEqual(model.usage, {"calls": 1, "input": 12, "output": 5})
+        self.assertEqual(totals(model.usage), {"calls": 1, "input": 12, "output": 5})
         model.input("Again")
-        self.assertEqual(model.usage, {"calls": 2, "input": 24, "output": 10})
+        self.assertEqual(totals(model.usage), {"calls": 2, "input": 24, "output": 10})
 
     def testARefusalIsAnErrorWithItsCategory(self):
         self.server.mode = "refusal"
@@ -169,7 +177,7 @@ class OpenAiCompatibleTests(ProviderTestCase):
             self.assertEqual(request["headers"]["authorization"], f"Bearer key-{provider}")
             self.assertEqual(request["body"]["model"], f"{provider}-model")
             self.assertEqual(request["body"]["messages"], [{"role": "user", "content": "Say hi"}])
-            self.assertEqual(model.usage, {"calls": 1, "input": 7, "output": 3})
+            self.assertEqual(totals(model.usage), {"calls": 1, "input": 7, "output": 3})
 
     def testARefusalAndAnEmptyAnswer(self):
         self.server.mode = "refusal"
@@ -257,6 +265,19 @@ class ApiSetupTests(unittest.TestCase):
 
 
 class HuggingFaceLookupTests(unittest.TestCase):
+    def setUp(self):
+        isolateInternetCache(self)
+
+    def testTheAnswerIsKeptAWeekAndGivenWithoutInternet(self):
+        seen = self.asking({"safetensors": {"total": 8190735360}, "gated": False})
+        lookupHuggingFace("Qwen/Qwen3-8B")
+        self.asking(error=OSError("no network"))
+        self.assertEqual(lookupHuggingFace("Qwen/Qwen3-8B"), {"billions": 8.2, "gated": False})
+        self.assertEqual(len(seen), 1)
+        harness_utils.internetCache["huggingface-qwen/qwen3-8b"]["fetchedAt"] -= model_clients.HUGGING_FACE_REFRESH_SECONDS + 1
+        self.assertEqual(lookupHuggingFace("Qwen/Qwen3-8B")["billions"], 8.2)
+        self.assertTrue(harness_utils.describeCached("huggingface-qwen/qwen3-8b")["offline"])
+
     def asking(self, body=None, error=None):
         seen = []
         def fetch(url, login=None, limit=0):
@@ -280,7 +301,7 @@ class HuggingFaceLookupTests(unittest.TestCase):
         self.asking({"gated": False})
         self.assertEqual(lookupHuggingFace("someone/model"), {"billions": None, "gated": False})
         self.asking({"safetensors": None})
-        self.assertIsNone(lookupHuggingFace("someone/model")["billions"])
+        self.assertIsNone(lookupHuggingFace("someone/other")["billions"])
 
     def testEachProblemHasAMessageForTheUser(self):
         self.asking(error=urllib.error.HTTPError("u", 404, "Not Found", {}, None))
@@ -410,7 +431,7 @@ class LocalModelTests(unittest.TestCase):
         self.assertFalse(templateOptions["enable_thinking"])
         self.assertEqual(libraries.calls["generate"][0]["max_new_tokens"], 50)
         self.assertEqual(libraries.calls["decoded"], ([100, 101, 102], True))
-        self.assertEqual(model.usage, {"calls": 2, "input": 10, "output": 6})
+        self.assertEqual(totals(model.usage), {"calls": 2, "input": 10, "output": 6})
         self.assertEqual(len(reports), 2)
         self.assertIn("Loading Qwen/Qwen3.5-9B", reports[0])
 

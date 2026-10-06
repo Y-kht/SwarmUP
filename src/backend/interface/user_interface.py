@@ -29,8 +29,9 @@ from urllib.parse import parse_qs, urlparse
 
 # The modules of SwarmUP are in the folders of src/backend. Their names have hyphens, so they are not packages: each folder goes on the path.
 sys.path[:0] = [str(folder) for folder in sorted(Path(__file__).resolve().parents[1].iterdir()) if folder.is_dir() and not folder.name.startswith(("_", "."))]
-from harness_utils import (FETCH_ERRORS, USER_NAME, ConnectionLost, Loop, MessagingError, Swarm, checkEmailLogin, checkMessenger, checkVram, describeError,
-                           findPublishers, findTelegramChats, findUnfinishedSwarms, getModelCost, nextOccurrence, readGpus)
+from harness_utils import (FETCH_ERRORS, MAX_AGENTS_LIMIT, USER_NAME, ConnectionLost, Loop, MessagingError, MissionCosts, Swarm, checkEmailLogin, checkMessenger,
+                           checkVram, describeCached, describeError, findPublishers, findTelegramChats, findUnfinishedSwarms, formatDollars, getModelCost, keepFresh,
+                           loadSettings, nextOccurrence, readGpus, saveSettings)
 from leader_utils import LeaderCatalog, LeaderManager, designSwarm
 from model_clients import (ModelError, CodexLogin, checkCodex, createModel, findMissingPackages, getApiKey, getHubFolder, isDownloaded, listCodexModels,
                            lookupHuggingFace, readCodexAccount)
@@ -319,10 +320,11 @@ class Session:
             "browse", "pickPath", "setFolder", "openFolder", "modelCatalog", "lookupModel", "price", "chooseModel", "testModel", "checkPackages", "setOrder", "planOrder",
             "setMode", "start", "execute", "answer", "approve", "reject", "correct", "message", "startNow", "prepareStop", "stop", "clearJob", "newSwarm",
             "resumeForm", "resume", "prepareCancel", "abandon", "refreshUnfinished", "openLink", "codexAccount", "codexSignIn", "codexCancel", "joinLive",
-            "removeLive", "setBuildMode", "buildWithLeader", "quit")}
+            "removeLive", "setBuildMode", "buildWithLeader", "setBudget", "saveSettings", "quit")}
 
     def reset(self):
         self.mission = ""
+        self.costs = MissionCosts()
         self.buildMode = "manual"
         self.specs = []
         self.swarm = None
@@ -384,6 +386,7 @@ class Session:
         loop.askSecret = lambda question: self.ask(name, question, secret=True)
         loop.askPermission = lambda request: self.ask(name, f"{name} wants to {request['action']}.", kind="permission", payload=request)
         loop.askQuestions = lambda questions: self.ask(name, f"{name} has {'a question' if len(questions) == 1 else 'questions'} for you.", kind="form", payload=questions)
+        loop.onUsage = self.usageChanged
         loop.askProposal = lambda proposal: self.ask(name, f"{name} proposes a swarm for your mission." if proposal["action"] == "build" else f"{name} proposes: {proposal['text']}.",
                                                      kind="proposal", payload=proposal)
 
@@ -435,6 +438,44 @@ class Session:
                 if question["kind"] == "proposal" and (question["payload"] or {}).get("action") != "build":
                     self.questions.pop(question["id"])
                     self.release(question, {"decision": "reject", "message": ""}, shown=False)
+
+    # ---------- The cost of the mission: every client of a model is counted, from the building of the swarm to its last run. ----------
+    def makeClient(self, info, name):
+        client = createModel(info, self.keys, token=self.tokens.get(info["name"]), report=lambda message: self.notify(name, message))
+        self.costs.track(name, info, client)
+        return client
+
+    # After every call of a model: the window shows the new cost, and the user is told when the mission reaches 80% and 100% of its budget.
+    def usageChanged(self):
+        for warning in self.costs.warnings():
+            self.addFeed("", warning, "warning", "event")
+        self.touch()
+
+    # The agents of the mission now, for the budget: those of the swarm while it exists (they finish), and those of the steps otherwise.
+    def describeTeam(self, excluding=None):
+        swarm = self.liveSwarm()
+        if swarm is not None:
+            team = swarm.describeTeam()
+            names = {member["agent"] for member in team}
+            team += [{"agent": spec["name"], "model": spec["model"], "client": spec["client"], "finished": False} for spec in self.specs if spec["name"] not in names]
+        else:
+            team = [{"agent": spec["name"], "model": spec["model"], "client": spec["client"], "finished": False} for spec in self.specs]
+        return [member for member in team if member["agent"] != excluding]
+
+    def describeCosts(self):
+        return self.costs.report(self.describeTeam())
+
+    def setBudget(self, payload):
+        try:
+            self.costs.setBudget(payload.get("budget"))
+        except ValueError as error:
+            raise FormError({"budget": str(error)}, str(error)) from None
+
+    def saveSettings(self, payload):
+        try:
+            return {"settings": saveSettings({"maxAgents": payload.get("maxAgents")})}
+        except (ValueError, OSError) as error:
+            raise FormError({"maxAgents": str(error)}, str(error)) from None
 
     # ---------- Long tasks run in their own thread, and the browser follows them in the state. ----------
     def runJob(self, name, title, work):
@@ -506,7 +547,8 @@ class Session:
             info, member = swarm.getInfo(name), swarm.getMember(name)
             client = member["agent"].agent
             agents.append({**info, "model": describeModel(info["model"]), "task": (member.get("recipe") or {}).get("task"), "description": info["task"],
-                           "usage": dict(client.usage) if hasattr(client, "usage") else None, "removable": name != swarm.getLeader()})
+                           "usage": {key: client.usage.get(key, 0) for key in ("calls", "input", "output")} if hasattr(client, "usage") else None,
+                           "removable": name != swarm.getLeader()})
         try:
             stages = swarm.getStages()
         except ValueError:
@@ -543,7 +585,9 @@ class Session:
             agents = [self.describeSpec(spec, index) for index, spec in enumerate(self.specs)]
             cancelling = {key: value for key, value in self.cancelling.items() if key != "swarm"} if self.cancelling else None
             codexLogin = {key: value for key, value in self.codexLogin.items() if key != "login"} if self.codexLogin else None
-        return {"version": version, "mission": self.mission, "buildMode": self.buildMode, "agents": agents, "mode": self.mode, "order": self.order, "keys": self.describeKeys(),
+        return {"version": version, "mission": self.mission, "buildMode": self.buildMode, "costs": self.describeCosts(), "settings": loadSettings(),
+                "prices": describeCached("model-prices"),
+                "maxAgentsLimit": MAX_AGENTS_LIMIT, "agents": agents, "mode": self.mode, "order": self.order, "keys": self.describeKeys(),
                 "gpu": self.describeGpus(), "run": self.describeRun(), "questions": questions, "jobs": jobs, "unfinished": self.unfinished, "busy": self.isBusy(),
                 "nativeDialogs": self.dialog is not None, "trash": self.trash["spec"]["name"] if self.trash else None, "cancelling": cancelling,
                 "codexLogin": codexLogin}
@@ -657,6 +701,7 @@ class Session:
         elif spec["name"] != name:
             for other in self.specs:
                 other["waitsFor"] = [name if waited == spec["name"] else waited for waited in other["waitsFor"]]
+            self.costs.rename(spec["name"], name)
         spec.update(task=task, name=name, answers=answers, description=describeLoop(loop))
         self.dirty = self.dirty or not live
         return {"agentId": spec["id"], "description": spec["description"], "warning": warning}
@@ -801,21 +846,40 @@ class Session:
         return {"name": name, "billions": info["billions"], "vram": info["vram"], "bits": bits, "gated": isGated(name), "status": status,
                 "message": check["message"], "downloaded": isDownloaded(name)}
 
+    # The price of an API model for the picker: per 1 million tokens, and whether it fits in what is left of the budget (money, None without one).
+    def apiEntry(self, name, provider, money, cli=None):
+        price = self.costs.priceOf(getModelInfo(name, provider=provider, cli=cli))
+        reference = price["reference"]
+        status = "unknown" if reference is None else "overBudget" if money is not None and reference > money else "fits"
+        return {"name": name, "provider": provider, "company": API_KEYS[provider]["company"], "price": reference, "priceText": price.get("error", ""), "status": status}
+
+    # The first list of models only shows what can be chosen now: the local models that fit in the VRAM the other agents left, and the API models
+    # whose price of 1 million tokens fits in what is left of the budget. All the models stay in the full lists, where the others are marked.
     def modelCatalog(self, payload):
         spec = self.findSpec(payload.get("agentId"))
         bits = int(payload.get("bits") or 16)
         if bits not in BITS:
             raise ValueError(f"The models are used with {', '.join(str(option) for option in BITS)} bits.")
-        sizing = self.sizingSwarm(spec["id"])
+        sizing = self.liveSwarm() if spec.get("pending") else self.sizingSwarm(spec["id"])
         recommend = getTask(spec["task"])["recommend"]
         families = {family: [self.localEntry(sizing, name, bits) for name in models] for family, models in MODELS_LOCAL.items()}
         local = [self.localEntry(sizing, name, bits) for name in RECOMMENDED_LOCAL[recommend]]
-        api = [{"name": name, "provider": provider, "company": API_KEYS[provider]["company"]} for name in RECOMMENDED_API[recommend]
-               for provider in [next(key for key, models in MODELS_API.items() if name in models)]]
+        budget = self.costs.left(self.describeTeam(excluding=spec["name"]), wait=True)
+        money = budget["left"]
+        try:
+            prices = {provider: [self.apiEntry(name, provider, money) for name in models] for provider, models in MODELS_API.items()}
+            claude = [self.apiEntry(name, "claude", money, cli="claude-code") for name in MODELS_CLI["claude-code"]["models"] if name != DEFAULT_CLI_MODEL]
+        except FETCH_ERRORS as error:
+            raise ValueError(f"The prices of the models could not be fetched: {describeError(error)}.") from None
+        listed = {entry["name"]: entry for entries in prices.values() for entry in entries}
+        api = [listed[name] for name in RECOMMENDED_API[recommend]]
         gpu = checkVram(sizing.getNeededVram(), readGpus())
-        cli = {"claude-code": {"missing": findMissingPackages(getModelInfo("", cli="claude-code")), "problem": ""}, "codex": checkCodex()}
-        return {"catalog": {"agentId": spec["id"], "bits": bits, "local": local, "families": families, "api": api, "gpu": gpu, "isLeader": self.specs[0] is spec,
-                            "hfToken": bool(os.environ.get("HF_TOKEN")), "current": describeModel(spec["model"]), "cli": cli}}
+        cli = {"claude-code": {"missing": findMissingPackages(getModelInfo("", cli="claude-code")), "problem": "", "prices": claude}, "codex": checkCodex()}
+        return {"catalog": {"agentId": spec["id"], "bits": bits, "local": [entry for entry in local if entry["status"] != "tooBig"],
+                            "hiddenLocal": sum(entry["status"] == "tooBig" for entry in local), "families": families,
+                            "api": [entry for entry in api if entry["status"] != "overBudget"], "hiddenApi": sum(entry["status"] == "overBudget" for entry in api),
+                            "prices": prices, "budget": budget, "gpu": gpu, "isLeader": self.specs[0] is spec, "hfToken": bool(os.environ.get("HF_TOKEN")),
+                            "current": describeModel(spec["model"]), "cli": cli}}
 
     def lookupModel(self, payload):
         name = str(payload.get("name", "")).strip()
@@ -866,12 +930,16 @@ class Session:
             if not (self.keys.get(info["provider"]) or getApiKey(info["provider"])):
                 company = API_KEYS[info["provider"]]["company"]
                 raise FormError({"apiKey": f"{company} needs an API key. Create one at {API_KEYS[info['provider']]['page']}."}, f"{company} needs an API key.")
-        client = createModel(info, self.keys, token=self.tokens.get(name), report=lambda message: self.notify(spec["name"], message))
+        money = self.costs.left(self.describeTeam(excluding=spec["name"]), wait=True)["left"]
+        price = self.costs.priceOf(info)["reference"] if not info["local"] else 0.0
+        over = f"{info['name']} costs {formatDollars(price)} per 1 million tokens, more than the {formatDollars(max(money, 0))} left of the budget of the mission." \
+            if money is not None and price is not None and price > money else ""
+        client = self.makeClient(info, spec["name"])
         if hasattr(spec["client"], "unload"):
             spec["client"].unload()
         spec.update(model=info, client=client, missing=findMissingPackages(info), tested="")
         self.dirty = self.dirty or not spec.get("pending")
-        return {"warning": check["message"] if info["local"] else "", "missing": spec["missing"], "download": describeDownload(info) if info["local"] else None}
+        return {"warning": check["message"] if info["local"] else over, "missing": spec["missing"], "download": describeDownload(info) if info["local"] else None}
 
     # ---------- Agents that join or leave the swarm while it runs (or between two runs, keeping what was approved). ----------
     # A new agent joins the group that works now (see Swarm.addAgent): it can wait for agents already there, and nobody waits for it.
@@ -1028,7 +1096,7 @@ class Session:
         if not leader["model"]:
             raise FormError({"model": f"Choose the model of {leader['name']} first."}, f"Choose the model of {leader['name']} first.")
         self.makeClients()
-        catalog = LeaderCatalog(self.mission, leader["answers"]["folder"], leader["name"], leader["model"], self.keys, self.tokens)
+        catalog = self.leaderCatalog(leader)
         loop = buildLoop("leader", leader["client"], {**leader["answers"], "mission": self.mission})
         self.connect(loop, leader["name"])
         def work():
@@ -1044,8 +1112,7 @@ class Session:
         made = []
         for agent in agents:
             info = agent["model"]
-            client = createModel(info, self.keys, token=self.tokens.get(info["name"]), report=lambda message, name=agent["name"]: self.notify(name, message)) \
-                if hasCredentials(info, self.keys) else None
+            client = self.makeClient(info, agent["name"]) if hasCredentials(info, self.keys) else None
             loop = buildLoop(agent["task"], None, agent["answers"])
             self.agentNumber += 1
             made.append({"id": f"agent{self.agentNumber}", "task": agent["task"], "name": agent["name"], "answers": agent["answers"], "model": info, "client": client,
@@ -1065,13 +1132,16 @@ class Session:
             self.dirty, self.trash = True, None
             self.touch()
 
+    def leaderCatalog(self, leader):
+        return LeaderCatalog(self.mission, leader["answers"].get("folder"), leader["name"], leader["model"], self.keys, self.tokens, self.costs, loadSettings()["maxAgents"])
+
     def manage(self, swarm, leader):
-        LeaderManager(swarm, LeaderCatalog(self.mission, leader["answers"].get("folder"), leader["name"], leader["model"], self.keys, self.tokens), self)
+        LeaderManager(swarm, self.leaderCatalog(leader), self)
 
     # What the manager of the leader needs: the loop of a new agent, or of an agent with another model (LeaderManager in leader_utils.py).
     def makeLoop(self, agent):
         info = agent["model"]
-        client = createModel(info, self.keys, token=self.tokens.get(info["name"]), report=lambda message: self.notify(agent["name"], message))
+        client = self.makeClient(info, agent["name"])
         loop = buildLoop(agent["task"], client, agent["answers"])
         self.connect(loop, agent["name"])
         return loop
@@ -1135,6 +1205,7 @@ class Session:
         if leader and len(self.specs) == 1:
             raise ValueError(f"Ask {leader['name']} to build the swarm first, in the step of the mission.")
         swarm = Swarm(self.mission)
+        swarm.costs = self.costs
         for spec in self.specs:
             loop = buildLoop(spec["task"], spec["client"], spec["answers"])
             self.connect(loop, spec["name"])
@@ -1154,7 +1225,7 @@ class Session:
                 if not hasCredentials(spec["model"], self.keys):
                     company = API_KEYS[spec["model"]["provider"]]["company"]
                     raise ValueError(f"{spec['name']} needs an API key of {company}: choose its model again in the step of the models to give it.")
-                spec["client"] = createModel(spec["model"], self.keys, token=self.tokens.get(spec["model"]["name"]), report=lambda message, name=spec["name"]: self.notify(name, message))
+                spec["client"] = self.makeClient(spec["model"], spec["name"])
 
     def currentSwarm(self):
         if self.swarm is None or self.dirty:
@@ -1345,7 +1416,7 @@ class Session:
         if errors:
             raise FormError(errors)
         if usable:
-            client = createModel(info, self.keys, token=self.tokens.get(info["name"]), report=lambda message: self.notify(name, message))
+            client = self.makeClient(info, name)
         answers = restoreAnswers(task, recipe["answers"], secrets)
         loop = buildLoop(task, client, answers)
         self.connect(loop, name)
@@ -1371,7 +1442,7 @@ class Session:
         self.unloadModels()
         self.reset()
         rebuilt.sort(key=lambda spec: spec["name"] != saved["leader"])
-        self.mission, self.specs, self.mode, self.swarm, self.dirty = saved["mission"], rebuilt, saved["mode"], swarm, False
+        self.mission, self.specs, self.mode, self.swarm, self.dirty, self.costs = saved["mission"], rebuilt, saved["mode"], swarm, False, swarm.costs
         if saved.get("managed") and self.leaderSpec():
             self.buildMode = "leader"
             self.manage(swarm, self.leaderSpec())
@@ -1595,6 +1666,7 @@ def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(errors="replace")
     session = Session()
+    keepFresh()
     server = makeServer(session, options.port)
     address = f"http://{HOST}:{server.server_port}/"
     threading.Thread(target=server.serve_forever, daemon=True).start()

@@ -3,6 +3,7 @@ import html
 import http.client
 import imaplib
 import json
+import math
 import os
 import re
 import shutil
@@ -25,7 +26,7 @@ from functools import partial
 from pathlib import Path
 
 import agent_prompts as prompts
-from models_library import PRICE_NOTES, PRICING_PAGES
+from models_library import DEFAULT_CLI_MODEL, PRICE_NOTES, PRICING_PAGES
 from sources_library import ALL_NEWS_OUTLETS
 
 # We need to define a set of tools used in each harness module.
@@ -60,6 +61,7 @@ ABSTRACT_META_NAMES = ("citation_abstract", "dc.description", "og:description", 
 MODEL_PRICES_URL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
 PRICE_PROVIDERS = {"gpt": "openai", "claude": "anthropic", "gemini": "gemini", "deepseek": "deepseek"}
 PRICE_REFRESH_SECONDS = 3600
+PUBLISHERS_REFRESH_SECONDS = 7 * 24 * 3600
 PRICE_FILE_LIMIT = 20000000
 GPU_TIMEOUT = 10
 GPU_REFRESH_SECONDS = 5
@@ -300,7 +302,110 @@ def readAbstract(page):
     return max([meta.get(name, "") for name in ABSTRACT_META_NAMES], key=len)
 
 
-modelPriceCache = {"loaded": 0, "prices": {}}
+
+# ==============
+# What SwarmUP takes from the internet to show it (the prices of the models, what Hugging Face says about a model, the models of Codex, the
+# publishers of Crossref) is kept in agent-files/internet-cache, with the time it was fetched. remember fetches it again once it is older than
+# its age limit, and keeps what it had when the internet does not answer: SwarmUP works offline with the information of the last connection,
+# and describeCached says from when it is. A failed fetch is only tried again after CACHE_RETRY_SECONDS, so an offline program does not wait for
+# the internet at every step. keepFresh refreshes the prices in the background while the program runs, so they are always up to date.
+# What the agents fetch for their work (news, papers, messages) is never kept here: it must be new, and a lost connection pauses the agent.
+# ==============
+CACHE_FOLDER = "internet-cache"
+CACHE_RETRY_SECONDS = 60
+REFRESH_CHECK_SECONDS = 600
+internetCache = {}
+CACHE_LOCK = threading.Lock()
+refresher = {"thread": None}
+
+
+def cachePath(name):
+    return AGENT_FILES / CACHE_FOLDER / f"{re.sub(r'[^A-Za-z0-9._-]', '_', name)}.json"
+
+
+def readCacheFile(name):
+    try:
+        data = json.loads(cachePath(name).read_text(encoding="utf-8"))
+        return {"value": data["value"], "fetchedAt": float(data["fetchedAt"])}
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+# The file is written under another name and then renamed, so a stop in the middle never leaves a broken file. A cache that cannot be written
+# only means the information is fetched again at the next start.
+def writeCacheFile(name, value, fetchedAt):
+    path = cachePath(name)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f"{path.name}.tmp")
+        temporary.write_text(json.dumps({"fetchedAt": fetchedAt, "value": value}, ensure_ascii=False), encoding="utf-8")
+        os.replace(temporary, path)
+    except OSError:
+        pass
+
+
+def cacheEntry(name):
+    entry = internetCache.get(name)
+    if entry is None:
+        entry = internetCache[name] = readCacheFile(name) or {}
+    return entry
+
+
+# The information called name: kept if it is younger than maxAge seconds, otherwise fetched again with fetch(). If fetch fails with one of
+# errors, the last information is given; without any, the error goes up.
+def remember(name, fetch, maxAge, errors=FETCH_ERRORS):
+    now = datetime.now().timestamp()
+    with CACHE_LOCK:
+        entry = cacheEntry(name)
+        if "value" in entry and (now - entry["fetchedAt"] < maxAge or now - entry.get("failedAt", 0) < CACHE_RETRY_SECONDS):
+            return entry["value"]
+    try:
+        value = fetch()
+    except errors as error:
+        with CACHE_LOCK:
+            entry.update(failedAt=now, error=describeError(error))
+            if "value" in entry:
+                return entry["value"]
+        raise
+    with CACHE_LOCK:
+        entry.update(value=value, fetchedAt=now, failedAt=0, error="")
+    writeCacheFile(name, value, now)
+    return value
+
+
+# From when the information called name is, for the user: {"fetchedAt": "YYYY-MM-DD HH:MM" or None, "offline": the last try to renew it
+# failed, so this is the information of the last connection, "error": why}.
+def describeCached(name):
+    with CACHE_LOCK:
+        entry = cacheEntry(name)
+    fetched = entry.get("fetchedAt")
+    offline = bool(entry.get("failedAt") and (not fetched or entry["failedAt"] > fetched))
+    return {"fetchedAt": f"{datetime.fromtimestamp(fetched):%Y-%m-%d %H:%M}" if fetched else None, "offline": offline, "error": entry.get("error", "") if offline else ""}
+
+
+# Started once by the program (the window or the command line): the price list is renewed as soon as it is an hour old, while the program runs,
+# until stop is set.
+def keepFresh(stop=None):
+    if refresher["thread"] is not None:
+        return
+    stop = stop or threading.Event()
+    def refresh():
+        while True:
+            try:
+                loadModelPrices()
+            except FETCH_ERRORS:
+                pass
+            except Exception:
+                traceback.print_exc()
+            if stop.wait(REFRESH_CHECK_SECONDS):
+                return
+    refresher["thread"] = threading.Thread(target=refresh, daemon=True, name="keep-fresh")
+    refresher["thread"].start()
+
+# The other prices a provider bills: writing to the cache, and the prompts over LONG_PROMPT tokens, for the models that price them apart.
+LONG_PRICE_FIELDS = {"cacheWrite": "cache_creation_input_token_cost", "inputLong": "input_cost_per_token_above_200k_tokens",
+                     "outputLong": "output_cost_per_token_above_200k_tokens", "cachedInputLong": "cache_read_input_token_cost_above_200k_tokens",
+                     "cacheWriteLong": "cache_creation_input_token_cost_above_200k_tokens"}
 
 
 def perMillion(cost):
@@ -308,26 +413,23 @@ def perMillion(cost):
 
 
 # The prices of all the API models, in US dollars per 1 million tokens, from a list kept up to date by the community (LiteLLM).
-# For the models checked it agrees with the pages of the providers. The list is downloaded again after an hour,
-# and if that fails the last one is kept, so the info buttons keep working without internet for a while.
+# For the models checked it agrees with the pages of the providers. The list is downloaded again once it is an hour old (see remember),
+# and without internet the list of the last connection is used, even after the program started again.
+def fetchModelPrices():
+    entries = json.loads(fetchUrl(MODEL_PRICES_URL, limit=PRICE_FILE_LIMIT))
+    if not isinstance(entries, dict):
+        raise ValueError("the price list has an unexpected format")
+    prices = {}
+    for name, entry in entries.items():
+        if isinstance(entry, dict) and all(isinstance(entry.get(field), (int, float)) for field in ("input_cost_per_token", "output_cost_per_token")):
+            prices[name] = {"input": perMillion(entry["input_cost_per_token"]), "output": perMillion(entry["output_cost_per_token"]),
+                            "cachedInput": perMillion(entry.get("cache_read_input_token_cost")), "context": entry.get("max_input_tokens"),
+                            **{key: perMillion(entry.get(field)) if isinstance(entry.get(field), (int, float)) else None for key, field in LONG_PRICE_FIELDS.items()}}
+    return prices
+
+
 def loadModelPrices():
-    now = datetime.now().timestamp()
-    if now - modelPriceCache["loaded"] > PRICE_REFRESH_SECONDS:
-        try:
-            entries = json.loads(fetchUrl(MODEL_PRICES_URL, limit=PRICE_FILE_LIMIT))
-            if not isinstance(entries, dict):
-                raise ValueError("the price list has an unexpected format")
-        except FETCH_ERRORS:
-            if not modelPriceCache["prices"]:
-                raise
-            return modelPriceCache["prices"]
-        prices = {}
-        for name, entry in entries.items():
-            if isinstance(entry, dict) and all(isinstance(entry.get(field), (int, float)) for field in ("input_cost_per_token", "output_cost_per_token")):
-                prices[name] = {"input": perMillion(entry["input_cost_per_token"]), "output": perMillion(entry["output_cost_per_token"]),
-                                "cachedInput": perMillion(entry.get("cache_read_input_token_cost")), "context": entry.get("max_input_tokens")}
-        modelPriceCache.update(loaded=now, prices=prices)
-    return modelPriceCache["prices"]
+    return remember("model-prices", fetchModelPrices, PRICE_REFRESH_SECONDS)
 
 
 # What the info button of a model shows. It never fails: if the price is not known, it says why and still gives the official page.
@@ -341,6 +443,285 @@ def getModelCost(provider, model):
     if not price:
         return {"model": model, "error": "No price is published for this model yet.", "page": page}
     return {"model": model, **price, "unit": "US dollars per 1 million tokens", "note": PRICE_NOTES.get(provider, ""), "page": page}
+
+
+# ==============
+# The cost of a mission. Every model client records each of its calls (recordCall in model_clients.py): the tokens it read, read from the
+# cache, wrote to the cache and wrote, or the exact cost when the model bills itself (Claude Code reports it). callCost prices a call the
+# way the providers bill it: the tokens of the cache at their own price, a prompt over LONG_PROMPT tokens at the long price when the model
+# has one, and DeepSeek at half its price outside its peak hours (see PRICE_NOTES). Local models are free, and Codex is paid by the ChatGPT
+# plan of the user. A call of a model whose price is not published is counted in tokens, and never as free.
+# The user can give the mission a budget, in US dollars. Each model of the team sets aside the price of 1 million of its tokens (the higher
+# of reading and writing), the way a local model takes its VRAM. An agent that spent more counts with what it spent, and an agent that
+# finished counts with what it really spent. What is left for more models is the budget, minus what the whole mission spent (the agents that
+# left and the models that were replaced too), minus what the agents still at work set aside (MissionCosts.left).
+# ==============
+LONG_PROMPT = 200000
+TOKENS_PRICED = 1000000
+DEEPSEEK_PEAK_HOURS = ((1, 4), (6, 10))
+BUDGET_WARNINGS = (0.8, 1.0)
+PRICE_RETRY_SECONDS = 300
+PRICE_FIELDS = ("input", "output", "cachedInput", *LONG_PRICE_FIELDS)
+
+
+# Whether a call made at moment (UTC, written YYYY-MM-DDTHH:MM:SS) was in the peak hours of DeepSeek: weekdays, at the hours of PRICE_NOTES.
+def isDeepseekPeak(moment):
+    when = datetime.strptime(moment, "%Y-%m-%dT%H:%M:%S")
+    return when.weekday() < 5 and any(start <= when.hour < end for start, end in DEEPSEEK_PEAK_HOURS)
+
+
+# What a model costs: kind is free (on the GPUs), plan (Codex with a ChatGPT plan), priced, or unknown (no published price, or not found).
+# reference is the price of 1 million tokens, the higher of reading and writing, in US dollars (None if unknown). client tells how Codex
+# is signed in: with a ChatGPT plan, or with an API key, which OpenAI bills per use.
+def priceOfModel(info, client=None):
+    if info["local"]:
+        return {"kind": "free", "reference": 0.0}
+    provider, name = info["provider"], info["name"]
+    if info.get("cli") == "codex":
+        if getattr(client, "accountType", "chatgpt") == "chatgpt":
+            if "usage_based" in (getattr(client, "planType", "") or ""):
+                return {"kind": "unknown", "reference": None, "error": "Your ChatGPT plan bills the use of Codex: its cost is on the bill of your plan."}
+            return {"kind": "plan", "reference": 0.0}
+        provider = "gpt"
+    if name == DEFAULT_CLI_MODEL:
+        return {"kind": "unknown", "reference": None, "error": "It chooses its own model, so its price is only known once it ran."}
+    cost = getModelCost(provider, name)
+    if "error" in cost:
+        return {"kind": "unknown", "reference": None, "error": cost["error"]}
+    return {"kind": "priced", "provider": provider, **{field: cost.get(field) for field in PRICE_FIELDS}, "reference": max(cost["input"], cost["output"])}
+
+
+# The cost of one call in US dollars, or None if it cannot be known.
+def callCost(record, price):
+    if record.get("cost") is not None:
+        return record["cost"]
+    if price["kind"] in ("free", "plan"):
+        return 0.0
+    if price["kind"] != "priced" or record.get("missing"):
+        return None
+    long = record["input"] + record["cachedInput"] + record["cacheWrite"] > LONG_PROMPT
+    def rate(field):
+        special = price.get(f"{field}Long") if long else None
+        return special if special is not None else price.get(field)
+    reading, writing = rate("input"), rate("output")
+    cached = rate("cachedInput") if rate("cachedInput") is not None else reading
+    written = rate("cacheWrite") if rate("cacheWrite") is not None else reading
+    dollars = (record["input"] * reading + record["cachedInput"] * cached + record["cacheWrite"] * written + record["output"] * writing) / TOKENS_PRICED
+    return dollars / 2 if price.get("provider") == "deepseek" and not isDeepseekPeak(record["time"]) else dollars
+
+
+def formatDollars(amount):
+    if amount is None:
+        return "unknown"
+    return f"${amount:,.4f}" if 0 < amount < 0.01 else f"${amount:,.2f}"
+
+
+def checkBudget(value):
+    if value in (None, ""):
+        return None
+    try:
+        budget = float(str(value).replace("$", "").replace(",", "").strip())
+    except ValueError:
+        raise ValueError("Write the budget as a number of US dollars, like 5 or 12.50.") from None
+    if not math.isfinite(budget) or budget <= 0:
+        raise ValueError("The budget is a number of US dollars above 0.")
+    return round(budget, 2)
+
+
+# What a saved mission had spent with one client before the program stopped: its calls, priced again with the prices of now.
+class SpentBefore:
+    def __init__(self, usage, accountType=None):
+        self.usage = usage
+        if accountType:
+            self.accountType = accountType
+
+
+# The spending of one mission: the clients of every model it used (track). Its state is saved with the swarm (state and restore): every
+# call of every client, without anything secret, so a mission that goes on after a stop knows exactly what it spent before.
+class MissionCosts:
+    def __init__(self, budget=None):
+        self.budget = checkBudget(budget)
+        self.entries = []
+        self.prices = {}
+        self.fetching = set()
+        self.warned = set()
+        self.lock = threading.RLock()
+
+    def setBudget(self, budget):
+        with self.lock:
+            self.budget = checkBudget(budget)
+            self.warned = set()
+
+    # A client the mission uses for the agent called agent. The same client is only counted once. Its price is fetched when a cost is asked for.
+    def track(self, agent, info, client):
+        if client is None or not info:
+            return
+        with self.lock:
+            entry = next((entry for entry in self.entries if entry["client"] is client), None)
+            if entry is None:
+                self.entries.append({"agent": agent, "model": info, "client": client})
+            else:
+                entry.update(agent=agent, model=info)
+
+    def rename(self, old, new):
+        with self.lock:
+            for entry in self.entries:
+                if entry["agent"] == old:
+                    entry["agent"] = new
+
+    def priceKey(self, info, client):
+        codex = (getattr(client, "accountType", "chatgpt"), getattr(client, "planType", "")) if info.get("cli") == "codex" else None
+        return (info.get("provider"), info["name"], info.get("cli"), info["local"], codex)
+
+    # The price of a model, kept for a while. Without wait, a price that is not known yet is fetched in another thread and None is returned.
+    def priceOf(self, info, client=None, wait=True):
+        key = self.priceKey(info, client)
+        now = datetime.now().timestamp()
+        with self.lock:
+            known = self.prices.get(key)
+            if known and now - known[1] < (PRICE_REFRESH_SECONDS if known[0]["kind"] != "unknown" else PRICE_RETRY_SECONDS):
+                return known[0]
+            if not wait:
+                if key not in self.fetching:
+                    self.fetching.add(key)
+                    threading.Thread(target=self.fetchPrice, args=(key, info, client), daemon=True).start()
+                return known[0] if known else None
+        return self.fetchPrice(key, info, client)
+
+    def fetchPrice(self, key, info, client):
+        try:
+            price = priceOfModel(info, client)
+        except Exception as error:
+            price = {"kind": "unknown", "reference": None, "error": describeError(error)}
+        with self.lock:
+            self.prices[key] = (price, datetime.now().timestamp())
+            self.fetching.discard(key)
+        return price
+
+    # What the clients spent, agent by agent: {agent: {"calls", "input", "output", "cost", "unpriced" (tokens of the calls whose cost is not
+    # known), "pending" (a price is being fetched), "kinds", "models"}}. Without wait the prices that are not known yet are fetched in the
+    # background (for a window that shows the cost), and with it they are known first (for a decision about the budget).
+    def spending(self, wait=False):
+        rows = {}
+        def row(agent):
+            return rows.setdefault(agent, {"agent": agent, "calls": 0, "input": 0, "output": 0, "cost": 0.0, "unpriced": 0, "pending": False, "kinds": set(), "models": []})
+        with self.lock:
+            entries = list(self.entries)
+        for entry in entries:
+            usage = getattr(entry["client"], "usage", None) or {}
+            current = row(entry["agent"])
+            current["calls"] += usage.get("calls", 0)
+            current["input"] += usage.get("input", 0)
+            current["output"] += usage.get("output", 0)
+            if entry["model"]["name"] not in current["models"]:
+                current["models"].append(entry["model"]["name"])
+            price = self.priceOf(entry["model"], entry["client"], wait=wait)
+            current["kinds"].add(price["kind"] if price else "pending")
+            for record in list(usage.get("records") or []):
+                cost = record.get("billed")
+                if cost is None:
+                    cost = callCost(record, price) if price else record.get("cost")
+                    # A call keeps the price it was billed at, even when the prices change later.
+                    if price and cost is not None:
+                        record["billed"] = cost
+                if cost is None:
+                    current["unpriced"] += record["input"] + record["cachedInput"] + record["cacheWrite"] + record["output"]
+                    current["pending"] = current["pending"] or price is None
+                else:
+                    current["cost"] += cost
+            if not usage.get("records") and price and price["kind"] not in ("free", "plan") and usage.get("calls"):
+                current["unpriced"] += usage.get("input", 0) + usage.get("output", 0)
+        return rows
+
+    # team is [{"agent", "model", "finished"}]: the agents of the mission now. Without a budget, left is None.
+    def left(self, team, rows=None, wait=False):
+        rows = self.spending(wait) if rows is None else rows
+        spent = sum(row["cost"] for row in rows.values())
+        setAside, unknown = 0.0, []
+        for member in team:
+            if member["finished"] or not member["model"]:
+                continue
+            price = self.priceOf(member["model"], member.get("client"), wait=wait)
+            if price is None or price["reference"] is None:
+                unknown.append(member["agent"])
+                continue
+            setAside += max(0.0, price["reference"] - (rows[member["agent"]]["cost"] if member["agent"] in rows else 0.0))
+        left = None if self.budget is None else round(self.budget - spent - setAside, 6)
+        return {"budget": self.budget, "spent": round(spent, 6), "setAside": round(setAside, 6), "left": left, "unknown": unknown}
+
+    def report(self, team=(), wait=False):
+        rows = self.spending(wait)
+        summary = self.left(team, rows, wait)
+        agents = [{**row, "kinds": sorted(row["kinds"]), "cost": round(row["cost"], 6)} for row in rows.values() if row["calls"] or row["cost"]]
+        return {**summary, "unpriced": sum(row["unpriced"] for row in rows.values()), "pending": any(row["pending"] for row in rows.values()), "agents": agents,
+                "share": round(summary["spent"] / self.budget, 4) if self.budget else None}
+
+    # The warnings the user has not had yet: when the mission spent 80% of its budget, and when it spent all of it.
+    def warnings(self):
+        if self.budget is None:
+            return []
+        spent = sum(row["cost"] for row in self.spending(wait=True).values())
+        found = []
+        with self.lock:
+            for level in BUDGET_WARNINGS:
+                if spent >= self.budget * level and level not in self.warned:
+                    self.warned.add(level)
+                    found.append(f"The mission spent {formatDollars(spent)}, {'all' if level >= 1 else f'{round(level * 100)}%'} of its budget of {formatDollars(self.budget)}. "
+                                 + ("Nothing is stopped by itself: remove agents, or stop the swarm, if it must not spend more." if level >= 1 else
+                                    "The leader and you can remove agents that are not needed anymore."))
+        return found
+
+    def state(self):
+        with self.lock:
+            entries = list(self.entries)
+        clients = []
+        for entry in entries:
+            usage = getattr(entry["client"], "usage", None) or {}
+            if usage.get("calls"):
+                clients.append({"agent": entry["agent"], "model": entry["model"], "accountType": getattr(entry["client"], "accountType", None),
+                                "usage": {"calls": usage["calls"], "input": usage.get("input", 0), "output": usage.get("output", 0), "records": list(usage.get("records") or [])}})
+        return {"budget": self.budget, "clients": clients}
+
+    def restore(self, saved):
+        with self.lock:
+            self.budget = saved.get("budget")
+            for item in saved.get("clients") or []:
+                self.entries.append({"agent": item["agent"], "model": item["model"], "client": SpentBefore(dict(item["usage"]), item.get("accountType"))})
+
+
+# ==============
+# The settings of the user, kept in agent-files/settings.json. maxAgents is the most agents a leader that builds the swarm may put in it.
+# ==============
+SETTINGS_FILE = "settings.json"
+DEFAULT_SETTINGS = {"maxAgents": 10}
+MAX_AGENTS_LIMIT = 100
+
+
+def checkSettings(settings):
+    agents = settings.get("maxAgents", DEFAULT_SETTINGS["maxAgents"])
+    if isinstance(agents, bool) or not isinstance(agents, int) and not (isinstance(agents, str) and agents.strip().isdigit()):
+        raise ValueError("The most agents is a whole number.")
+    agents = int(agents)
+    if not 1 <= agents <= MAX_AGENTS_LIMIT:
+        raise ValueError(f"The most agents is between 1 and {MAX_AGENTS_LIMIT}.")
+    return {**DEFAULT_SETTINGS, "maxAgents": agents}
+
+
+def loadSettings():
+    try:
+        return checkSettings(json.loads((AGENT_FILES / SETTINGS_FILE).read_text(encoding="utf-8")))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return dict(DEFAULT_SETTINGS)
+
+
+def saveSettings(settings):
+    settings = checkSettings({**loadSettings(), **settings})
+    path = AGENT_FILES / SETTINGS_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f"{path.name}.tmp")
+    temporary.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    os.replace(temporary, path)
+    return settings
 
 
 gpuCache = {"loaded": 0, "gpus": []}
@@ -609,6 +990,8 @@ class Loop:
         self.onAnswer = None
         # The model answers one prompt at a time, even when two threads ask it (the leader that works, and the manager of the swarm).
         self.thinking = threading.RLock()
+        # Called after every call of the model, even one that failed (it may have been billed), so the cost of the mission is shown as it grows.
+        self.onUsage = None
 
     # Messages sent by the other agents of a swarm. The agent reads them with every prompt.
     def receive(self, sender, message):
@@ -735,7 +1118,11 @@ class Loop:
             if hasattr(self.agent, "attach"):
                 self.agent.attach(self)
             # The calls of a leader that manages the swarm never wait for the user: they have a fallback of their own.
-            answer = self.keepTrying(lambda: self.agent.input(prompt)) if own else self.agent.input(prompt)
+            try:
+                answer = self.keepTrying(lambda: self.agent.input(prompt)) if own else self.agent.input(prompt)
+            finally:
+                if self.onUsage:
+                    self.onUsage()
         return self.onAnswer(answer) if self.onAnswer else answer
 
     # The next three are the only places where the user is spoken to. A user interface can replace them.
@@ -1223,12 +1610,15 @@ PAPER_SEARCHES = {"Google Scholar": searchGoogleScholar, "arXiv": searchArxiv, "
 
 # The publishers that Crossref knows with this name, the biggest first, for a user who does not find theirs in PAPER_PUBLISHERS.
 # Each one is {"name", "id", "papers"}, and the id is what LiteratureSurveyLoop takes in publishers.
+# The answer is kept a week (see remember), and given from the last connection without internet.
 def findPublishers(name):
-    query = urllib.parse.urlencode({"query": name.strip(), "rows": 8})
-    items = json.loads(fetchUrl(f"https://api.crossref.org/members?{query}")).get("message", {}).get("items", [])
-    found = [{"name": item["primary-name"], "id": item["id"], "papers": item.get("counts", {}).get("total-dois", 0)}
-             for item in items if item.get("primary-name") and item.get("id")]
-    return sorted(found, key=lambda publisher: -publisher["papers"])
+    def fetch():
+        query = urllib.parse.urlencode({"query": name.strip(), "rows": 8})
+        items = json.loads(fetchUrl(f"https://api.crossref.org/members?{query}")).get("message", {}).get("items", [])
+        found = [{"name": item["primary-name"], "id": item["id"], "papers": item.get("counts", {}).get("total-dois", 0)}
+                 for item in items if item.get("primary-name") and item.get("id")]
+        return sorted(found, key=lambda publisher: -publisher["papers"])
+    return remember(f"crossref-publishers-{name.strip().lower()}", fetch, PUBLISHERS_REFRESH_SECONDS)
 
 
 # publishers is {name: Crossref number} (PAPER_PUBLISHERS has the common ones). Each is searched on its own, so the survey can be
@@ -1637,6 +2027,8 @@ class Swarm:
         self.finished = {}
         # The leader manages the swarm when a manager reads what it writes (see LeaderManager in leader_utils.py).
         self.manager = None
+        # What the models of the mission spent. A user interface gives the swarm the costs of the whole mission (its building included).
+        self.costs = MissionCosts()
 
     def getMember(self, name):
         if name not in self.members:
@@ -1667,7 +2059,7 @@ class Swarm:
         return {"version": STATE_VERSION, "id": self.id, "mission": self.mission, "mode": self.mode, "leader": self.leader,
                 "state": "paused" if self.interruption else "running", "heartbeat": datetime.now().timestamp(), "pid": os.getpid(),
                 "savedAt": f"{datetime.now():%Y-%m-%d %H:%M:%S}", "summary": self.summary, "messages": list(self.messages), "members": members,
-                "removed": list(self.removed), "managed": self.manager is not None}
+                "removed": list(self.removed), "managed": self.manager is not None, "costs": self.costs.state()}
 
     # Writes the state to the disk. Whatever goes wrong, the swarm goes on, and the user is told once that the work cannot be continued after a stop.
     # The user is told from another thread, because speaking to the user can wait for a long time, and the locks of the swarm may be held here.
@@ -1730,6 +2122,7 @@ class Swarm:
             member = self.newMember(name, agent, role, task, boss, waitsFor, model, recipe)
             self.members[name] = member
             self.leader = self.leader or name
+            self.costs.track(name, model, getattr(agent, "agent", None))
             if not self.active:
                 return
             self.connectAgent(name, member, False)
@@ -1817,6 +2210,7 @@ class Swarm:
         swarm.id, swarm.mode, swarm.leader = saved["id"], saved["mode"], saved["leader"]
         swarm.summary, swarm.messages = saved.get("summary", ""), list(saved.get("messages", []))
         swarm.removed = list(saved.get("removed", []))
+        swarm.costs.restore(saved.get("costs") or {})
         for name, data in saved["members"].items():
             agent = makeAgent(name, data)
             agent.setState(data.get("state", {}))
@@ -1825,6 +2219,7 @@ class Swarm:
             member["resumeStart"] = datetime.strptime(data["startAt"], "%Y-%m-%d %H:%M") if data.get("startAt") else None
             swarm.settle(member)
             swarm.members[name] = member
+            swarm.costs.track(name, data["model"], getattr(agent, "agent", None))
         return swarm
 
     # Goes on with a swarm that was interrupted (one that was restored, or one whose run was cut short): what is done stays done,
@@ -1880,6 +2275,7 @@ class Swarm:
             member["model"] = model
             if agent is not None:
                 member["agent"] = agent
+                self.costs.track(name, model, agent.agent)
                 if self.active:
                     # The new loop takes over what the old one already received (the mission, the results of the agents it waited for).
                     agent.inbox, agent.userMessages = list(previous.inbox), list(previous.userMessages)
@@ -1888,6 +2284,14 @@ class Swarm:
             threading.Thread(target=previous.agent.unload, daemon=True).start()
         if self.active:
             self.emit("model", name, model=model["name"], cli=model.get("cli"))
+
+    # The agents of the swarm for the budget: those that did not finish still set aside the price of 1 million tokens of their model.
+    def describeTeam(self):
+        return [{"agent": name, "model": member["model"], "client": getattr(member["agent"], "agent", None), "finished": member["status"] in ("done", "failed")}
+                for name, member in list(self.members.items())]
+
+    def getCosts(self):
+        return self.costs.report(self.describeTeam())
 
     # The VRAM the swarm needs so far next to what the GPUs have, for the user interface to show while the swarm is built.
     # The message is empty, or the warning that the swarm cannot run now.

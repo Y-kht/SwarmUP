@@ -677,3 +677,14 @@ svg.icon.xl { width: 30px; height: 30px; stroke-width: 1.6; }
 .proposed-agent .needs .icon { flex: none; margin-top: 2px; }
 .proposed-agent .kv { margin-top: 4px; grid-template-columns: fit-content(45%) minmax(0, 1fr); }
 .proposed-agent .kv dd { overflow-wrap: anywhere; }
+
+/* The cost of the mission. */
+.meter .spent { background: var(--text-2); }
+.danger-text { color: var(--danger-text); font-weight: 650; }
+.cost-badge { cursor: pointer; font-variant-numeric: tabular-nums; }
+.cost-card .card-head { gap: 10px; }
+.cost-total { font-size: 18px; font-weight: 750; font-variant-numeric: tabular-nums; }
+.cost-total.success { color: var(--success-text); }
+.cost-total.warning { color: var(--warning-text); }
+.cost-total.danger { color: var(--danger-text); }
+.cost-total.info { color: var(--text); }

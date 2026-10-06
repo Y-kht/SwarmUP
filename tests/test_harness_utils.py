@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 from datetime import datetime, timedelta
@@ -1023,6 +1024,16 @@ class CoderTests(LoopTestCase):
         self.assertIn(sys.executable, questions[0])
 
 
+# What is kept from the internet goes in a folder of the test, and nothing of another test is remembered.
+def isolateInternetCache(case):
+    folder = tempfile.TemporaryDirectory()
+    case.addCleanup(folder.cleanup)
+    for patcher in (mock.patch.object(harness_utils, "AGENT_FILES", Path(folder.name)), mock.patch.dict(harness_utils.internetCache, clear=True)):
+        patcher.start()
+        case.addCleanup(patcher.stop)
+    return Path(folder.name)
+
+
 class ModelCostTests(unittest.TestCase):
     prices = {"claude-opus-5-5": {"input_cost_per_token": 4e-06, "output_cost_per_token": 2e-05, "cache_read_input_token_cost": 4e-07, "max_input_tokens": 1000000},
               "gpt-4o-mini": {"input_cost_per_token": 1.5e-07, "output_cost_per_token": 6e-07},
@@ -1038,9 +1049,13 @@ class ModelCostTests(unittest.TestCase):
             if self.failure:
                 raise self.failure
             return json.dumps(self.prices).encode()
-        for patcher in (mock.patch.object(harness_utils, "fetchUrl", fetch), mock.patch.dict(harness_utils.modelPriceCache, {"loaded": 0, "prices": {}})):
-            patcher.start()
-            self.addCleanup(patcher.stop)
+        isolateInternetCache(self)
+        patcher = mock.patch.object(harness_utils, "fetchUrl", fetch)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def age(self, seconds):
+        harness_utils.internetCache["model-prices"]["fetchedAt"] -= seconds
 
     def testPricesAreInDollarsPerMillionTokens(self):
         cost = harness_utils.getModelCost("claude", "claude-opus-5-5")
@@ -1073,14 +1088,14 @@ class ModelCostTests(unittest.TestCase):
         self.assertEqual(len(self.downloads), 1)
         self.assertEqual(self.downloads[0][1], harness_utils.PRICE_FILE_LIMIT)
         self.assertGreater(harness_utils.PRICE_FILE_LIMIT, harness_utils.MAX_DOWNLOAD)
-        harness_utils.modelPriceCache["loaded"] -= 4000
+        self.age(4000)
         harness_utils.getModelCost("gpt", "gpt-4o-mini")
         self.assertEqual(len(self.downloads), 2)
 
     def testPriceChangesAreSeenAfterTheHour(self):
         self.assertEqual(harness_utils.getModelCost("gpt", "gpt-4o-mini")["input"], 0.15)
         self.prices = {**self.prices, "gpt-4o-mini": {"input_cost_per_token": 3e-07, "output_cost_per_token": 6e-07}}
-        harness_utils.modelPriceCache["loaded"] -= 4000
+        self.age(4000)
         self.assertEqual(harness_utils.getModelCost("gpt", "gpt-4o-mini")["input"], 0.3)
 
     def testNoInternetIsReportedInPlainWordsNotRaised(self):
@@ -1095,9 +1110,57 @@ class ModelCostTests(unittest.TestCase):
         self.failure = ValueError("bad data")
         self.assertIn("bad data", harness_utils.getModelCost("gpt", "gpt-4o-mini")["error"])
 
+    def testWithoutInternetThePricesOfTheLastConnectionAreUsedEvenAfterARestart(self):
+        self.assertEqual(harness_utils.getModelCost("gpt", "gpt-4o-mini")["input"], 0.15)
+        self.assertIsNone(harness_utils.describeCached("model-prices")["error"] or None)
+        harness_utils.internetCache.clear()
+        self.age_on_disk(7200)
+        self.failure = urllib.error.URLError("no network")
+        self.assertEqual(harness_utils.getModelCost("gpt", "gpt-4o-mini")["input"], 0.15)
+        state = harness_utils.describeCached("model-prices")
+        self.assertTrue(state["offline"])
+        self.assertIn("could not be reached", state["error"])
+        self.assertRegex(state["fetchedAt"], r"^\d{4}-\d\d-\d\d \d\d:\d\d$")
+        downloads = len(self.downloads)
+        harness_utils.getModelCost("claude", "claude-opus-5-5")
+        self.assertEqual(len(self.downloads), downloads, "an offline program does not ask the internet again at every step")
+        harness_utils.internetCache["model-prices"]["failedAt"] -= harness_utils.CACHE_RETRY_SECONDS + 1
+        self.failure = None
+        self.prices = {**self.prices, "gpt-4o-mini": {"input_cost_per_token": 3e-07, "output_cost_per_token": 6e-07}}
+        self.assertEqual(harness_utils.getModelCost("gpt", "gpt-4o-mini")["input"], 0.3)
+        self.assertFalse(harness_utils.describeCached("model-prices")["offline"])
+
+    def age_on_disk(self, seconds):
+        path = harness_utils.cachePath("model-prices")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["fetchedAt"] -= seconds
+        path.write_text(json.dumps(data), encoding="utf-8")
+
+    def testWithoutInternetAndWithoutAnyListThePriceIsUnknown(self):
+        self.failure = urllib.error.URLError("no network")
+        self.assertIn("could not be fetched", harness_utils.getModelCost("gpt", "gpt-4o-mini")["error"])
+        self.assertEqual(harness_utils.describeCached("model-prices")["fetchedAt"], None)
+
+    def testThePricesAreRefreshedInTheBackgroundWhileTheProgramRuns(self):
+        calls, stop = [], threading.Event()
+        with mock.patch.object(harness_utils, "loadModelPrices", lambda: calls.append(1)), mock.patch.dict(harness_utils.refresher, {"thread": None}), \
+                mock.patch.object(harness_utils, "REFRESH_CHECK_SECONDS", 0.01):
+            harness_utils.keepFresh(stop)
+            thread = harness_utils.refresher["thread"]
+            harness_utils.keepFresh(stop)
+            self.assertIs(harness_utils.refresher["thread"], thread)
+            for attempt in range(500):
+                if len(calls) >= 3:
+                    break
+                time.sleep(0.01)
+            stop.set()
+            thread.join(2)
+        self.assertGreaterEqual(len(calls), 3)
+        self.assertFalse(thread.is_alive())
+
     def testTheLastPricesAreKeptWhenARefreshFails(self):
         harness_utils.getModelCost("gpt", "gpt-4o-mini")
-        harness_utils.modelPriceCache["loaded"] -= 4000
+        self.age(4000)
         self.failure = urllib.error.HTTPError("u", 503, "Unavailable", {}, None)
         cost = harness_utils.getModelCost("gpt", "gpt-4o-mini")
         self.assertEqual(cost["input"], 0.15)

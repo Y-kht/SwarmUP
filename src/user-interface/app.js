@@ -24,7 +24,7 @@ const store = { catalog: null, state: null, feed: [], feedAfter: 0, version: -1,
 const ui = {
   view: 'home', modal: null, stack: [], selected: null, busy: {}, errors: {}, expanded: {}, visited: new Set(), feedFilter: 'all',
   missionDraft: null, folderDrafts: {}, waitsDraft: null, orderChoice: null, mode: null, resume: null, particles: [], seenFeed: 0,
-  composer: {}, corrections: {}, messages: {}, renderedOnce: false, animate: true, forms: {}, codex: { loading: false, data: null },
+  composer: {}, corrections: {}, messages: {}, renderedOnce: false, animate: true, forms: {}, codex: { loading: false, data: null }, budgetDraft: null, costsOpen: false,
 };
 let pointerDown = false, renderPending = false;
 
@@ -126,6 +126,32 @@ function sleep(ms) {
 
 function formatNumber(value) {
   return Number(value || 0).toLocaleString();
+}
+
+// An amount of US dollars as people write it. Below a cent, four decimals are kept, so a small cost is never shown as nothing.
+function dollars(amount) {
+  if (amount === null || amount === undefined) return 'unknown';
+  return amount > 0 && amount < 0.01 ? `$${amount.toFixed(4)}` : `$${amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+// The budget of the mission: what it spent, what the models of the team set aside (the price of 1 million of their tokens), and what is left.
+// extra is the price of the model being chosen.
+function budgetMeter(costs, extra = 0, label = 'This model') {
+  if (!costs || !costs.budget) return null;
+  const total = costs.budget, spent = Math.max(0, costs.spent), aside = Math.max(0, costs.setAside);
+  const room = Math.max(0, total - spent - aside);
+  const percent = value => `${Math.min(100, value / total * 100)}%`;
+  const left = costs.left - extra;
+  return h('div', {},
+    h('div', { class: 'row between small', style: { marginBottom: '7px' } }, h('b', {}, `Budget of the mission · ${dollars(total)}`),
+      h('span', { class: left < 0 ? 'danger-text' : 'muted' }, left < 0 ? `${dollars(-left)} over` : `${dollars(left)} left`)),
+    h('div', { class: 'meter', role: 'img', 'aria-label': `Budget: ${dollars(spent)} spent, ${dollars(aside)} set aside by the models of the team${extra ? `, ${dollars(extra)} for this model` : ''}, of ${dollars(total)}` },
+      h('div', { class: 'spent', style: { width: percent(spent) } }), h('div', { class: 'swarm', style: { width: percent(aside) } }),
+      extra ? h('div', { class: extra <= room ? 'this' : 'over', style: { width: percent(Math.min(extra, room) || extra) } }) : null),
+    h('div', { class: 'meter-legend' }, h('span', {}, h('i', { style: { background: 'var(--text-2)' } }), `Spent: ${dollars(spent)}`),
+      h('span', {}, h('i', { style: { background: 'var(--primary)' } }), `Set aside by the team: ${dollars(aside)}`),
+      extra ? h('span', {}, h('i', { style: { background: extra <= room ? 'var(--honey)' : 'var(--danger)' } }), `${label}: ${dollars(extra)}`) : null),
+    costs.unknown?.length ? h('div', { class: 'small faint', style: { marginTop: '6px' } }, `The price of ${costs.unknown.join(', ')} is not known: it sets nothing aside.`) : null);
 }
 
 function parseTime(text) {
@@ -451,6 +477,7 @@ function renderSidebar() {
       h('div', { class: 'theme-switch', role: 'group', 'aria-label': 'Theme' },
         [['auto', 'monitor', 'Like the system'], ['light', 'sun', 'Light'], ['dark', 'moon', 'Dark']].map(([value, iconName, label]) =>
           h('button', { class: theme === value && 'active', title: `${label} theme`, 'aria-label': `${label} theme`, onClick: () => setTheme(value) }, icon(iconName, 'sm')))),
+      h('button', { class: 'nav-item', onClick: () => openModal({ type: 'settings', maxAgents: String(state.settings.maxAgents), errors: {}, error: '' }) }, h('span', { class: 'nav-step' }, icon('settings', 'sm')), 'Settings'),
       h('button', { class: 'nav-item', onClick: () => openModal({ type: 'help' }) }, h('span', { class: 'nav-step' }, icon('help', 'sm')), 'How SwarmUP works'),
       h('button', { class: 'nav-item', onClick: () => openModal({ type: 'quit' }) }, h('span', { class: 'nav-step' }, icon('power', 'sm')), 'Quit SwarmUP')));
 }
@@ -543,10 +570,18 @@ function viewMission() {
   const error = ui.errors.mission;
   const leaderMode = state.buildMode === 'leader';
   const built = leaderMode && state.agents.length > 1;
+  if (ui.budgetDraft === null) ui.budgetDraft = state.costs.budget ? String(state.costs.budget) : '';
   const saveMission = async () => {
     const form = {};
     const data = await act('setMission', { mission: ui.missionDraft }, { form, busy: 'mission' });
     ui.errors.mission = form.errors?.mission || '';
+    if (data && ui.budgetDraft.trim() !== (state.costs.budget ? String(state.costs.budget) : '')) {
+      const budgetForm = {};
+      const saved = await act('setBudget', { budget: ui.budgetDraft }, { form: budgetForm, busy: 'mission' });
+      ui.errors.budget = budgetForm.errors?.budget || '';
+      render();
+      return !!saved;
+    }
     render();
     return !!data;
   };
@@ -570,6 +605,12 @@ function viewMission() {
             value: ui.missionDraft, onInput: event => { ui.missionDraft = event.target.value; },
             onKeydown: event => { if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') next.onClick(); } }),
           error ? h('div', { class: 'field-error' }, icon('alert'), error) : h('div', { class: 'field-help' }, icon('info'), 'One or two sentences are enough. You can change it later.'))),
+      h('div', { class: ['card pad enter', ui.errors.budget && 'has-error'] },
+        h('div', { class: 'field' }, h('label', { class: 'field-label', for: 'budget' }, 'Budget of the mission', h('span', { class: 'opt' }, 'optional, in US dollars')),
+          h('div', { class: 'input-wrap', style: { maxWidth: '260px' } }, h('span', { class: 'input-icon' }, icon('dollar', 'sm')),
+            h('input', { id: 'budget', class: 'input with-icon', 'data-key': 'budget', inputmode: 'decimal', placeholder: 'No budget', value: ui.budgetDraft, onInput: event => { ui.budgetDraft = event.target.value; } })),
+          ui.errors.budget ? h('div', { class: 'field-error' }, icon('alert'), ui.errors.budget) :
+            h('div', { class: 'field-help' }, icon('info'), 'For the API models, the leader included. Each one you choose sets aside the price of 1 million of its tokens, and the lists only show the models that fit in what is left. Models on your GPUs and Codex cost nothing from it. What the mission spends is counted live.'))),
       h('div', { class: 'stack enter-2' }, h('h4', {}, 'Need inspiration? Click an example'),
         h('div', { class: 'pills' }, EXAMPLES.map(example => h('button', { class: 'pill', type: 'button', onClick: () => { ui.missionDraft = example; ui.errors.mission = ''; render(); } }, icon('sparkles', 'sm'), example)))),
       h('div', { class: 'stack enter-2' }, h('h2', {}, 'Who builds the swarm?'),
@@ -1196,6 +1237,10 @@ function viewModels() {
         state.gpu.needed && !state.gpu.runnable ? badge(state.gpu.fits ? 'Not free right now' : 'Too much for your GPUs', 'warning', 'alert') : badge('The swarm fits', 'success', 'check')),
         gpuMeter(state.gpu), state.gpu.message ? h('div', { style: { marginTop: '12px' } }, callout('warning', 'alert', state.gpu.message)) : null) :
         callout('neutral', 'cloud', h('b', {}, 'No GPU was found on this computer.'), h('div', {}, 'Local models cannot run here, so choose API models. They need an API key from their company, and every use is billed to your account.')),
+      h('div', { class: 'card pad enter' }, h('div', { class: 'row', style: { marginBottom: '12px' } }, icon('dollar'), h('h3', { class: 'grow' }, 'The cost of the mission'),
+        state.costs.spent ? badge(`${dollars(state.costs.spent)} spent so far`, 'info') : null),
+        state.costs.budget ? budgetMeter(state.costs) : h('div', { class: 'row small' }, h('span', { class: 'muted grow' }, 'No budget: every model can be chosen, and the cost is still counted while the swarm runs.'),
+          h('button', { class: 'link-btn', type: 'button', onClick: () => go('mission') }, 'Set a budget'))),
       h('div', { class: 'agent-rows' }, agents.map(agent => modelRow(agent))),
       providers.length ? h('div', { class: 'card pad' }, h('div', { class: 'row', style: { marginBottom: '10px' } }, icon('key'), h('h3', {}, 'API keys')),
         h('div', { class: 'stack tight' }, providers.map(provider => { const key = state.keys[provider]; return h('div', { class: 'row small' }, icon('lock', 'sm'), h('b', {}, key.company),
@@ -1291,9 +1336,32 @@ function localOption(modal, entry) {
     h('div', { class: 'mo-side' }, badge(`${entry.vram} GB`, 'primary'), status));
 }
 
+function priceEntry(modal, name, provider) {
+  return (modal.catalog.prices[provider] || []).find(entry => entry.name === name) || { status: 'unknown', price: null };
+}
+
+function priceBadge(entry) {
+  if (entry.price === null || entry.price === undefined) return badge('Price unknown', 'outline');
+  return badge(`${dollars(entry.price)} / 1M tokens`, entry.status === 'overBudget' ? 'danger' : 'outline', entry.status === 'overBudget' ? 'alert' : null);
+}
+
+// From when the prices are. Without internet they are those of the last connection, and the user is told so.
+function priceDate() {
+  const prices = store.state.prices;
+  if (!prices?.fetchedAt) return null;
+  return prices.offline ? callout('warning', 'wifiOff', h('b', {}, 'No internet connection.'), h('div', {}, `The prices are those of the last connection, ${prices.fetchedAt}. They may have changed since.`)) :
+    h('div', { class: 'small faint row' }, icon('clock', 'sm'), `Prices of ${prices.fetchedAt}, renewed every hour.`);
+}
+
+// What the first list of models leaves out, and where to find it.
+function hiddenNote(count, what) {
+  return count ? h('div', { class: 'small faint row', style: { marginTop: '8px' } }, icon('info', 'sm'), `${plural(count, 'recommended model')} ${count === 1 ? 'is' : 'are'} not shown: ${what}. ${count === 1 ? 'It is' : 'They are'} in All models.`) : null;
+}
+
 function apiOption(modal, name, provider) {
   const selected = modal.selected && !modal.selected.local && modal.selected.name === name;
   const price = modal.prices[name];
+  const entry = priceEntry(modal, name, provider);
   const company = store.catalog.providers[provider].company;
   const loadPrice = async event => {
     event.stopPropagation();
@@ -1303,7 +1371,7 @@ function apiOption(modal, name, provider) {
   return h('div', {},
     h('button', { type: 'button', class: ['model-option', selected && 'selected'], onClick: () => { modal.selected = { name, provider, local: false, company }; modal.errors = {}; modal.reveal = !store.state.keys[provider].source; render(); } },
       h('span', { class: 'radio' }), h('div', { style: { minWidth: '0' } }, h('div', { class: 'mo-name' }, name), h('div', { class: 'mo-sub' }, company)),
-      h('div', { class: 'mo-side' }, store.state.keys[provider].source ? badge('Key ready', 'success', 'key') : null,
+      h('div', { class: 'mo-side' }, priceBadge(entry), store.state.keys[provider].source ? badge('Key ready', 'success', 'key') : null,
         h('span', { role: 'button', tabindex: '0', class: 'btn ghost sm', onClick: loadPrice, onKeydown: event => { if (event.key === 'Enter') loadPrice(event); } },
           ui.busy[`price-${name}`] ? spinner() : icon('dollar', 'sm'), 'Price'))),
     price ? priceBox(price) : null);
@@ -1327,14 +1395,18 @@ function modelPickerModal(modal) {
   let list;
   if (where === 'cli') list = codingAgentPanel(modal);
   else if (where === 'local') {
-    if (modal.tab === 'recommended') list = h('div', { class: 'model-list' }, catalog.local.map(entry => localOption(modal, entry)));
+    if (modal.tab === 'recommended') list = h('div', {}, h('div', { class: 'model-list' }, catalog.local.map(entry => localOption(modal, entry))),
+      !catalog.local.length ? h('div', { class: 'small muted' }, 'No recommended model fits in the VRAM that is left.') : null,
+      hiddenNote(catalog.hiddenLocal, `they need more VRAM than the ${Math.max(0, Math.round((catalog.gpu.total - catalog.gpu.needed) * 10) / 10)} GB the other agents leave`));
     else if (modal.tab === 'all') {
       modal.family = modal.family || families[0];
       list = h('div', {}, h('div', { class: 'pills', style: { marginBottom: '12px' } }, families.map(family => h('button', { type: 'button', class: ['pill sm', family === modal.family && 'selected'],
         onClick: () => { modal.family = family; render(); } }, family))), h('div', { class: 'model-list' }, catalog.families[modal.family].map(entry => localOption(modal, entry))));
     } else list = otherLocal(modal);
   } else {
-    if (modal.tab === 'recommended') list = h('div', { class: 'model-list' }, catalog.api.map(entry => apiOption(modal, entry.name, entry.provider)));
+    if (modal.tab === 'recommended') list = h('div', {}, h('div', { class: 'model-list' }, catalog.api.map(entry => apiOption(modal, entry.name, entry.provider))),
+      !catalog.api.length ? h('div', { class: 'small muted' }, 'No recommended model fits in what is left of the budget.') : null,
+      hiddenNote(catalog.hiddenApi, `the price of 1 million of their tokens is more than the ${dollars(Math.max(0, catalog.budget.left))} left of the budget`));
     else if (modal.tab === 'all') {
       modal.provider = modal.provider || providers[0];
       list = h('div', {}, h('div', { class: 'pills', style: { marginBottom: '12px' } }, providers.map(provider => h('button', { type: 'button', class: ['pill sm', provider === modal.provider && 'selected'],
@@ -1343,6 +1415,8 @@ function modelPickerModal(modal) {
     } else list = otherApi(modal);
   }
   const extra = modal.selected?.local ? modal.selected.vram || 0 : 0;
+  const selectedPrice = modal.selected && !modal.selected.local ? (modal.selected.cli === 'codex' ? 0 : modal.selected.cli ?
+    ((catalog.cli['claude-code'].prices || []).find(entry => entry.name === modal.selected.name)?.price || 0) : priceEntry(modal, modal.selected.name, modal.selected.provider).price || 0) : 0;
   const choose = async () => {
     const selected = modal.selected;
     const payload = { agentId: modal.agentId, name: selected.name, local: selected.local, bits: modal.bits, billions: selected.local && selected.custom ? selected.billions : null,
@@ -1375,6 +1449,9 @@ function modelPickerModal(modal) {
           h('div', { class: 'segmented' }, store.catalog.bits.map(bits => h('button', { type: 'button', class: modal.bits === bits && 'active', onClick: () => { modal.bits = bits; loadCatalog(modal); } },
             bits === 16 ? 'Full quality' : `${bits}-bit (${bits === 8 ? 'half' : 'quarter'} the memory)`))),
           h('span', { class: 'small muted grow' }, modal.bits === 16 ? 'Compress a model to fit a smaller GPU, at a small cost in quality.' : 'Needs the bitsandbytes package.'))) : null,
+      where !== 'local' && where && catalog.budget.budget ? h('div', { class: 'card pad', style: { boxShadow: 'none' } }, budgetMeter(catalog.budget, selectedPrice,
+        modal.selected && !modal.selected.local ? shorten(modelName(modal.selected), 30) : 'This model')) : null,
+      where === 'api' ? priceDate() : null,
       where === 'cli' ? list : where ? h('div', {}, h('div', { class: 'tabs' }, [['recommended', 'Recommended', 'sparkles'], ['all', 'All models', 'list'], ['other', where === 'local' ? 'Another model of Hugging Face' : 'Another model', 'edit']]
         .map(([tab, label, iconName]) => h('button', { type: 'button', class: modal.tab === tab && 'active', onClick: () => { modal.tab = tab; render(); } }, icon(iconName, 'sm'), label))), list) : null,
       modal.selected && where === modelKind(modal.selected) ? selectionPanel(modal) : null),
@@ -1484,8 +1561,14 @@ function codingAgentPanel(modal) {
     return h('div', { class: 'stack' }, cards,
       missing.length ? callout('warning', 'download', h('b', {}, 'Claude Code needs its Python library.'), h('div', {}, 'It contains Claude Code itself. Install it in a terminal, then check again:'),
         codeLine(`pip install -U ${missing.join(' ')}`), h('div', {}, button('Check again', { size: 'sm', iconName: 'refresh', busy: ui.busy.catalog, onClick: () => loadCatalog(modal) }))) :
-        h('div', { class: 'model-list' }, agents['claude-code'].models.map(name => name === store.catalog.defaultCliModel ? option('claude-code', name, 'Let Claude Code choose', 'Its default model.', true) :
-          option('claude-code', name, name, 'Anthropic', false))),
+        h('div', {}, h('div', { class: 'model-list' }, agents['claude-code'].models.filter(name => name === store.catalog.defaultCliModel ||
+          (modal.catalog.cli['claude-code'].prices || []).find(entry => entry.name === name)?.status !== 'overBudget').map(name => {
+          if (name === store.catalog.defaultCliModel) return option('claude-code', name, 'Let Claude Code choose', 'Its default model. Its price is only known once it ran.', true);
+          const entry = (modal.catalog.cli['claude-code'].prices || []).find(item => item.name === name) || {};
+          return option('claude-code', name, name, entry.price !== null && entry.price !== undefined ? `Anthropic · ${dollars(entry.price)} per 1M tokens` : 'Anthropic · price unknown', false);
+        })),
+          (modal.catalog.cli['claude-code'].prices || []).some(entry => entry.status === 'overBudget') ? h('div', { class: 'small faint row', style: { marginTop: '8px' } }, icon('info', 'sm'),
+            `${(modal.catalog.cli['claude-code'].prices || []).filter(entry => entry.status === 'overBudget').length} Anthropic models are not shown: they cost more than what is left of the budget.`) : null),
       permissions);
   }
   return h('div', { class: 'stack' }, cards, codexAccountPanel(), ui.codex.data?.account?.signedIn ? h('div', { class: 'model-list' },
@@ -1794,6 +1877,9 @@ function viewLaunch() {
     { ok: missingModels.length === 0, text: missingModels.length ? `No model for ${missingModels.map(agent => agent.name).join(', ')}` : 'Every agent has a model', fix: () => go('models') },
     missingPackages.length ? { warn: true, text: `Packages to install for ${missingPackages.map(agent => agent.name).join(', ')}: ${[...new Set(missingPackages.flatMap(agent => agent.missing))].join(', ')}`, fix: () => go('models') } : null,
     gpu && gpu.needed ? { ok: gpu.runnable, warn: !gpu.runnable, text: gpu.runnable ? `The local models need ${gpu.needed} GB of VRAM, and ${gpu.free} GB are free` : gpu.message, fix: () => go('models') } : null,
+    state.costs.budget ? { ok: state.costs.left >= 0, warn: state.costs.left < 0, fix: () => go('models'), text: state.costs.left >= 0 ?
+      `Budget of ${dollars(state.costs.budget)}: ${dollars(state.costs.left)} left once each API model set aside the price of 1 million of its tokens` :
+      `The API models set aside ${dollars(-state.costs.left)} more than the budget of ${dollars(state.costs.budget)}: they may cost more than you planned` } : null,
   ].filter(Boolean);
   const start = async () => {
     const data = await act('start', { mode }, { busy: 'start' });
@@ -1853,7 +1939,7 @@ function viewRun() {
     flush: true,
     content: h('div', { class: 'run' },
       h('div', { class: 'run-left', 'data-scroll': 'run-left' },
-        h('div', { class: 'run-bar' }, h('span', { class: 'grow' }),
+        h('div', { class: 'run-bar' }, costBadge(), h('span', { class: 'grow' }),
           button('Add an agent', { size: 'sm', iconName: 'plus', disabled: !run.canJoin, onClick: () => openModal({ type: 'tasks', live: true }),
             title: run.canJoin ? 'A new agent joins the swarm now, and every agent is told' : 'The leader started its final work: an agent can join when the run is over' }),
           run.running ? button('Stop the swarm', { kind: 'danger-ghost', size: 'sm', iconName: 'stop', onClick: () => openModal({ type: 'stop' }) }) : null,
@@ -1864,6 +1950,7 @@ function viewRun() {
             h('ul', { class: 'small', style: { margin: '6px 0 0', paddingLeft: '18px' } }, Object.entries(run.interruption).map(([name, reason]) => h('li', {}, h('b', {}, name), `: ${reason}`))))) : null,
         !run.running ? resultsCard(run) : null,
         joiningCard(),
+        costCard(),
         h('div', { class: 'card' }, h('div', { class: 'card-head' }, icon('activity'), h('h3', { class: 'grow' }, 'The swarm'), graphLegend()),
           h('div', { class: 'card-body', style: { padding: '8px 12px' } }, flowGraph(nodes, run.stages, run.leader, { mode: run.mode, selected: selectedName, onSelect: name => { ui.selected = name; render(); } }))),
         selected ? agentDetail(run, selected) : null),
@@ -1871,6 +1958,34 @@ function viewRun() {
     footer: null,
     guide: null,
   };
+}
+
+// What the mission spent, as it grows: every call of a model is counted, from the building of the swarm to now.
+function costBadge() {
+  const costs = store.state.costs;
+  const over = costs.budget && costs.spent > costs.budget;
+  return h('button', { type: 'button', class: ['badge', over ? 'danger' : 'outline', 'cost-badge'], title: 'The cost of the mission so far', onClick: () => { ui.costsOpen = true; render(); } },
+    icon('dollar'), `${dollars(costs.spent)}${costs.budget ? ` of ${dollars(costs.budget)}` : ' spent'}${costs.unpriced ? ' +' : ''}`);
+}
+
+function costCard() {
+  const costs = store.state.costs;
+  if (!costs.agents.length && !costs.budget) return null;
+  const share = costs.budget ? costs.spent / costs.budget : null;
+  const tone = share === null ? 'info' : share >= 1 ? 'danger' : share >= 0.8 ? 'warning' : 'success';
+  const kinds = { free: 'on your GPUs, free', plan: 'your ChatGPT plan', unknown: 'price unknown', pending: 'price loading' };
+  return h('div', { class: 'card cost-card' }, h('div', { class: 'card-head' }, icon('dollar'), h('h3', { class: 'grow' }, 'The cost of the mission'),
+    h('span', { class: `cost-total ${tone}` }, dollars(costs.spent)), button(ui.costsOpen ? 'Hide' : 'Each agent', { kind: 'ghost', size: 'sm', iconName: ui.costsOpen ? 'chevronUp' : 'chevronDown',
+      onClick: () => { ui.costsOpen = !ui.costsOpen; render(); } })),
+    h('div', { class: 'card-body stack tight' },
+      costs.budget ? budgetMeter(costs) : h('div', { class: 'small muted' }, 'No budget was set: every call is still counted.'),
+      costs.unpriced ? callout('warning', 'alert', `${formatNumber(costs.unpriced)} tokens were used by models whose price is not known${costs.pending ? ' yet' : ''}: they are not in the total.`) : null,
+      ui.costsOpen ? h('table', { class: 'usage-table' }, h('tr', {}, h('th', {}, 'Agent'), h('th', {}, 'Models'), h('th', {}, 'Calls'), h('th', {}, 'Read'), h('th', {}, 'Written'), h('th', {}, 'Cost')),
+        costs.agents.map(row => h('tr', {}, h('td', {}, row.agent), h('td', {}, row.models.join(', ')), h('td', {}, formatNumber(row.calls)), h('td', {}, formatNumber(row.input)),
+          h('td', {}, formatNumber(row.output)), h('td', {}, row.kinds.every(kind => kind === 'free' || kind === 'plan') ? kinds[row.kinds[0]] : dollars(row.cost),
+            row.unpriced ? h('span', { class: 'faint' }, ` + ${formatNumber(row.unpriced)} tokens at an unknown price`) : null)))) : null,
+      ui.costsOpen ? priceDate() : null,
+      ui.costsOpen ? h('div', { class: 'small faint' }, 'Computed from the tokens of every call and the published prices: the cache, the long prompts and the hours of DeepSeek are priced like the providers bill them. Claude Code gives its own cost. Your provider\'s bill is the reference.') : null));
 }
 
 // The agents prepared in the live view that did not join yet: their model, then the step to join, or drop them.
@@ -1985,9 +2100,11 @@ function resultsCard(run) {
       (run.removed || []).length ? h('div', { style: { marginTop: '14px' } }, h('h4', { style: { marginBottom: '6px' } }, 'Removed during the run'),
         run.removed.map(item => h('div', { class: 'row small', style: { padding: '3px 0' } }, icon('trash', 'sm'), h('b', {}, item.name), h('span', { class: 'muted' }, `${item.role}, ${item.status} when it left · ${item.reason || 'no reason given'}`)))) : null,
       usage.length ? h('div', { style: { marginTop: '14px' } }, h('h4', { style: { marginBottom: '6px' } }, 'Tokens used'), h('table', { class: 'usage-table' },
-        h('tr', {}, h('th', {}, 'Agent'), h('th', {}, 'Model'), h('th', {}, 'Calls'), h('th', {}, 'Read'), h('th', {}, 'Written')),
-        usage.map(agent => h('tr', {}, h('td', {}, agent.name), h('td', {}, modelName(agent.model)), h('td', {}, formatNumber(agent.usage.calls)), h('td', {}, formatNumber(agent.usage.input)),
-          h('td', {}, formatNumber(agent.usage.output))))), h('div', { class: 'small faint', style: { marginTop: '6px' } }, 'API models are billed for the tokens they read and write.')) : null) : null);
+        h('tr', {}, h('th', {}, 'Agent'), h('th', {}, 'Model'), h('th', {}, 'Calls'), h('th', {}, 'Read'), h('th', {}, 'Written'), h('th', {}, 'Cost of the mission')),
+        usage.map(agent => { const row = store.state.costs.agents.find(item => item.agent === agent.name);
+          return h('tr', {}, h('td', {}, agent.name), h('td', {}, modelName(agent.model)), h('td', {}, formatNumber(agent.usage.calls)), h('td', {}, formatNumber(agent.usage.input)),
+            h('td', {}, formatNumber(agent.usage.output)), h('td', {}, row ? dollars(row.cost) : '')); })),
+        h('div', { class: 'small faint', style: { marginTop: '6px' } }, `The mission spent ${dollars(store.state.costs.spent)} in all, its building and the agents that left included.`)) : null) : null);
 }
 
 function agentDetail(run, agent) {
@@ -2134,7 +2251,8 @@ function proposedAgent(agent, number = null) {
   return h('div', { class: 'proposed-agent' }, taskIcon(agent.task),
     h('div', { class: 'grow stack tight', style: { minWidth: '0' } },
       h('div', { class: 'row wrap', style: { gap: '6px' } }, number ? h('span', { class: 'faint small' }, `${number}.`) : null, h('b', {}, agent.name), h('span', { class: 'small muted' }, agent.label),
-        badge(agent.model, { cli: 'honey', local: 'primary', api: 'info' }[agent.modelKind], { cli: 'terminal', local: 'cpu', api: 'cloud' }[agent.modelKind])),
+        badge(agent.model, { cli: 'honey', local: 'primary', api: 'info' }[agent.modelKind], { cli: 'terminal', local: 'cpu', api: 'cloud' }[agent.modelKind]),
+        agent.price ? badge(agent.price, 'outline', 'dollar') : null),
       h('div', { class: 'small' }, agent.description),
       h('div', { class: 'small muted' }, icon(agent.waitsFor.length ? 'clock' : 'zap', 'sm'), agent.waitsFor.length ? ` Waits for ${agent.waitsFor.join(', ')} and receives their results` : ' Starts right away'),
       agent.why ? h('div', { class: 'small why' }, icon('crown', 'sm'), h('span', {}, agent.why)) : null,
@@ -2355,6 +2473,23 @@ function helpModal() {
     foot: [h('div', { class: 'small muted' }, 'Tip: hover a button to see what it does.'), h('div', { class: 'spacer' }), button('Got it', { kind: 'primary', onClick: closeModal })] });
 }
 
+// The settings of the user, kept on this computer (agent-files/settings.json) for every mission.
+function settingsModal(modal) {
+  const save = async () => {
+    const data = await act('saveSettings', { maxAgents: modal.maxAgents }, { busy: 'saveSettings', form: modal });
+    if (data) { closeModal(); toast('Your settings are saved.', 'success'); } else render();
+  };
+  return modalFrame({ iconEl: h('span', { class: 'task-icon lg', style: { '--task': '#5B4CF0', '--task-soft': '#5B4CF026' } }, icon('settings', 'lg')), title: 'Settings',
+    subtitle: 'Kept on this computer, for all your missions.',
+    body: h('div', { class: 'stack' }, h('div', { class: ['field', modal.errors.maxAgents && 'has-error'] },
+      h('label', { class: 'field-label', for: 'max-agents' }, 'The most agents a leader can put in a swarm'),
+      h('input', { id: 'max-agents', class: 'input', type: 'number', min: '1', max: String(store.state.maxAgentsLimit), step: '1', style: { maxWidth: '140px' }, 'data-key': 'max-agents',
+        value: modal.maxAgents, onInput: event => { modal.maxAgents = event.target.value; }, onKeydown: event => { if (event.key === 'Enter') save(); } }),
+      modal.errors.maxAgents ? h('div', { class: 'field-error' }, icon('alert'), modal.errors.maxAgents) :
+        h('div', { class: 'field-help' }, icon('info'), `When the leader builds the swarm or adds agents while it runs, it never goes beyond this. The default is 10, and it can be 1 to ${store.state.maxAgentsLimit}. You can always add agents yourself.`))),
+    foot: [h('div', { class: 'spacer' }), button('Cancel', { kind: 'ghost', onClick: closeModal }), button('Save', { kind: 'primary', iconName: 'check', busy: ui.busy.saveSettings, onClick: save })] });
+}
+
 function stopModal() {
   const job = store.state.jobs.changes;
   if (!job) {
@@ -2390,7 +2525,7 @@ function renderModal() {
     const modal = ui.modal;
     const builders = {
       tasks: taskPickerModal, agent: agentFormModal, browse: browseModal, model: modelPickerModal, help: helpModal, stop: stopModal, cancel: cancelModal,
-      join: joinModal, removeAgent: removeAgentModal,
+      join: joinModal, removeAgent: removeAgentModal, settings: settingsModal,
       quit: () => confirmModal({ title: 'Quit SwarmUP?', iconName: 'power', confirm: 'Quit', danger: true, text: store.state.run?.running ? 'The swarm is running. It is saved now, and you can continue it at the next start.' : 'Your team is kept only while SwarmUP runs: what you built here is lost when you quit, except a swarm that was interrupted.',
         run: async () => { const data = await act('quit', {}, { busy: 'confirm' }); if (data) document.body.replaceChildren(h('div', { class: 'splash' }, h('div', { class: 'splash-logo' }, logo()), h('div', { class: 'splash-text' }, data.message))); } }),
       confirmNew: () => confirmModal({ title: 'Start a new swarm?', iconName: 'plus', confirm: 'Start a new swarm', danger: true, text: 'The mission, the agents and their models are cleared. The API keys you gave stay in memory.',

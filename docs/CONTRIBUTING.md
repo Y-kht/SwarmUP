@@ -20,7 +20,7 @@
    git add .
    git commit -m "Your commit message"
    ```
-   - **Commit Message Guidelines**: Write commit messages that are clear, concise, and descriptive. Use the imperative mood (e.g., "Fix bug" instead of "Fixed bug" or "Fixes bug"). Include relevant information about the changes made, such as the issue number or a brief description of the problem being addressed. Avoid vague messages like "Update code" or "Fix stuff". A good commit message should provide enough context for others to understand the purpose of the changes without having to read the code itself.
+   - **Commit Message Guidelines**: Write commit messages that are clear, concise, and descriptive. Use the imperative mood (e.g., "Fix bug" instead of "Fixed bug" or "Fixes bug"). Include relevant information about the changes made, such as the issue number or a brief description of the problem being addressed. Avoid vague messages like "Update code" or "Fix stuff". A good commit message should provide enough context for others to understand the purpose of the changes without having to read the code itself. Follow these [Commit Message Guidelines](https://www.conventionalcommits.org/en/v1.0.0/#specification).
 
 6. **Push Changes to Your Fork**: Push your changes to your forked repository on GitHub using the following command:
    ```

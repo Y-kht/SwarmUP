@@ -93,7 +93,24 @@ Every agent has its own model.
 - **API models:** GPT (OpenAI), Claude (Anthropic), Gemini (Google) and DeepSeek, with their prices.
 - **Coding agents:** Claude Code (Anthropic) and Codex (OpenAI), running on your computer. They think for an agent like a model, and they can also read files, run commands and use the web, each time with your approval (see Coding agents below).
 - Recommended models for each task, and the name of any other model can be typed.
+- **Only what fits is offered first:** the first list of models of an agent only shows the local models that fit in the VRAM the other agents leave, and the API models whose price of 1 million tokens fits in what is left of the budget of the mission. Every model stays in the list of all the models, where the others are marked. The leader is offered exactly the same.
 - **GPU check:** the total and the free VRAM of your GPUs (NVIDIA on Linux and Windows, AMD on Linux), and the VRAM the swarm is expected to need, which grows with each agent. A local model that does not fit cannot be chosen. One that fits but is not free now gives a warning, and the swarm does not start until the memory is free. The Windows part is written but has not been tried on a real Windows computer yet.
+
+### Budget and cost of the mission
+
+You can give a mission a budget, in US dollars, for its API models (the leader included). Each API model of the team sets aside the price of 1 million of its tokens (the higher of reading and writing), the way a local model takes its VRAM: what is left decides which models the first lists show. An agent that spent more than that counts with what it spent, and one that finished counts with what it really spent. Local models, and Codex with a ChatGPT plan, cost nothing from the budget.
+
+- **Every call is counted:** the tokens read, read from the cache, written to the cache and written, priced like the providers bill them (the cache at its own price, prompts over 200,000 tokens at the long price of the models that have one, DeepSeek at half price outside its peak hours, the thinking of Gemini as output). Claude Code gives its own exact cost. A model without a published price is counted in tokens, and never shown as free.
+- **The whole mission:** the building of the swarm by the leader, the connection tests, the agents that left and the models that were replaced all count. The cost is saved with the swarm, so a mission continued after a stop knows what it spent.
+- **Live:** the cost grows on the screen after every call (in the command line, type `cost`), with the spending of each agent, and you are warned at 80% and at 100% of the budget. Nothing is stopped by itself: you (or the leader, which sees the cost) remove agents or stop the swarm. The prices come from the public list of LiteLLM, so the bill of your provider stays the reference.
+
+### Information from the internet, also offline
+
+What SwarmUP takes from the internet to show it is kept in `agent-files/internet-cache`, with the time it was fetched, and renewed regularly: the prices of the models every hour (in the background while the program runs), the models Codex offers each time it is asked, and what Hugging Face says about a model and the publishers found on Crossref every week. Without internet SwarmUP keeps working with the information of the last connection, even after a restart, and says from when it is (the prices show their date, and "No internet" when they are those of the last connection). A call already made keeps the price it was billed at when the prices change. What the agents fetch for their work (news, papers, messages) is always new: a lost connection pauses the agent instead.
+
+### Settings
+
+The settings of the window (agent-files/settings.json, kept for all your missions) have the most agents a leader can put in a swarm: 10 by default, from 1 to 100. You can always add agents yourself.
 
 ### Coding agents
 
@@ -115,6 +132,8 @@ Nothing is done without your approval. API keys, passwords, tokens and accounts 
 - `sources_library.py` lists the messaging apps (`MESSAGING_APPS`), and `harness_utils.py` has the code that sends to each one.
 - A coding agent (`ClaudeCodeModel`, `CodexModel` in `model_clients.py`) asks through its loop: `Loop.askPermission` and `Loop.askQuestions`, which an interface replaces like `askUser` (the console and the window both do). `Swarm.prepareRun` calls `newRun` on them, which forgets what was allowed until the next run.
 - `Swarm.addAgent` and `Swarm.removeAgent` work while the swarm runs (the events `joined`, `removed` and `retired`), and `Swarm.setModel` for an agent that did not start (the event `model`).
+- `remember` in `harness_utils.py` keeps what is fetched from the internet (with its age limit, and the last version for when there is no internet), `describeCached` says from when it is, and `keepFresh` renews the prices in the background.
+- `MissionCosts` in `harness_utils.py` counts what a mission spends (every client records its calls with `recordCall` of `model_clients.py`), with its budget: `report` for the screen, `left` for the decisions, `warnings` at 80% and 100%. `Loop.onUsage` is called after every call of a model, so an interface shows the cost as it grows. `loadSettings` and `saveSettings` keep the settings of the user.
 - `leader_utils.py` holds the leader that builds the swarm: `parseOutput` (the blocks in a text), `findSuggestions` (the sentences that suggest a change), `LeaderCatalog` (what the leader is told, and the checks of its proposals), `designSwarm` (the building of the swarm with the user) and `LeaderManager` (the leader while the swarm runs). The leader asks the user through `Loop.askProposal`, and the program that runs the swarm makes the agents for it (`makeLoop`, `joined`, `remakeLoop`, `remade`). `readAnswers` of `tasks_library.py` checks the proposals of the leader and the forms of the window the same way.
 
 ## Use the interface

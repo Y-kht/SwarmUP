@@ -20,6 +20,21 @@ from test_live_swarm import GatedLoop
 from test_saved_swarms import waitUntil
 
 GPUS = [{"name": "RTX A5000", "total": 24.0, "free": 23.5}]
+# The prices of the tests, in US dollars per 1 million tokens, so that no test asks the internet for them.
+PRICES = {"claude-opus-5-5": (5.0, 25.0, 0.5, 6.25), "claude-sonnet-5-5": (3.0, 15.0, 0.3, 3.75), "claude-haiku-4-5": (1.0, 5.0, 0.1, 1.25),
+          "gpt-6-luna": (1.25, 10.0, 0.125, None), "gpt-4.1-mini": (0.4, 1.6, 0.1, None), "deepseek-v4-pro": (0.5, 2.0, 0.05, None)}
+
+
+def fixedPrices():
+    return {name: {"input": reading, "output": writing, "cachedInput": cached, "context": 200000, "cacheWrite": written, "inputLong": None, "outputLong": None,
+                   "cachedInputLong": None, "cacheWriteLong": None} for name, (reading, writing, cached, written) in PRICES.items()}
+
+
+# Every test that shows or checks a cost uses the prices above instead of the list of the internet.
+def usePrices(case):
+    patcher = mock.patch.object(harness_utils, "loadModelPrices", fixedPrices)
+    patcher.start()
+    case.addCleanup(patcher.stop)
 NAMES = ["Leader", "Writer", "Checker", "Researcher"]
 
 
@@ -98,6 +113,7 @@ class FolderTestCase(unittest.TestCase):
             patcher = mock.patch.object(target, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        usePrices(self)
 
 
 class ParserTests(unittest.TestCase):
@@ -283,8 +299,8 @@ class CatalogTests(FolderTestCase):
                                   "Agent 2 (a): There is already an agent called a.", "Agent 3 (Leader): Leader is your own name: give the agent another one."])
         agents, errors = catalog.checkBuild({"agents": []})
         self.assertEqual(errors, ["The swarm needs at least one agent."])
-        agents, errors = catalog.checkBuild({"agents": [{"name": f"A{number}", "task": "author", "model": "m"} for number in range(leader_utils.MAX_AGENTS + 1)]})
-        self.assertIn(f"{leader_utils.MAX_AGENTS} agents at most", errors[0])
+        agents, errors = catalog.checkBuild({"agents": [{"name": f"A{number}", "task": "author", "model": "m"} for number in range(catalog.maxAgents + 1)]})
+        self.assertIn(f"{catalog.maxAgents} agents at most", errors[0])
 
     def testTheLeaderIsToldWhatItCanChooseOnThisComputer(self):
         catalog = makeCatalog(self.folder, keys={"claude": "sk"})
@@ -309,6 +325,59 @@ class CatalogTests(FolderTestCase):
             self.assertIn(part, prompt)
 
 
+class BudgetTests(FolderTestCase):
+    def testTheLeaderIsOnlyOfferedTheModelsThatFitWhatIsLeftOfTheBudget(self):
+        catalog = makeCatalog(self.folder, keys={"claude": "sk", "gpt": "sk"})
+        catalog.costs.setBudget(40)
+        models = catalog.describeModels(0, catalog.moneyLeft(catalog.leaderTeam()))
+        self.assertIn("$15.00 of the budget of the mission is left for new models.", models)
+        self.assertIn("claude-sonnet-5-5 ($15.00 per 1M tokens)", models)
+        self.assertNotIn("claude-opus-5-5", models.split("RECOMMENDED")[0].split("API MODELS")[1])
+        self.assertIn("gemini-3.8-flash (price unknown)", models)
+        self.assertIn("other API models cost more than what is left of the budget", models)
+        self.assertIn("Its use is paid by the plan, not by the budget.", models)
+        costs = catalog.describeCosts(catalog.leaderTeam())
+        self.assertIn("The budget of the mission is $40.00. The agents that did not finish set aside $25.00", costs)
+        prompt = catalog.buildPrompt()
+        self.assertIn("THE COST OF THE MISSION", prompt)
+        self.assertIn(f"with {catalog.maxAgents} agents at most", prompt)
+
+    def testTheModelsOfTheSwarmAreCheckedAgainstTheBudgetTogether(self):
+        catalog = makeCatalog(self.folder)
+        catalog.costs.setBudget(49)
+        agents, errors = catalog.checkBuild({"agents": [{"name": "A", "task": "author", "model": "claude-sonnet-5-5", "settings": {"subject": "a"}},
+                                                        {"name": "B", "task": "author", "model": "claude-haiku-4-5", "settings": {"subject": "b"}},
+                                                        {"name": "C", "task": "author", "model": "claude-haiku-4-5", "settings": {"subject": "c"}}]})
+        self.assertEqual(errors, ["Agent 3 (C): claude-haiku-4-5 costs $5.00 per 1 million tokens, but only $4.00 is left of the budget of the mission for new models. "
+                                  "Choose a cheaper model, a local model, or Codex."])
+        agents, errors = catalog.checkBuild({"agents": [{"name": "A", "task": "author", "model": "Qwen/Qwen3-8B", "settings": {"subject": "a"}},
+                                                        {"name": "B", "task": "author", "model": "gemini-3.8-flash", "settings": {"subject": "b"}}]})
+        self.assertEqual(errors, [])
+        self.assertEqual([agent["price"] for agent in agents], ["free", "price unknown"])
+
+    def testWhileTheSwarmRunsTheLeaderSeesWhatEveryAgentSpent(self):
+        swarm = Swarm("Mission")
+        swarm.addAgent("Leader", makeLeader(LeaderModel()), "leader", "lead", model=getModelInfo("claude-opus-5-5"))
+        writer = GatedLoop("text")
+        writer.agent.usage = {"calls": 0, "input": 0, "output": 0}
+        harness_utils.MissionCosts.track(swarm.costs, "Writer", getModelInfo("claude-haiku-4-5"), writer.agent)
+        swarm.addAgent("Writer", writer, "writer", "write", model=getModelInfo("claude-haiku-4-5"))
+        from model_clients import recordCall
+        recordCall(writer.agent.usage, input=100000, output=20000)
+        catalog = makeCatalog(self.folder)
+        catalog.costs = swarm.costs
+        swarm.costs.setBudget(30)
+        for name in ("claude-opus-5-5", "claude-haiku-4-5"):
+            swarm.costs.priceOf(getModelInfo(name))
+        text = catalog.describeCosts(swarm.describeTeam())
+        self.assertIn("The mission spent $0.20 so far.", text)
+        self.assertIn("- Writer: $0.20 (1 calls, 100,000 tokens read, 20,000 written)", text)
+        self.assertIn("so $0.00 is left for new models. The budget is spent", text)
+        problem = catalog.checkUsable(getModelInfo("claude-haiku-4-5"), 0, {}, catalog.moneyLeft(swarm.describeTeam()))
+        self.assertIn("only $0.00 is left of the budget", problem)
+        self.assertEqual(catalog.checkUsable(getModelInfo("Qwen/Qwen3-8B"), 0, {}, catalog.moneyLeft(swarm.describeTeam())), "")
+
+
 class DesignTests(FolderTestCase):
     GOOD = [{"name": "Checker", "task": "math", "model": "claude-sonnet-5-5", "settings": {"filePath": "paper.tex"}, "why": "It checks the proofs."},
             {"name": "Writer", "task": "author", "model": "claude-haiku-4-5", "waits_for": ["Checker"], "settings": {"subject": "a summary of the paper", "length": 200},
@@ -326,7 +395,7 @@ class DesignTests(FolderTestCase):
         self.assertIn("'gpt-9' is not a model of the list of models", model.prompts[2])
         [proposal] = leader.proposals
         self.assertEqual((proposal["action"], proposal["why"], [agent["name"] for agent in proposal["agents"]]), ("build", "Fixed.", ["Checker", "Writer"]))
-        self.assertIn("1. Checker: Math checker, with claude-sonnet-5-5 (Anthropic API). It starts right away.", proposal["summary"])
+        self.assertIn("1. Checker: Math checker, with claude-sonnet-5-5 (Anthropic API), $15.00 per 1M tokens. It starts right away.", proposal["summary"])
         self.assertIn("   Why: It writes the summary.", proposal["summary"])
         self.assertEqual(agents[1]["answers"]["folder"], str(self.folder.resolve()))
         self.assertEqual(len(leader.notes), 2)

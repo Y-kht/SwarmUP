@@ -17,6 +17,7 @@ import leader_utils
 import model_clients
 import user_interface as gui
 from model_clients import ApiModel
+from test_leader_utils import usePrices
 from test_saved_swarms import waitUntil
 
 GPUS = [{"name": "RTX A5000", "total": 25.8, "free": 25.3}]
@@ -66,6 +67,7 @@ class SessionTestCase(unittest.TestCase):
             patcher = mock.patch.object(target, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        usePrices(self)
         self.session = gui.Session()
         self.addCleanup(lambda: settle(self.session))
 
@@ -223,7 +225,10 @@ class ModelTests(SessionTestCase):
         catalog = self.act("modelCatalog", agentId=agentId)["catalog"]
         statuses = {entry["name"]: entry["status"] for entry in catalog["local"]}
         self.assertEqual(statuses["google/gemma-4-E4B-it"], "fits")
-        self.assertEqual(statuses["meta-llama/Llama-3.3-70B-Instruct"], "tooBig")
+        self.assertNotIn("meta-llama/Llama-3.3-70B-Instruct", statuses)
+        self.assertEqual(catalog["hiddenLocal"], 4)
+        family = {entry["name"]: entry["status"] for entry in catalog["families"]["llama"]}
+        self.assertEqual(family["meta-llama/Llama-3.3-70B-Instruct"], "tooBig")
         with self.assertRaises(ValueError) as caught:
             self.act("chooseModel", agentId=agentId, name="meta-llama/Llama-3.3-70B-Instruct", local=True)
         self.assertIn("only have 25.8 GB", str(caught.exception))
@@ -625,6 +630,75 @@ class LeaderModeTests(SessionTestCase):
         with self.assertRaises(ValueError):
             self.act("taskForm", task="leader", agentId=leader["id"])
         self.assertEqual(self.act("modelCatalog", agentId=leader["id"])["catalog"]["api"][0]["name"], "claude-opus-5-5")
+
+
+# The budget of the mission, and what it spent: the first lists only show the models that fit in what is left, and the cost grows with every call.
+class CostTests(SessionTestCase):
+    def testTheFirstListsOnlyShowTheModelsThatFitTheVramAndTheBudgetLeft(self):
+        self.act("setMission", mission="Bees.")
+        first, second = self.addWriter("bees"), self.addWriter("honey")
+        api = lambda agentId: [entry["name"] for entry in self.act("modelCatalog", agentId=agentId)["catalog"]["api"]]
+        self.assertEqual(api(first), ["claude-sonnet-5-5", "gpt-6-luna", "gemini-3.8-flash", "deepseek-v4-pro"])
+        self.act("setBudget", budget="20")
+        catalog = self.act("modelCatalog", agentId=first)["catalog"]
+        self.assertEqual(([entry["name"] for entry in catalog["api"]], catalog["hiddenApi"]), (["claude-sonnet-5-5", "gpt-6-luna", "gemini-3.8-flash", "deepseek-v4-pro"], 0))
+        self.assertEqual({entry["name"]: entry["price"] for entry in catalog["prices"]["claude"] if entry["price"]}["claude-opus-5-5"], 25.0)
+        self.chooseApi(first, "claude-sonnet-5-5")
+        catalog = self.act("modelCatalog", agentId=second)["catalog"]
+        self.assertEqual(catalog["budget"]["left"], 5.0)
+        self.assertEqual(([entry["name"] for entry in catalog["api"]], catalog["hiddenApi"]), (["gemini-3.8-flash", "deepseek-v4-pro"], 2))
+        self.assertEqual({entry["name"]: entry["status"] for entry in catalog["prices"]["claude"]}["claude-sonnet-5-5"], "overBudget")
+        self.assertEqual({entry["name"]: entry["status"] for entry in catalog["prices"]["gemini"]}["gemini-3.8-flash"], "unknown")
+        result = self.chooseApi(second, "claude-haiku-4-5")
+        self.assertEqual(result["warning"], "")
+        result = self.chooseApi(second, "claude-sonnet-5-5")
+        self.assertEqual(result["warning"], "claude-sonnet-5-5 costs $15.00 per 1 million tokens, more than the $5.00 left of the budget of the mission.")
+        costs = self.session.describe()["costs"]
+        self.assertEqual((costs["budget"], costs["spent"], costs["setAside"], costs["left"]), (20.0, 0.0, 30.0, -10.0))
+        catalog = self.act("modelCatalog", agentId=first, bits=16)["catalog"]
+        self.assertEqual(catalog["budget"]["left"], 5.0)
+        with self.assertRaises(gui.FormError):
+            self.act("setBudget", budget="-3")
+        self.act("setBudget", budget="")
+        self.assertIsNone(self.session.describe()["costs"]["budget"])
+
+    def testEveryCallIsCountedAndTheUserIsWarnedWhenTheBudgetRunsOut(self):
+        class Billed(Model):
+            def input(self, prompt):
+                answer = super().input(prompt)
+                self.usage["calls"] -= 1
+                model_clients.recordCall(self.usage, input=400000, cachedInput=100000, output=200000)
+                return answer
+        with mock.patch.object(gui, "createModel", lambda info, keys=None, token=None, report=None: Billed(info)):
+            self.act("setMission", mission="Write a text about bees.")
+            writer = self.addWriter()
+            self.chooseApi(writer, "claude-haiku-4-5")
+            self.act("setBudget", budget="1.5")
+            self.act("start", mode="execute")
+            while self.session.swarm.isRunning():
+                question = self.waitForQuestion()
+                self.act("answer", id=question["id"], answer="yes")
+                time.sleep(0.05)
+        costs = self.session.describe()["costs"]
+        [row] = costs["agents"]
+        self.assertEqual((row["agent"], row["calls"], row["input"], row["output"]), ("Writer", 1, 500000, 200000))
+        self.assertAlmostEqual(costs["spent"], 0.4 * 1.0 + 0.1 * 0.1 + 0.2 * 5.0)
+        self.assertEqual((costs["setAside"], costs["unpriced"]), (0.0, 0))
+        self.assertAlmostEqual(costs["left"], 1.5 - 1.41)
+        warnings = [item["text"] for item in self.session.feed if "of its budget" in item["text"]]
+        self.assertEqual(warnings, ["The mission spent $1.41, 80% of its budget of $1.50. The leader and you can remove agents that are not needed anymore."])
+        state = harness_utils.findUnfinishedSwarms() or [self.session.swarm.describeState()]
+        self.assertEqual(state[0]["costs"]["clients"][0]["usage"]["records"][0]["cachedInput"], 100000)
+
+    def testTheMostAgentsOfTheLeaderIsASettingOfTheUser(self):
+        self.assertEqual(self.session.describe()["settings"]["maxAgents"], 10)
+        self.assertEqual(self.act("saveSettings", maxAgents=4)["settings"]["maxAgents"], 4)
+        self.assertEqual(gui.Session().describe()["settings"]["maxAgents"], 4)
+        leader = {"answers": {"folder": None}, "name": "Leader", "model": None}
+        self.assertEqual(self.session.leaderCatalog(leader).maxAgents, 4)
+        for wrong in (0, "many", 1000):
+            with self.assertRaises(gui.FormError):
+                self.act("saveSettings", maxAgents=wrong)
 
 
 class ServerTests(SessionTestCase):

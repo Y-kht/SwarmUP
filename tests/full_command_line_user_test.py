@@ -26,8 +26,8 @@ from pathlib import Path
 
 # The modules of SwarmUP are in the folders of src/backend. Their names have hyphens, so they are not packages: each folder goes on the path.
 sys.path[:0] = [str(folder) for folder in sorted((Path(__file__).resolve().parent.parent / "src" / "backend").iterdir()) if folder.is_dir() and not folder.name.startswith(("_", "."))]
-from harness_utils import (FETCH_ERRORS, ConnectionLost, Loop, MessagingError, Swarm, checkEmailLogin, checkMessenger, checkVram, describeError, findPublishers,
-                           findTelegramChats, findUnfinishedSwarms, getModelCost, nextOccurrence, readGpus)
+from harness_utils import (FETCH_ERRORS, ConnectionLost, Loop, MessagingError, MissionCosts, Swarm, checkBudget, checkEmailLogin, checkMessenger, checkVram, describeError,
+                           describeCached, findPublishers, findTelegramChats, findUnfinishedSwarms, formatDollars, getModelCost, keepFresh, nextOccurrence, readGpus)
 from leader_utils import LeaderCatalog, LeaderManager, designSwarm
 from model_clients import (ModelError, CodexLogin, LocalModel, checkCodex, createModel, findMissingPackages, getApiKey, getHubFolder, isDownloaded, listCodexModels,
                            lookupHuggingFace, readCodexAccount)
@@ -51,6 +51,7 @@ COMMANDS = """Commands (type them at any time while the swarm runs):
   start <agent>           start an agent that waits for a time of the day now
   add                     add an agent to the swarm while it runs (every agent is told)
   remove <agent> <why>    remove an agent from the swarm (it stops, its model frees its memory, every agent is told)
+  cost                    what the mission spent so far, agent by agent, and what is left of its budget
   quit                    leave the program (the agents are stopped)
 When the leader asks a question, type yes, no, the name of an agent to look at it alone, or what you want changed."""
 
@@ -223,10 +224,17 @@ def renderNode(swarm, node, prefix, last, enabled):
     return lines
 
 
+def describeSpent(costs):
+    unknown = f" + {costs['unpriced']:,} tokens at an unknown price" if costs["unpriced"] else ""
+    return f"{formatDollars(costs['spent'])}{unknown}" + (f" of a budget of {formatDollars(costs['budget'])}" if costs["budget"] else "")
+
+
 def renderTree(swarm, enabled=False):
     status = swarm.getVramStatus()
     vram = f" | VRAM: {status['needed']} of {status['total']} GB expected, {status['free']} GB free now" if status["needed"] else ""
-    header = f"Swarm: {shorten(swarm.mission, 70)} | mode: {swarm.getMode()}{vram}"
+    costs = swarm.getCosts()
+    spent = f" | cost: {describeSpent(costs)}" if costs["spent"] or costs["budget"] or costs["unpriced"] else ""
+    header = f"Swarm: {shorten(swarm.mission, 70)} | mode: {swarm.getMode()}{vram}{spent}"
     return "\n".join([header, *renderNode(swarm, swarm.getTree(), None, True, enabled)])
 
 
@@ -357,6 +365,8 @@ def runCommand(console, swarm, line):
             console.say("Agents cannot be added here.")
     elif word == "tree":
         console.say(renderTree(swarm, console.color))
+    elif word == "cost":
+        console.say(describeCosts(swarm))
     elif word == "log":
         console.say("\n".join(f"[{message['time']}] {message['sender']} -> {message['receiver']}: {shorten(message['message'], 120)}"
                               for message in swarm.getMessages()[-15:]) or "No messages yet.")
@@ -397,6 +407,34 @@ def askAgentCount(console):
                 "The first agent is the leader: it summarises the work of the others for you, and passes your corrections on to the agents they concern. "
                 "One agent is enough to start.")
     return askUntilValid(console, "How many agents do you want in your swarm?", lambda text: parseAnswer({"key": "count", "ask": "", "kind": "number", "required": True}, text))
+
+
+# The budget of the whole mission, for its API models: each one chosen sets aside the price of 1 million of its tokens (see MissionCosts).
+def askBudget(console, costs):
+    console.say("You can give the mission a budget, in US dollars, for its API models (the leader included). Each API model you choose sets aside the price of "
+                "1 million of its tokens, and the lists only show the models that fit in what is left. Models on your GPUs and Codex cost nothing from it. "
+                "What the mission spends is counted, and shown while the swarm runs (type cost).")
+    def parse(text):
+        try:
+            return checkBudget(text), ""
+        except ValueError as error:
+            return None, str(error)
+    costs.setBudget(askUntilValid(console, "Budget of the mission in US dollars (Enter for no budget):", parse))
+
+
+def describeCosts(swarm):
+    costs = swarm.getCosts()
+    lines = [f"The mission spent {describeSpent(costs)}."]
+    if costs["budget"]:
+        lines.append(f"The agents that did not finish set aside {formatDollars(costs['setAside'])}, so {formatDollars(costs['left'])} is left for new models.")
+    lines += [f"  {row['agent']}: {formatDollars(row['cost'])} ({', '.join(row['models'])}; {row['calls']} calls, {row['input']:,} tokens read, {row['output']:,} written)"
+              + (f" + {row['unpriced']:,} tokens at an unknown price" if row["unpriced"] else "") for row in costs["agents"]]
+    return "\n".join(lines)
+
+
+# After every call of a model the user is told when the mission reaches 80% and 100% of its budget.
+def watchCosts(console, swarm, loop):
+    loop.onUsage = lambda: [console.say(f"Warning: {warning}") for warning in swarm.costs.warnings()]
 
 
 def askMission(console):
@@ -681,11 +719,15 @@ def askManualLocal(console):
     return getModelInfo(name, billions=billions)
 
 
+# The first list only has the models that fit in the VRAM the other agents leave. All of them are in the list of all the models.
 def chooseLocalModel(console, swarm, task, replacing=None):
-    recommended = RECOMMENDED_LOCAL[getTask(task)["recommend"]]
+    listed = RECOMMENDED_LOCAL[getTask(task)["recommend"]]
+    recommended = [name for name in listed if swarm.checkModel(getModelInfo(name), replacing)["allowed"]]
     while True:
         labels = [labelLocal(swarm, name, replacing) for name in recommended] + [SHOW_ALL, MANUAL]
         console.say("\nThe number in parentheses is the VRAM, in GB, that the model is expected to need.")
+        if len(recommended) < len(listed):
+            console.say(f"{len(listed) - len(recommended)} recommended models need more VRAM than the other agents leave, so they are not shown here. They are in the list of all the models.")
         picked = chooseFrom(console, "Models recommended for this task, from the smallest to the largest (type back to choose again where the model runs):", labels,
                             words={"back": CHANGE_KIND})
         if picked == CHANGE_KIND:
@@ -713,10 +755,42 @@ def chooseLocalModel(console, swarm, task, replacing=None):
         return info
 
 
-def chooseApiModel(console, swarm, task):
-    recommended = RECOMMENDED_API[getTask(task)["recommend"]]
+# From when the prices are: without internet, they are those of the last connection.
+def describePriceDate():
+    state = describeCached("model-prices")
+    if not state["fetchedAt"]:
+        return ""
+    return f"No internet: the prices are those of the last connection, {state['fetchedAt']}." if state["offline"] else f"Prices of {state['fetchedAt']}."
+
+
+def describePrice(costs, info):
+    price = costs.priceOf(info)["reference"]
+    return "price unknown" if price is None else f"{formatDollars(price)} per 1M tokens"
+
+
+# What is left of the budget of the mission for the model of an agent (replacing is the agent whose model changes), or None without a budget.
+def moneyLeft(swarm, replacing=None):
+    return swarm.costs.left([member for member in swarm.describeTeam() if member["agent"] != replacing], wait=True)["left"]
+
+
+def overBudget(swarm, info, money):
+    price = swarm.costs.priceOf(info)["reference"]
+    return money is not None and price is not None and price > money
+
+
+# The first list only has the models whose price of 1 million tokens fits in what is left of the budget. All of them are in the list of all the models.
+def chooseApiModel(console, swarm, task, replacing=None):
+    money = moneyLeft(swarm, replacing)
+    listed = RECOMMENDED_API[getTask(task)["recommend"]]
+    recommended = [name for name in listed if not overBudget(swarm, getModelInfo(name), money)]
+    if money is not None:
+        console.say(f"\n{formatDollars(max(money, 0))} of the budget of the mission is left for this model.")
+    if describePriceDate():
+        console.say(describePriceDate())
+    if len(recommended) < len(listed):
+        console.say(f"{len(listed) - len(recommended)} recommended models cost more than that per 1 million tokens, so they are not shown here. They are in the list of all the models.")
     while True:
-        labels = [f"{name} ({API_KEYS[getProvider(name)]['company']})" for name in recommended] + [SHOW_ALL, MANUAL]
+        labels = [f"{name} ({API_KEYS[getProvider(name)]['company']}, {describePrice(swarm.costs, getModelInfo(name))})" for name in recommended] + [SHOW_ALL, MANUAL]
         def showPrices(text):
             word, _, rest = text.partition(" ")
             if word.lower() not in ("p", "price", "prices"):
@@ -739,10 +813,15 @@ def chooseApiModel(console, swarm, task):
                 chosen, error = parseChoices(MODELS_API[family], rest) if rest.strip() and rest.strip().lower() != "all" else (MODELS_API[family], "")
                 console.say(error or "\n".join(describeCost(getModelCost(family, name)) for name in chosen))
                 return True
-            name = chooseFrom(console, f"\n{family} (type p 2 for the price of model 2, or p all):", MODELS_API[family] + [BACK], extra=showFamilyPrices)
+            shown = [f"{name} ({describePrice(swarm.costs, getModelInfo(name))}){'  [over your budget]' if overBudget(swarm, getModelInfo(name), money) else ''}"
+                     for name in MODELS_API[family]]
+            name = chooseFrom(console, f"\n{family} (type p 2 for the price of model 2, or p all):", shown + [BACK], extra=showFamilyPrices)
             if name == BACK:
                 continue
-            return getModelInfo(name)
+            info = getModelInfo(MODELS_API[family][shown.index(name)])
+            if overBudget(swarm, info, money):
+                console.say(f"Warning: {info['name']} costs more per 1 million tokens than the {formatDollars(max(money, 0))} left of the budget.")
+            return info
         if picked == MANUAL:
             provider = chooseFrom(console, "\nWhich company provides the model?", [f"{API_KEYS[key]['company']} ({key}-...)" for key in MODELS_API] + [BACK])
             if provider == BACK:
@@ -796,7 +875,7 @@ def signInCodex(console):
     return True
 
 
-def chooseCodingAgent(console):
+def chooseCodingAgent(console, swarm, replacing=None):
     while True:
         labels = [f"{agent['label']} ({'your Anthropic API key' if agent['provider'] else 'your ChatGPT plan'})" for agent in MODELS_CLI.values()] + [BACK]
         picked = chooseFrom(console, "\nWhich coding agent? (Anthropic does not allow other programs to use a Claude subscription, so Claude Code is used with an API key.)", labels)
@@ -808,8 +887,12 @@ def chooseCodingAgent(console):
                 continue
             models = [DEFAULT_CLI_MODEL] + [model["id"] for model in listCodexModels()]
         else:
-            models = MODELS_CLI[cli]["models"]
-        shown = [f"Let {MODELS_CLI[cli]['label']} choose" if name == DEFAULT_CLI_MODEL else name for name in models]
+            money = moneyLeft(swarm, replacing)
+            models = [name for name in MODELS_CLI[cli]["models"] if name == DEFAULT_CLI_MODEL or not overBudget(swarm, getModelInfo(name, cli=cli), money)]
+            if len(models) < len(MODELS_CLI[cli]["models"]):
+                console.say(f"{len(MODELS_CLI[cli]['models']) - len(models)} models cost more per 1 million tokens than the {formatDollars(max(money, 0))} left of the budget, so they are not shown.")
+        shown = [f"Let {MODELS_CLI[cli]['label']} choose" if name == DEFAULT_CLI_MODEL else name if cli == "codex" else
+                 f"{name} ({describePrice(swarm.costs, getModelInfo(name, cli=cli))})" for name in models]
         name = chooseFrom(console, f"\nWhich model must {MODELS_CLI[cli]['label']} use?", shown + [BACK])
         if name == BACK:
             continue
@@ -879,7 +962,8 @@ def chooseModel(console, swarm, spec, number, total, keys, tokens, replacing=Non
         console.say(f"VRAM of the swarm so far: {status['needed']} GB of {status['total']} GB ({status['free']} GB free now).")
     while True:
         kind = chooseKind(console, swarm, number, replacing)
-        info = chooseLocalModel(console, swarm, task, replacing) if kind == "local" else chooseApiModel(console, swarm, task) if kind == "api" else chooseCodingAgent(console)
+        info = chooseLocalModel(console, swarm, task, replacing) if kind == "local" else chooseApiModel(console, swarm, task, replacing) if kind == "api" else \
+            chooseCodingAgent(console, swarm, replacing)
         if info is None:
             continue
         if info.get("cli"):
@@ -925,6 +1009,7 @@ def connect(loop, console):
 def buildAgent(console, swarm, spec, info, model, waitsFor=()):
     loop = buildLoop(spec["task"], model, spec["answers"])
     connect(loop, console)
+    watchCosts(console, swarm, loop)
     recipe = {"task": spec["task"], "answers": publicAnswers(spec["task"], spec["answers"])}
     swarm.addAgent(spec["name"], loop, getTask(spec["task"])["role"], describeLoop(loop), waitsFor=waitsFor, model=info, recipe=recipe)
     return loop
@@ -968,13 +1053,14 @@ def chooseBuilder(console):
 
 # What the manager of the leader needs to make an agent here (see LeaderManager): the loops of the agents it adds, or of an agent with another model.
 class ConsoleMaker:
-    def __init__(self, console, specs, keys, tokens, models):
-        self.console, self.specs, self.keys, self.tokens, self.models = console, specs, keys, tokens, models
+    def __init__(self, console, swarm, specs, keys, tokens, models):
+        self.console, self.swarm, self.specs, self.keys, self.tokens, self.models = console, swarm, specs, keys, tokens, models
 
     def makeLoop(self, agent):
         model = createModel(agent["model"], self.keys, token=self.tokens.get(agent["model"]["name"]), report=self.console.say)
         loop = buildLoop(agent["task"], model, agent["answers"])
         connect(loop, self.console)
+        watchCosts(self.console, self.swarm, loop)
         return loop
 
     def joined(self, agent, loop):
@@ -992,18 +1078,22 @@ class ConsoleMaker:
 
 
 # It returns the swarm the leader built and the user approved (the leader is its first agent), or None.
-def buildWithLeader(console, mission, specs, keys, tokens, models):
+def buildWithLeader(console, mission, specs, keys, tokens, models, costs):
     heading(console, "Step 1: the leader and the folder of the mission")
     console.say(LEADER_TASK["info"])
     folder = askUntilValid(console, "Folder of the mission (the agents work in it, and the final report is saved in it):",
                            lambda text: parseAnswer({"key": "folder", "ask": "", "kind": "folder", "required": True}, text))
     leader = {"task": "leader", "name": LEADER_TASK["name"], "answers": {"mission": mission, "folder": folder, "numberOfLoops": DEFAULT_LOOPS}}
-    info, model = chooseModel(console, Swarm(mission), leader, 1, 1, keys, tokens)
+    swarm = Swarm(mission)
+    swarm.costs = costs
+    info, model = chooseModel(console, swarm, leader, 1, 1, keys, tokens)
     models[leader["name"]] = model
+    costs.track(leader["name"], info, model)
     loop = buildLoop("leader", model, leader["answers"])
     connect(loop, console)
+    watchCosts(console, swarm, loop)
     loop.name = leader["name"]
-    catalog = LeaderCatalog(mission, folder, leader["name"], info, keys, tokens)
+    catalog = LeaderCatalog(mission, folder, leader["name"], info, keys, tokens, costs)
     heading(console, "Step 2: the leader builds the swarm")
     console.say(f"{leader['name']} is building the swarm for your mission. It shows you its proposal, and nothing is made before you approve it.")
     try:
@@ -1014,7 +1104,6 @@ def buildWithLeader(console, mission, specs, keys, tokens, models):
     if agents is None:
         console.say("You rejected the swarm of the leader.")
         return None
-    swarm = Swarm(mission)
     buildAgent(console, swarm, leader, info, model)
     specs.append(leader)
     for agent in agents:
@@ -1024,7 +1113,7 @@ def buildWithLeader(console, mission, specs, keys, tokens, models):
         specs.append(spec)
     for agent in agents:
         swarm.setWaitsFor(agent["name"], agent["waitsFor"])
-    LeaderManager(swarm, catalog, ConsoleMaker(console, specs, keys, tokens, models))
+    LeaderManager(swarm, catalog, ConsoleMaker(console, swarm, specs, keys, tokens, models))
     return swarm
 
 
@@ -1083,6 +1172,7 @@ def report(console, swarm, outcome, models):
     if swarm.getMode() == "plan" and len(swarm.getAgents()) > 1 and swarm.getSummary():
         console.say(f"\nThe summary plan of the leader:\n{swarm.getSummary()}")
     showUsage(console, models)
+    console.say("\n" + describeCosts(swarm))
     return outcome.get("result") is not None
 
 
@@ -1202,10 +1292,12 @@ def resumeSaved(console, saved):
         unloadModels(models)
         return False
     console.say("\n" + renderTree(swarm, console.color))
+    for name in swarm.getAgents():
+        watchCosts(console, swarm, swarm.getMember(name)["agent"])
     leader = saved["members"][saved["leader"]]
     if saved.get("managed") and leader["recipe"]["task"] == "leader":
-        catalog = LeaderCatalog(saved["mission"], leader["recipe"]["answers"].get("folder"), saved["leader"], leader["model"], keys, tokens)
-        LeaderManager(swarm, catalog, ConsoleMaker(console, specs, keys, tokens, models))
+        catalog = LeaderCatalog(saved["mission"], leader["recipe"]["answers"].get("folder"), saved["leader"], leader["model"], keys, tokens, swarm.costs)
+        LeaderManager(swarm, catalog, ConsoleMaker(console, swarm, specs, keys, tokens, models))
     console.newAgent = lambda swarm: addLive(console, swarm, specs, keys, tokens, models)
     startSwarm(console, swarm, swarm.getMode(), models, resume=True)
     unloadModels(models)
@@ -1284,7 +1376,9 @@ def runProgram(console):
         return
     specs, keys, tokens, models = [], {}, {}, {}
     if chooseBuilder(console) == "leader":
-        swarm = buildWithLeader(console, askMission(console), specs, keys, tokens, models)
+        mission, costs = askMission(console), MissionCosts()
+        askBudget(console, costs)
+        swarm = buildWithLeader(console, mission, specs, keys, tokens, models, costs)
         if swarm is None:
             unloadModels(models)
             console.say("\nBye.")
@@ -1292,6 +1386,7 @@ def runProgram(console):
     else:
         count = askAgentCount(console)
         swarm = Swarm(askMission(console))
+        askBudget(console, swarm.costs)
         heading(console, "Step 1: the task of each agent")
         for number in range(1, count + 1):
             specs.append(fillTask(console, chooseTask(console, number, count), [spec["name"] for spec in specs]))
@@ -1334,6 +1429,7 @@ def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(errors="replace")
     console = Console()
+    keepFresh()
     try:
         runProgram(console)
     except (KeyboardInterrupt, EOFError):

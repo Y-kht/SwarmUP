@@ -12,10 +12,11 @@ import shutil
 import subprocess
 import threading
 import urllib.error
+from datetime import datetime, timezone
 from pathlib import Path
 
 import harness_utils
-from harness_utils import ConnectionLost, describeError, fetchUrl, isOnline
+from harness_utils import ConnectionLost, describeError, fetchUrl, isOnline, remember
 from models_library import API_KEYS, DEFAULT_CLI_MODEL, MODELS_CLI, isGated
 
 # A model client is any object with an input(prompt) method that returns the answer as text: it is the agent of a loop.
@@ -29,6 +30,19 @@ API_RETRIES = 2
 CLAUDE_MAX_TOKENS = 32000
 LOCAL_MAX_TOKENS = 4096
 THINKING_PATTERN = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+
+# One call of a model, for the cost of the mission (MissionCosts in harness_utils.py): the tokens it read (input, without the cache), read from
+# the cache (cachedInput), wrote to the cache (cacheWrite) and wrote (output, thinking included). cost is the exact cost when the model bills
+# itself (Claude Code), and missing says the provider did not tell the tokens (the call is then never counted as free). The totals are what
+# the table of the tokens shows. The time is in UTC, because DeepSeek bills by the hour of the day.
+def recordCall(usage, input=0, cachedInput=0, cacheWrite=0, output=0, cost=None, missing=False):
+    input, cachedInput, cacheWrite, output = (max(0, int(value or 0)) for value in (input, cachedInput, cacheWrite, output))
+    usage["calls"] += 1
+    usage["input"] += input + cachedInput + cacheWrite
+    usage["output"] += output
+    usage.setdefault("records", []).append({"time": f"{datetime.now(timezone.utc):%Y-%m-%dT%H:%M:%S}", "input": input, "cachedInput": cachedInput,
+                                            "cacheWrite": cacheWrite, "output": output, "cost": cost, "missing": missing})
 
 
 # An error whose message is written for the user. The agent that meets it fails, and its message is shown to the user.
@@ -74,18 +88,28 @@ def isDownloaded(name):
 
 
 # What Hugging Face says about a model that is not in the list of the library: its number of parameters in billions (None if it does not
-# say) and whether it is gated. It raises a ModelError, with a message for the user, if the model cannot be found.
+# say) and whether it is gated. It raises a ModelError, with a message for the user, if the model cannot be found. The answer is kept a week
+# (see remember in harness_utils.py), and given from the last connection without internet.
+HUGGING_FACE_REFRESH_SECONDS = 7 * 24 * 3600
+
+
+def readHuggingFace(name):
+    data = json.loads(fetchUrl(f"https://huggingface.co/api/models/{name}"))
+    if not isinstance(data, dict):
+        raise ValueError("Hugging Face gave an answer that cannot be read")
+    total = (data.get("safetensors") or {}).get("total")
+    return {"billions": round(total / 1000000000, 1) if total else None, "gated": bool(data.get("gated"))}
+
+
 def lookupHuggingFace(name):
     try:
-        data = json.loads(fetchUrl(f"https://huggingface.co/api/models/{name}"))
+        return remember(f"huggingface-{name.strip().lower()}", lambda: readHuggingFace(name), HUGGING_FACE_REFRESH_SECONDS, errors=(OSError, ValueError))
     except urllib.error.HTTPError as error:
         if error.code == 404:
             raise ModelError(f"There is no model called {name} on Hugging Face. Check how it is written.") from None
         raise ModelError(f"Hugging Face answered with error {error.code} for {name}. A private model needs a token.") from None
     except (OSError, ValueError) as error:
         raise ModelError(f"Hugging Face could not be asked: {describeError(error)}.") from None
-    total = (data.get("safetensors") or {}).get("total")
-    return {"billions": round(total / 1000000000, 1) if total else None, "gated": bool(data.get("gated"))}
 
 
 # What went wrong with a call to an API, in words a user understands. The libraries of Anthropic and OpenAI have the same error classes.
@@ -107,6 +131,20 @@ def explainApiError(library, error, company, name):
     return f"{company} failed: {error}"
 
 
+# The tokens of an answer of the OpenAI API, and of the APIs like it. The cached tokens are part of prompt_tokens (OpenAI gives them in
+# prompt_tokens_details, DeepSeek in prompt_cache_hit_tokens). The thinking of a model is billed as output: it is in completion_tokens for
+# OpenAI and DeepSeek, and Gemini only counts it in total_tokens, so the output is what the total has beyond the prompt.
+def readOpenAiUsage(usage):
+    if usage is None:
+        return {"missing": True}
+    prompt = usage.prompt_tokens or 0
+    details = getattr(usage, "prompt_tokens_details", None)
+    cached = (getattr(details, "cached_tokens", None) or 0) if details is not None else 0
+    cached = min(prompt, cached or getattr(usage, "prompt_cache_hit_tokens", None) or 0)
+    output = max(usage.completion_tokens or 0, (usage.total_tokens or 0) - prompt)
+    return {"input": prompt - cached, "cachedInput": cached, "output": output}
+
+
 class ApiModel:
     def __init__(self, provider, name, apiKey):
         self.provider = provider
@@ -126,18 +164,18 @@ class ApiModel:
             self.client = (library.Anthropic if self.provider == "claude" else library.OpenAI)(**options)
         return library
 
-    def addUsage(self, inputTokens, outputTokens):
+    def addUsage(self, **tokens):
         with self.lock:
-            self.usage["calls"] += 1
-            self.usage["input"] += inputTokens or 0
-            self.usage["output"] += outputTokens or 0
+            recordCall(self.usage, **tokens)
 
     # Claude is asked with a stream and not with a single request, because a long answer would hit the time limit of a single request.
     # A refusal is a normal answer of the API (HTTP 200), so it is checked before the text is read. Thinking blocks are not part of the answer.
     def askClaude(self, prompt):
         with self.client.messages.stream(model=self.name, max_tokens=CLAUDE_MAX_TOKENS, messages=[{"role": "user", "content": prompt}]) as stream:
             message = stream.get_final_message()
-        self.addUsage(message.usage.input_tokens, message.usage.output_tokens)
+        usage = message.usage
+        self.addUsage(input=usage.input_tokens, cachedInput=getattr(usage, "cache_read_input_tokens", 0), cacheWrite=getattr(usage, "cache_creation_input_tokens", 0),
+                      output=usage.output_tokens)
         if message.stop_reason == "refusal":
             category = getattr(message.stop_details, "category", None)
             raise ModelError(f"{self.name} declined this request ({category or 'no reason given'}). Choose another model for this agent, or change what it is asked.")
@@ -145,8 +183,7 @@ class ApiModel:
 
     def askOpenAi(self, prompt):
         response = self.client.chat.completions.create(model=self.name, messages=[{"role": "user", "content": prompt}])
-        if response.usage:
-            self.addUsage(response.usage.prompt_tokens, response.usage.completion_tokens)
+        self.addUsage(**readOpenAiUsage(response.usage))
         choice = response.choices[0]
         if choice.message.refusal and not choice.message.content:
             raise ModelError(f"{self.name} declined this request: {choice.message.refusal}")
@@ -405,15 +442,28 @@ class ClaudeCodeModel:
                     result = message
         if result is None:
             raise ModelError("Claude Code stopped without an answer.")
-        usage = result.usage or {}
-        self.usage["calls"] += 1
-        self.usage["input"] += (usage.get("input_tokens") or 0) + (usage.get("cache_read_input_tokens") or 0) + (usage.get("cache_creation_input_tokens") or 0)
-        self.usage["output"] += usage.get("output_tokens") or 0
+        self.recordResult(result)
         if result.is_error:
             if not isOnline():
                 raise ModelConnectionError("Claude Code cannot reach Anthropic: the internet connection is lost.")
             raise ModelError(f"Claude Code could not finish: {result.result or result.subtype}")
         return result.result or ""
+
+    # Claude Code tells what the call cost (total_cost_usd, for its whole conversation, and every call of SwarmUP is a conversation of its own),
+    # and the tokens of every model it used (it also uses a small model for its own work).
+    def recordResult(self, result):
+        models = result.model_usage or {}
+        if models:
+            tokens = {field: sum((usage.get(key) or 0) for usage in models.values()) for field, key in
+                      (("input", "inputTokens"), ("cachedInput", "cacheReadInputTokens"), ("cacheWrite", "cacheCreationInputTokens"), ("output", "outputTokens"))}
+        else:
+            usage = result.usage or {}
+            tokens = {"input": usage.get("input_tokens"), "cachedInput": usage.get("cache_read_input_tokens"), "cacheWrite": usage.get("cache_creation_input_tokens"),
+                      "output": usage.get("output_tokens")}
+        cost = result.total_cost_usd
+        if cost is None and models and all(isinstance(usage.get("costUSD"), (int, float)) for usage in models.values()):
+            cost = sum(usage["costUSD"] for usage in models.values())
+        recordCall(self.usage, **tokens, cost=cost)
 
     def input(self, prompt):
         with self.lock:
@@ -572,15 +622,18 @@ def readCodexAccount():
     return {"signedIn": True, "type": account.get("type"), "email": account.get("email"), "plan": account.get("planType")}
 
 
-# The models the plan of the user can use in Codex: [{"id", "name", "description", "isDefault"}].
+# The models the plan of the user can use in Codex: [{"id", "name", "description", "isDefault"}]. Codex is asked every time, and when it cannot
+# answer (no internet), the list of the last time is given (see remember in harness_utils.py).
 def listCodexModels():
-    connection = openCodex()
-    try:
-        models = connection.request("model/list", {"limit": 100}).get("data") or []
-    finally:
-        connection.close()
-    return [{"id": model["id"], "name": model.get("displayName") or model["id"], "description": model.get("description") or "", "isDefault": bool(model.get("isDefault"))}
-            for model in models if not model.get("hidden")]
+    def fetch():
+        connection = openCodex()
+        try:
+            models = connection.request("model/list", {"limit": 100}).get("data") or []
+        finally:
+            connection.close()
+        return [{"id": model["id"], "name": model.get("displayName") or model["id"], "description": model.get("description") or "", "isDefault": bool(model.get("isDefault"))}
+                for model in models if not model.get("hidden")]
+    return remember("codex-models", fetch, 0, errors=(ModelError, OSError))
 
 
 # A sign-in with ChatGPT, through Codex. start gives what the user must open: {"url"} for the browser (Codex receives the answer on
@@ -675,6 +728,10 @@ class CodexModel:
         self.name = name or DEFAULT_CLI_MODEL
         self.report = report or (lambda message: None)
         self.usage = {"calls": 0, "input": 0, "output": 0}
+        # How Codex is signed in, read when it connects: chatgpt (the plan pays, unless the plan is billed by use) or apiKey (OpenAI bills every
+        # use), see priceOfModel.
+        self.accountType = "chatgpt"
+        self.planType = ""
         self.loop = None
         self.connection = None
         self.turn = None
@@ -695,6 +752,8 @@ class CodexModel:
             if not account.get("account") and account.get("requiresOpenaiAuth", True):
                 self.close()
                 raise ModelError("Codex is not signed in. Sign in with ChatGPT in the step of the models, then start again.")
+            self.accountType = (account.get("account") or {}).get("type") or "other"
+            self.planType = (account.get("account") or {}).get("planType") or ""
         return self.connection
 
     def close(self):
@@ -771,9 +830,8 @@ class CodexModel:
             self.turn["done"].wait()
             turn, self.turn = self.turn, None
         usage = turn["usage"] or {}
-        self.usage["calls"] += 1
-        self.usage["input"] += usage.get("inputTokens") or 0
-        self.usage["output"] += usage.get("outputTokens") or 0
+        cached = min(usage.get("cachedInputTokens") or 0, usage.get("inputTokens") or 0)
+        recordCall(self.usage, input=(usage.get("inputTokens") or 0) - cached, cachedInput=cached, output=usage.get("outputTokens"), missing=not usage)
         result = turn["result"]
         if result is None:
             self.close()

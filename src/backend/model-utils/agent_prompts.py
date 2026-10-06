@@ -203,6 +203,9 @@ RULES
 - Use only the tasks, the models and the settings of the lists. Never invent one.
 - Keep the swarm as small as the mission allows: every agent costs the user time and money. Never give the same work to two agents.
 - Prefer the models marked ready. The others need something from the user first, like an API key.
+- Mind the cost. Every call of an API model is billed to the user, you included. Stay within the budget of the mission when there is one: each API
+  model sets aside the price of 1 million of its tokens, and only the models that fit in what is left are listed. A local model on the GPUs and
+  Codex (paid by the plan of the user) cost nothing from the budget. When the money runs low, propose to remove the agents that are not needed.
 - An agent that needs the work of another agent waits for it, and its settings say what it does with that work.
 - Never propose again what the user rejected, unless the user asked for it since."""
 
@@ -223,8 +226,11 @@ THE TASKS AN AGENT CAN HAVE
 THE MODELS YOU CAN CHOOSE
 {models}
 
+THE COST OF THE MISSION
+{costs}
+
 YOUR WORK NOW
-Build the swarm for this mission. Think about the tasks the mission needs, about which agent needs the work of another, and about the model that fits each task.
+Build the swarm for this mission, with {most} agents at most. Think about the tasks the mission needs, about which agent needs the work of another, and about the model that fits each task.
 Then reply with exactly one <swarmup_build> block, followed by at most three sentences for the user about the swarm you propose."""
 
 
@@ -264,6 +270,9 @@ THE TASKS AN AGENT CAN HAVE
 THE MODELS YOU CAN CHOOSE NOW
 {models}
 
+THE COST OF THE MISSION
+{costs}
+
 WHAT THE USER ALREADY DECIDED ABOUT YOUR PROPOSALS
 {decisions}
 
@@ -272,7 +281,8 @@ Decide if the swarm needs a change now. Propose one only when it clearly helps t
 - the user asked you for something that no agent of the swarm does: add an agent for it;
 - an agent is not needed anymore, or does the same work as another: remove it;
 - an agent finished, nobody waits for it anymore, and its local model holds memory of the GPUs that is needed: remove it;
-- an agent that has not started has a model that does not fit its task: change its model.
+- an agent that has not started has a model that does not fit its task: change its model;
+- the budget runs low: remove the agents that are not needed, or give an agent that has not started a cheaper model.
 Most of the time no change is needed. Then reply exactly: NO CHANGE
 Otherwise reply only with one block for each change."""
 
@@ -293,6 +303,9 @@ THE TASKS AN AGENT CAN HAVE
 
 THE MODELS YOU CAN CHOOSE NOW
 {models}
+
+THE COST OF THE MISSION
+{costs}
 
 YOUR WORK NOW
 You wrote what follows. It looks like a change of the swarm, but it was not in a block, so SwarmUP did nothing and the user was not asked:

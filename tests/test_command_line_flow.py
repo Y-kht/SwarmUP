@@ -20,6 +20,7 @@ from models_library import getModelInfo
 from harness_utils import ConnectionLost
 from tasks_library import NO_MESSENGER
 from test_harness_utils import DraftLoop, FakeAgent
+from test_leader_utils import usePrices
 from test_saved_swarms import waitUntil
 
 GPUS = [{"name": "RTX A5000", "total": 25.8, "free": 25.3}, {"name": "RTX A5000", "total": 25.8, "free": 25.8}]
@@ -58,6 +59,7 @@ class GpuTestCase(unittest.TestCase):
     gpus = GPUS
 
     def setUp(self):
+        usePrices(self)
         self.currentGpus = [dict(gpu) for gpu in self.gpus]
         for target in (harness_utils, cli):
             patcher = mock.patch.object(target, "readGpus", lambda: self.currentGpus)
@@ -732,13 +734,16 @@ class ModelFlowCase(GpuTestCase):
 
 
 class LocalModelTests(ModelFlowCase):
-    def testTheListShowsTheVramOfEachModelAndRefusesTheOnesThatDoNotFit(self):
-        script = Script(["1", "5", "1"])
+    def testTheFirstListOnlyShowsTheModelsThatFitAndTheOthersAreRefused(self):
+        script = Script(["1", "4", "2", "4", "1"])
         info, model = self.choose(script)
         text = script.text()
         self.assertEqual(info["name"], "google/gemma-4-E4B-it")
         self.assertIn("  1. google/gemma-4-E4B-it (19.2 GB)", script.said)
-        self.assertIn("  5. meta-llama/Llama-3.3-70B-Instruct (169.4 GB, gated)  [too big for the GPUs]", script.said)
+        self.assertIn("  3. google/gemma-4-12B-it (28.8 GB)", script.said)
+        self.assertIn("  4. Show all the models of the library", script.said)
+        self.assertIn("3 recommended models need more VRAM than the other agents leave, so they are not shown here. They are in the list of all the models.", text)
+        self.assertIn("  4. meta-llama/Llama-3.3-70B-Instruct (169.4 GB, gated)  [too big for the GPUs]", script.said)
         self.assertIn("The number in parentheses is the VRAM, in GB, that the model is expected to need.", text)
         self.assertEqual(script.said.count("Models recommended for this task, from the smallest to the largest (type back to choose again where the model runs):"), 2)
         self.assertIn("meta-llama/Llama-3.3-70B-Instruct needs about 169.4 GB of VRAM, but your GPUs only have 51.6 GB in total. Choose a smaller model or an API model.", text)
@@ -768,12 +773,12 @@ class LocalModelTests(ModelFlowCase):
         self.add(Script(["1", "2"]), "Writer", 1, 3)
         self.add(Script(["1", "3"]), "Writer2", 2, 3)
         self.assertEqual((self.swarm.getNeededVram(), self.swarm.getVramStatus()["left"]), (50.2, 1.4))
-        script = Script(["1", "1", "back", "2", "1", "n", "n"], ["sk"])
+        script = Script(["1", "back", "2", "1", "n", "n"], ["sk"])
         info, model = self.choose(script, "Writer3", 3, 3)
         text = script.text()
-        self.assertTrue(all("[too big for the GPUs]" in label for label in script.said if label.startswith(("  1. ", "  2. ", "  3. ", "  4. ", "  5. ", "  6. ")) and "GB)" in label))
-        self.assertIn("google/gemma-4-E4B-it needs about 19.2 GB of VRAM. The other agents already take 50.2 GB and your GPUs have 51.6 GB in total, so there is no room left. "
-                      "Choose a smaller model or an API model.", text)
+        self.assertIn("6 recommended models need more VRAM than the other agents leave, so they are not shown here.", text)
+        self.assertIn("  1. Show all the models of the library", script.said)
+        self.assertNotIn("  1. google/gemma-4-E4B-it (19.2 GB)  [too big for the GPUs]", script.said)
         self.assertIn("(type back to choose again where the model runs)", text)
         self.assertEqual((info["name"], info["local"]), ("claude-sonnet-5-5", False))
         cli.buildAgent(script.console(), self.swarm, self.spec("Writer3"), info, model)
@@ -801,18 +806,18 @@ class LocalModelTests(ModelFlowCase):
         self.assertFalse(info["local"])
 
     def testAllTheModelsOfTheLibraryCanBeBrowsedByFamily(self):
-        script = Script(["1", "7", "1", "1"])
+        script = Script(["1", "4", "1", "1"])
         info, model = self.choose(script)
         text = script.text()
         self.assertIn("Families of local models", text)
         self.assertIn(f"  1. qwen ({len(cli.MODELS_LOCAL['qwen'])} models)", script.said)
         self.assertIn("  1. Qwen/Qwen3.5-0.8B (2.2 GB)", "\n".join(script.said).split("\n"))
         self.assertEqual(info["name"], "Qwen/Qwen3.5-0.8B")
-        script = Script(["1", "7", "13", "7", "1", str(len(cli.MODELS_LOCAL["qwen"]) + 1), "1"])
+        script = Script(["1", "4", "13", "4", "1", str(len(cli.MODELS_LOCAL["qwen"]) + 1), "1"])
         self.assertEqual(self.choose(script)[0]["name"], "google/gemma-4-E4B-it")
 
     def testALocalModelCanBeTypedAndItsSizeIsFoundOnHuggingFace(self):
-        script = Script(["1", "8", "badname", "someone/custom-7b", "1"])
+        script = Script(["1", "5", "badname", "someone/custom-7b", "1"])
         with mock.patch.object(cli, "lookupHuggingFace", lambda name: {"billions": 7.0, "gated": False}):
             info, model = self.choose(script)
         self.assertEqual((info["name"], info["billions"], info["vram"]), ("someone/custom-7b", 7.0, 16.8))
@@ -820,7 +825,7 @@ class LocalModelTests(ModelFlowCase):
         self.assertIn("Found on Hugging Face. It has 7.0 billion parameters.", script.said)
 
     def testATypedModelThatCannotBeFoundOrHasNoPublishedSizeIsHandled(self):
-        script = Script(["1", "8", "someone/ghost", "8", "someone/mystery", "many", "6"])
+        script = Script(["1", "5", "someone/ghost", "5", "someone/mystery", "many", "6"])
         def lookup(name):
             if name == "someone/ghost":
                 raise cli.ModelError("There is no model called someone/ghost on Hugging Face. Check how it is written.")
@@ -833,7 +838,7 @@ class LocalModelTests(ModelFlowCase):
         self.assertEqual((info["name"], info["billions"]), ("someone/mystery", 6.0))
 
     def testAGatedModelNeedsTheLicenseAndAToken(self):
-        script = Script(["1", "7", "2", "1"], ["hf_abc"])
+        script = Script(["1", "4", "2", "1"], ["hf_abc"])
         info, model = self.choose(script)
         self.assertEqual(info["name"], "meta-llama/Llama-3.2-1B-Instruct")
         self.assertIn("is a gated model: accept its license at https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct", script.text())
@@ -841,7 +846,7 @@ class LocalModelTests(ModelFlowCase):
         self.assertEqual(self.created[0][2], "hf_abc")
         self.tokens.clear()
         cli.os.environ["HF_TOKEN"] = "from-env"
-        script = Script(["1", "7", "2", "1"])
+        script = Script(["1", "4", "2", "1"])
         self.choose(script)
         self.assertEqual(self.tokens, {})
 
@@ -880,8 +885,9 @@ class ApiModelTests(ModelFlowCase):
         info, model = self.choose(script)
         text = script.text()
         self.assertEqual((info["name"], info["provider"]), ("claude-sonnet-5-5", "claude"))
-        self.assertIn("  1. claude-sonnet-5-5 (Anthropic)", script.said)
-        self.assertIn("  2. gpt-6-luna (OpenAI)", script.said)
+        self.assertIn("  1. claude-sonnet-5-5 (Anthropic, $15.00 per 1M tokens)", script.said)
+        self.assertIn("  2. gpt-6-luna (OpenAI, $10.00 per 1M tokens)", script.said)
+        self.assertIn("  3. gemini-3.8-flash (Google, price unknown)", script.said)
         self.assertIn("Type p 2 for the price of model 2, or p all for the prices of all of them (type back to choose again where the model runs):", text)
         self.assertEqual(text.count("input $3.0 and output $15.0 per 1 million tokens, cached input $0.3. Context window: 200,000 tokens."), 1 + 2 + 4 + 1)
         self.assertIn("  gpt-6-luna: input $3.0", text)
@@ -895,6 +901,28 @@ class ApiModelTests(ModelFlowCase):
         script = Script(["2", "1", "n", "n"])
         self.choose(script, "Writer2", 2)
         self.assertNotIn("Create one at", script.text())
+
+    def testTheBudgetLeftHidesTheModelsThatCostMoreAndAnAgentCountsWhatItSetAside(self):
+        self.swarm.costs.setBudget(20)
+        cli.os.environ.update(ANTHROPIC_API_KEY="sk-a", OPENAI_API_KEY="sk-o", GEMINI_API_KEY="sk-g")
+        script = Script(["2", "1", "n", "n"])
+        info, model = self.choose(script)
+        self.assertIn("$20.00 of the budget of the mission is left for this model.", script.text())
+        self.assertIn("  1. claude-sonnet-5-5 (Anthropic, $15.00 per 1M tokens)", script.said)
+        cli.buildAgent(script.console(), self.swarm, self.spec("Writer"), info, model)
+        script = Script(["2", "1", "n", "n"])
+        info, model = self.choose(script, "Writer2", 2)
+        text = script.text()
+        self.assertIn("$5.00 of the budget of the mission is left for this model.", text)
+        self.assertIn("2 recommended models cost more than that per 1 million tokens, so they are not shown here.", text)
+        self.assertIn("  1. gemini-3.8-flash (Google, price unknown)", script.said)
+        self.assertIn("  2. deepseek-v4-pro (DeepSeek, $2.00 per 1M tokens)", script.said)
+        self.assertNotIn("claude-sonnet-5-5 (Anthropic", "\n".join(script.said))
+        self.assertEqual(info["name"], "gemini-3.8-flash")
+        script = Script(["2", "3", "2", "3", "n", "n"])
+        info, model = self.choose(script, "Writer2", 2)
+        self.assertIn("  3. claude-opus-5-5 ($25.00 per 1M tokens)  [over your budget]", script.said)
+        self.assertIn("Warning: claude-opus-5-5 costs more per 1 million tokens than the $5.00 left of the budget.", script.text())
 
     def testTheKeyOfTheEnvironmentIsUsedWithoutAskingAndAPriceCanBeUnavailable(self):
         cli.os.environ["OPENAI_API_KEY"] = "from-env"
@@ -999,13 +1027,17 @@ class ProgramCase(GpuTestCase):
                 patcher = mock.patch.object(target, name, replacement)
                 patcher.start()
                 self.addCleanup(patcher.stop)
+        usePrices(self)
         environment = mock.patch.dict(cli.os.environ, {"ANTHROPIC_API_KEY": "sk-from-env"})
         environment.start()
         self.addCleanup(environment.stop)
         self.addCleanup(lambda: self.assertFalse([name for name in threading.enumerate() if name.name.startswith("never")]))
 
-    # builder is the first answer: who builds the swarm (1: the user, agent by agent).
-    def program(self, answers, secrets=(), builder="1"):
+    # builder is the first answer: who builds the swarm (1: the user, agent by agent). budget is the answer after the mission (empty: no budget).
+    def program(self, answers, secrets=(), builder="1", budget=""):
+        answers = list(answers)
+        if builder:
+            answers.insert(1 if builder == "2" else 2, budget)
         script = Script([builder, *answers] if builder else answers, secrets)
         cli.runProgram(script.console())
         self.assertEqual(script.answers, [], "The program did not ask all the questions of the script.")
@@ -1153,8 +1185,9 @@ class EndToEndTests(ProgramCase):
         self.assertIn("Who builds the swarm?", text)
         self.assertIn("--- Model of agent 1 of 1: Leader (leader) ---", text)
         self.assertIn("This leader builds the swarm, follows it, and proposes changes to you", text)
-        self.assertIn("[Leader] proposes a swarm of 2 agents for your mission:\n1. Writer: Writer (texts, essays, articles), with claude-sonnet-5-5 (Anthropic API). It starts right away.", text)
-        self.assertIn("2. Shortener: Writer (texts, essays, articles), with claude-haiku-4-5 (Anthropic API). It waits for Writer.", text)
+        self.assertIn("[Leader] proposes a swarm of 2 agents for your mission:\n1. Writer: Writer (texts, essays, articles), with claude-sonnet-5-5 (Anthropic API), "
+                      "$15.00 per 1M tokens. It starts right away.", text)
+        self.assertIn("2. Shortener: Writer (texts, essays, articles), with claude-haiku-4-5 (Anthropic API), $5.00 per 1M tokens. It waits for Writer.", text)
         self.assertIn("Why: Here is my swarm.", text)
         self.assertIn("Shortener [writer] claude-haiku-4-5, API -> waiting for Writer  waits for: Writer (waiting)", text)
         self.assertIn("draft.md", leader.prompts[0])

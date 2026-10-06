@@ -30,13 +30,13 @@ import traceback
 from pathlib import Path
 
 import agent_prompts as prompts
-from harness_utils import USER_NAME, ConnectionLost, MessagingError, Swarm, checkVram, findTelegramChats, readGpus, stripFences
+from harness_utils import (USER_NAME, ConnectionLost, MessagingError, MissionCosts, Swarm, checkVram, describeCached, findTelegramChats, formatDollars, loadSettings,
+                           readGpus, stripFences)
 from model_clients import ModelError, checkCodex, findMissingPackages, getApiKey, listCodexModels, readCodexAccount
 from models_library import API_KEYS, DEFAULT_CLI_MODEL, MODELS_API, MODELS_CLI, MODELS_LOCAL, RECOMMENDED_API, RECOMMENDED_LOCAL, getModelInfo, getVram, isGated
 from sources_library import ALL_NEWS_OUTLETS, NEWS_OUTLETS, PAPER_PUBLISHERS
 from tasks_library import DEFAULT_LOOPS, SECRET_KINDS, TASKS, answerKey, buildLoop, checkAgentName, describeLoop, getDefault, getFields, isAsked, publicAnswers, readAnswers
 
-MAX_AGENTS = 10
 REPAIR_ATTEMPTS = 3
 MAX_REVISIONS = 8
 MAX_SUPERVISIONS = 12
@@ -590,9 +590,14 @@ def describeFiles(folder):
 
 # Everything the leader is told and checked against. keys and tokens are those of the program that runs the swarm (the API keys and
 # Hugging Face tokens the user gave): the ones the user gives for an agent of the leader go in them too, and stay in memory only.
+# costs is what the mission spent, with its budget (MissionCosts in harness_utils.py), and maxAgents the most agents the leader may put in
+# the swarm (the settings of the user). The local models that do not fit in the VRAM left, and the API models whose price of 1 million tokens
+# is more than the budget left, are not offered to the leader, and refused if it chooses them anyway.
 class LeaderCatalog:
-    def __init__(self, mission, folder, leader, leaderModel, keys=None, tokens=None):
+    def __init__(self, mission, folder, leader, leaderModel, keys=None, tokens=None, costs=None, maxAgents=None):
         self.mission, self.leader, self.leaderModel = mission, leader, leaderModel
+        self.costs = costs if costs is not None else MissionCosts()
+        self.maxAgents = maxAgents or loadSettings()["maxAgents"]
         self.folder = Path(folder).expanduser().resolve() if folder else None
         self.keys = keys if keys is not None else {}
         self.tokens = tokens if tokens is not None else {}
@@ -626,11 +631,38 @@ class LeaderCatalog:
     def rules(self):
         return prompts.LEADER_RULES.format(leader=self.leader, user=USER_NAME)
 
+    # The price of 1 million tokens of a model (the higher of reading and writing) in US dollars, 0 for a free model, None if it is not known.
+    def reference(self, info):
+        return self.costs.priceOf(info)["reference"]
+
+    # The team before the swarm exists: only the leader, which sets aside the price of its model too.
+    def leaderTeam(self):
+        return [{"agent": self.leader, "model": self.leaderModel, "finished": False}] if self.leaderModel else []
+
+    def describePrice(self, info):
+        price = self.reference(info)
+        return "price unknown" if price is None else "free" if price == 0 else f"{formatDollars(price)} per 1M tokens"
+
+    # What the mission spent and what is left of its budget, for the prompts of the leader.
+    def describeCosts(self, team):
+        report = self.costs.report(team, wait=True)
+        unpriced = f", and {report['unpriced']:,} tokens of models whose price is not known" if report["unpriced"] else ""
+        lines = [f"The mission spent {formatDollars(report['spent'])} so far{unpriced}. You and every agent cost money with each call of an API model."]
+        if report["budget"] is None:
+            lines.append("The user set no budget, but keep the cost low: prefer the cheaper model when it fits the task as well.")
+        else:
+            lines.append(f"The budget of the mission is {formatDollars(report['budget'])}. The agents that did not finish set aside {formatDollars(report['setAside'])} "
+                         f"(the price of 1 million tokens of their model, less what they spent), so {formatDollars(max(report['left'], 0))} is left for new models."
+                         + (" The budget is spent: propose no new API model, and remove the agents that are not needed." if report["left"] <= 0 else ""))
+        lines += [f"- {row['agent']}: {formatDollars(row['cost'])} ({row['calls']} calls, {row['input']:,} tokens read, {row['output']:,} written)" for row in report["agents"]]
+        return "\n".join(lines)
+
     def describeFolder(self):
         return str(self.folder) if self.folder else "No folder: the agents save nothing on their own, and no file can be used."
 
-    # taken is the VRAM in GB the models already chosen take (the leader, and the other agents).
-    def describeModels(self, taken=0.0):
+    # taken is the VRAM in GB the models already chosen take (the leader, and the other agents), and money what is left of the budget for new
+    # models in US dollars (None without a budget).
+    def describeModels(self, taken=0.0, money=None):
         status = self.readStatus()
         gpus = status["gpus"]
         gpu = checkVram(taken, gpus)
@@ -648,33 +680,56 @@ class LeaderCatalog:
                 fitting = [f"{name} ({getVram(size)} GB)" for name, size in models.items() if getVram(size, 4) <= left]
                 if fitting:
                     lines.append(f"- {family}: {', '.join(fitting)}")
-        lines.append("API MODELS run on the servers of their company, and the user pays for what they use.")
+        lines.append("API MODELS run on the servers of their company, and the user pays for what they use. After each model, the price of 1 million of its tokens "
+                     "(the higher of reading and writing), in US dollars.")
+        prices = describeCached("model-prices")
+        if prices["fetchedAt"]:
+            lines.append(f"These prices are those of {prices['fetchedAt']}" + (", the last time there was an internet connection: they may have changed since." if prices["offline"] else "."))
+        if money is not None:
+            lines.append(f"{formatDollars(max(money, 0))} of the budget of the mission is left for new models. Each new API model sets aside the price of 1 million of its "
+                         "tokens, so only the models whose price fits in what is left are listed.")
+        hidden = 0
         for provider, models in MODELS_API.items():
             missing = status["apiMissing"].get(provider)
             ready = f"cannot be used: the package {', '.join(missing)} is not installed" if missing else \
                 "ready, the API key is set" if self.hasKey(provider) else "not ready: the user must give an API key first"
-            lines.append(f"- {API_KEYS[provider]['company']} ({ready}): {', '.join(models)}")
+            shown = [name for name in models if self.withinBudget(getModelInfo(name, provider=provider), money)]
+            hidden += len(models) - len(shown)
+            if shown:
+                lines.append(f"- {API_KEYS[provider]['company']} ({ready}): " + ", ".join(f"{name} ({self.describePrice(getModelInfo(name, provider=provider))})" for name in shown))
+        if hidden:
+            lines.append(f"({hidden} other API models cost more than what is left of the budget: they cannot be chosen.)")
         lines.append("CODING AGENTS are programs on the computer of the user that think like a model and can also read files and run commands, each time with "
                      "the permission of the user. They fit the coder task best.")
         claude = f"cannot be used: the package {', '.join(status['claudeMissing'])} is not installed" if status["claudeMissing"] else \
             "ready" if self.hasKey("claude") else "not ready: the user must give an Anthropic API key first"
-        lines.append(f"- claude-code: Claude Code, billed to the Anthropic API key of the user ({claude}). Write \"claude-code\" for its default model, "
-                     "or \"claude-code:<model>\" with one of the Anthropic models above.")
+        lines.append(f"- claude-code: Claude Code, billed to the Anthropic API key of the user ({claude}). Write \"claude-code\" for its default model "
+                     "(its price is only known once it ran), or \"claude-code:<model>\" with one of the Anthropic models listed above, at the same price.")
         codex = status["codex"]
         models = f", or \"codex:<model>\" with one of: {', '.join(codex['models'])}" if codex["models"] else ""
         lines.append(f"- codex: Codex, with the ChatGPT plan of the user ({'ready' if codex['ready'] else 'cannot be used: ' + codex['problem'].rstrip('.')}). "
-                     f"Write \"codex\" for its default model{models}.")
+                     f"Its use is paid by the plan, not by the budget. Write \"codex\" for its default model{models}.")
         lines.append("RECOMMENDED for each task, the lighter first:")
         local = bool(gpus) and not status["localMissing"]
         for key, task in TASKS.items():
-            names = [name for name in RECOMMENDED_LOCAL[task["recommend"]] if local and getVram(getModelInfo(name)["billions"], 4) <= left][:3] + RECOMMENDED_API[task["recommend"]]
-            lines.append(f"- {key}: {', '.join(names)}")
+            names = [name for name in RECOMMENDED_LOCAL[task["recommend"]] if local and getVram(getModelInfo(name)["billions"], 4) <= left][:3] + \
+                [name for name in RECOMMENDED_API[task["recommend"]] if self.withinBudget(getModelInfo(name), money)]
+            lines.append(f"- {key}: {', '.join(names) or 'no model of the list fits what is left'}")
         return "\n".join(lines)
+
+    # Whether a model can be chosen with the money left of the budget (always without a budget, and for a model whose price is not known).
+    def withinBudget(self, info, money):
+        price = self.reference(info) if money is not None else None
+        return price is None or price <= money
+
+    def moneyLeft(self, team):
+        return self.costs.left(team, wait=True)["left"]
 
     def buildPrompt(self):
         taken = self.leaderModel["vram"] if self.leaderModel else 0.0
         return prompts.LEADER_BUILD_PROMPT.format(rules=self.rules(), mission=self.mission, folder=self.describeFolder(), files=describeFiles(self.folder),
-                                                  tasks=describeTasks(), models=self.describeModels(taken))
+                                                  tasks=describeTasks(), models=self.describeModels(taken, self.moneyLeft(self.leaderTeam())),
+                                                  costs=self.describeCosts(self.leaderTeam()), most=self.maxAgents)
 
     def repairPrompt(self, problems, previous, blocks):
         return f"{self.rules()}\n\n" + prompts.LEADER_REPAIR_PROMPT.format(problems="\n".join(f"- {problem}" for problem in problems), previous=previous, blocks=blocks)
@@ -684,20 +739,23 @@ class LeaderCatalog:
         others = [name for name, member in members if name != leader]
         changeable = [name for name, member in members if name != leader and not member["started"] and member["status"] == "waiting"]
         lines = [("- Add: yes, a new agent joins the agents at work now. It can wait for: " + (", ".join(others) or "nobody") + "." if canJoin(swarm) else
-                  "- Add: no, no agent can join now."), f"- The swarm has {len(others)} agents besides you, and can have {MAX_AGENTS} at most.",
+                  "- Add: no, no agent can join now."), f"- The swarm has {len(others)} agents besides you, and can have {self.maxAgents} at most.",
                  f"- Remove: {', '.join(others)}." if others else "- Remove: nobody, you are alone.",
                  f"- Change the model: {', '.join(changeable)} (they did not start yet)." if changeable else "- Change the model: nobody, every agent already started."]
         return "\n".join(lines)
 
     def supervisePrompt(self, swarm, events, decisions):
+        team = swarm.describeTeam()
         return prompts.LEADER_SUPERVISE_PROMPT.format(rules=self.rules(), mission=self.mission, folder=self.describeFolder(), progress=swarm.describeProgress(),
                                                       events="\n".join(f"- {event}" for event in events), possible=self.describePossible(swarm), tasks=describeTasks(),
-                                                      models=self.describeModels(swarm.getNeededVram()), decisions=decisions)
+                                                      models=self.describeModels(swarm.getNeededVram(), self.moneyLeft(team)), decisions=decisions,
+                                                      costs=self.describeCosts(team))
 
     def confirmPrompt(self, swarm, sentences):
+        team = swarm.describeTeam()
         return prompts.LEADER_CONFIRM_PROMPT.format(rules=self.rules(), mission=self.mission, progress=swarm.describeProgress(), possible=self.describePossible(swarm),
-                                                    tasks=describeTasks(), models=self.describeModels(swarm.getNeededVram()),
-                                                    sentences="\n".join(f'"{sentence}"' for sentence in sentences))
+                                                    tasks=describeTasks(), models=self.describeModels(swarm.getNeededVram(), self.moneyLeft(team)),
+                                                    sentences="\n".join(f'"{sentence}"' for sentence in sentences), costs=self.describeCosts(team))
 
     def findTask(self, value):
         target = letters(value)
@@ -744,8 +802,12 @@ class LeaderCatalog:
         return None, f"'{value}' is not a model of the list of models. Write the name of a model exactly as the list gives it."
 
     # Why a model cannot be used now, or "". needs is filled with what the user must give first (an API key, a Hugging Face token).
-    def checkUsable(self, info, taken, needs):
+    # money is what is left of the budget for new models (None without a budget).
+    def checkUsable(self, info, taken, needs, money=None):
         status = self.readStatus()
+        if not self.withinBudget(info, money):
+            return (f"{info['name']} costs {formatDollars(self.reference(info))} per 1 million tokens, but only {formatDollars(max(money, 0))} is left of the budget of the mission "
+                    "for new models. Choose a cheaper model, a local model, or Codex.")
         if info.get("cli") == "codex":
             return "" if status["codex"]["ready"] else f"Codex cannot be used now: {status['codex']['problem']} Choose another model."
         if info.get("cli") == "claude-code" and status["claudeMissing"]:
@@ -835,7 +897,7 @@ class LeaderCatalog:
     # Checks one agent of the leader. names are the names already taken (the leader included), waitable the agents it may wait for, and taken
     # the VRAM in GB of the models already chosen. It returns the agent ready to be made, with what the user must still give (needs), and the
     # errors to tell the leader.
-    def checkAgent(self, raw, names, waitable, taken):
+    def checkAgent(self, raw, names, waitable, taken, money=None):
         keys, extra = normalizeKeys(raw)
         errors, needs = [], {}
         task = self.findTask(keys.get("task")) or (self.findTask(keys.get("role")) if not keys.get("task") else None)
@@ -855,7 +917,7 @@ class LeaderCatalog:
         if problem:
             errors.append(problem)
         elif info:
-            problem = self.checkUsable(info, taken, needs)
+            problem = self.checkUsable(info, taken, needs, money)
             if problem:
                 errors.append(problem)
         waits = []
@@ -885,7 +947,8 @@ class LeaderCatalog:
         else:
             values = {}
         return {"name": name, "task": task, "model": info, "waitsFor": waits, "values": values, "answers": answers, "needs": missing, "key": needs.get("key"),
-                "token": needs.get("token"), "why": str(keys.get("why") or "").strip(), "description": description, "errors": errors}
+                "token": needs.get("token"), "why": str(keys.get("why") or "").strip(), "description": description, "errors": errors,
+                "price": self.describePrice(info) if info else ""}
 
     # The answers of the task from the values. The settings the leader did not give, and that are needed (a password, the address of the user),
     # are what the user must give: the fields of missing. A value the leader gave that is wrong is an error for the leader.
@@ -919,17 +982,20 @@ class LeaderCatalog:
     # The whole swarm of the leader: (agents, errors). The agents may wait for each other in any order, but never in a circle.
     def checkBuild(self, data):
         raws = data.get("agents") or []
-        if len(raws) > MAX_AGENTS:
-            return [], [f"The swarm can have {MAX_AGENTS} agents at most, and you proposed {len(raws)}. Keep only the agents the mission needs."]
+        if len(raws) > self.maxAgents:
+            return [], [f"The swarm can have {self.maxAgents} agents at most, and you proposed {len(raws)}. Keep only the agents the mission needs."]
         planned = [cleanName(normalizeKeys(raw)[0].get("name")) for raw in raws]
         agents, errors, names = [], [], [self.leader]
         taken = self.leaderModel["vram"] if self.leaderModel else 0.0
+        money = self.moneyLeft(self.leaderTeam())
         for number, raw in enumerate(raws, 1):
             waitable = [name for name in planned if name]
-            agent = self.checkAgent(raw, names, waitable, taken)
+            agent = self.checkAgent(raw, names, waitable, taken, money)
             errors += [f"Agent {number} ({agent['name'] or 'without a name'}): {error}" for error in agent["errors"]]
             names.append(agent["name"])
             taken = round(taken + (agent["model"]["vram"] if agent["model"] else 0.0), 1)
+            if money is not None and agent["model"]:
+                money -= self.reference(agent["model"]) or 0.0
             agents.append(agent)
         if not raws:
             errors.append("The swarm needs at least one agent.")
@@ -966,7 +1032,10 @@ class LeaderCatalog:
             return None, [f"{name} already started, so its model cannot change. Propose to remove it and to add a new agent instead, if it is really needed."]
         needs = {}
         info, problem = self.findModel(keys.get("model"), int(keys["bits"]) if str(keys.get("bits", "")).strip() in ("16", "8", "4") else None)
-        problem = problem or self.checkUsable(info, swarm.getNeededVram(replacing=name), needs)
+        money = self.moneyLeft(swarm.describeTeam())
+        if money is not None and member["model"]:
+            money += self.reference(member["model"]) or 0.0
+        problem = problem or self.checkUsable(info, swarm.getNeededVram(replacing=name), needs, money)
         if problem:
             return None, [problem]
         if member["model"] and all(member["model"].get(key) == info.get(key) for key in ("name", "bits", "cli", "provider")):
@@ -980,10 +1049,10 @@ class LeaderCatalog:
         if not canJoin(swarm):
             return None, ["No agent can join the swarm now: you already started your final work, or the swarm is not running."]
         others = [name for name in swarm.getAgents() if name != swarm.getLeader()]
-        if len(others) >= MAX_AGENTS:
-            return None, [f"The swarm already has {MAX_AGENTS} agents besides you, the most it can have. Propose to remove one first, if it is not needed."]
+        if len(others) >= self.maxAgents:
+            return None, [f"The swarm already has {self.maxAgents} agents besides you, the most the user allows. Propose to remove one first, if it is not needed."]
         names = [*swarm.getAgents(), *swarm.departed]
-        agent = self.checkAgent(data, names, others, swarm.getNeededVram())
+        agent = self.checkAgent(data, names, others, swarm.getNeededVram(), self.moneyLeft(swarm.describeTeam()))
         if agent["errors"]:
             return None, agent["errors"]
         details = describeAgent(agent)
@@ -1008,13 +1077,15 @@ def describeAgent(agent):
         ([f"A Hugging Face token for {agent['token']} (optional)"] if agent.get("token") else [])
     info = agent["model"]
     return {"name": agent["name"], "task": agent["task"], "label": TASKS[agent["task"]]["label"], "role": TASKS[agent["task"]]["role"], "model": modelLabel(info),
+            "price": agent.get("price", ""),
             "modelKind": "cli" if info.get("cli") else "local" if info["local"] else "api", "waitsFor": agent["waitsFor"], "settings": settings, "why": agent["why"],
             "needs": needs, "description": agent["description"]}
 
 
 def describeAgentText(shown, number=None):
     waits = f"It waits for {', '.join(shown['waitsFor'])}." if shown["waitsFor"] else "It starts right away."
-    lines = [f"{f'{number}. ' if number else ''}{shown['name']}: {shown['label']}, with {shown['model']}. {waits}", f"   What it does: {shown['description']}"]
+    price = f", {shown['price']}" if shown.get("price") else ""
+    lines = [f"{f'{number}. ' if number else ''}{shown['name']}: {shown['label']}, with {shown['model']}{price}. {waits}", f"   What it does: {shown['description']}"]
     lines += [f"   Why: {shown['why']}"] if shown["why"] else []
     lines += [f"   {item['label']}: {item['value']}" for item in shown["settings"]]
     lines += [f"   You will be asked for: {'; '.join(shown['needs'])}"] if shown["needs"] else []

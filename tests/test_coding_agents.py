@@ -310,6 +310,9 @@ class ClaudeCodeTests(FolderTestCase):
         with mock.patch.dict(os.environ, {"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-not-real", "ANTHROPIC_AUTH_TOKEN": "not-real"}):
             self.assertEqual(model.input("Hello."), "Hello.")
         self.assertEqual(model.usage["calls"], 1)
+        [record] = model.usage["records"]
+        self.assertEqual((record["input"], record["output"], record["missing"]), (10, 12, False))
+        self.assertGreater(record["cost"], 0)
 
 
 @unittest.skipIf(CODEX["problem"], f"Codex cannot be used here: {CODEX['problem']}")
@@ -333,6 +336,9 @@ class CodexTests(FolderTestCase):
     def testAReadInsideTheFolderRunsAndACommandWaitsForTheUser(self):
         model, loop, server = self.agent([("tool", "exec_command", {"cmd": "cat notes.txt"}), ("tool", "exec_command", {"cmd": "touch made.txt"}), ("text", "Done.")], ["once"])
         self.assertEqual(model.input("Work."), "Done.")
+        [record] = model.usage["records"]
+        self.assertEqual((record["missing"], record["cost"], model.accountType), (False, None, "other"))
+        self.assertGreater(record["input"] + record["cachedInput"], 0)
         self.assertIn("bees", server.results[0])
         self.assertEqual([(request["action"], request["detail"]) for request in loop.asked], [("run a command", "touch made.txt")])
         self.assertTrue((self.folder / "made.txt").exists())
