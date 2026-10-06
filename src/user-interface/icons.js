@@ -93,6 +93,31 @@ const TASK_STYLE = {
 const LOGO = '<svg viewBox="0 0 64 64" aria-hidden="true"><defs><linearGradient id="lg-a" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#7C6CFF"/>' +
   '<stop offset="1" stop-color="#4F3FE0"/></linearGradient><linearGradient id="lg-b" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#FFC857"/>' +
   '<stop offset="1" stop-color="#F49B1F"/></linearGradient></defs><rect width="64" height="64" rx="16" fill="url(#lg-a)"/>' +
-  '<path d="M32 14l11 6.35v12.7L32 39.4l-11-6.35v-12.7z" fill="url(#lg-b)"/><path d="M18.5 35.5l7 4.05v8.1l-7 4.05-7-4.05v-8.1z" fill="#fff" fill-opacity=".92"/>' +
-  '<path d="M45.5 35.5l7 4.05v8.1l-7 4.05-7-4.05v-8.1z" fill="#fff" fill-opacity=".92"/>' +
-  '<path d="M25.5 43.6L29 41.6M38.5 43.6L35 41.6" stroke="#fff" stroke-opacity=".7" stroke-width="2" stroke-linecap="round"/></svg>';
+  '<g stroke="url(#lg-b)" stroke-width="2.6" stroke-linecap="round">' +
+  '<path d="M45.52 27.62L48.90 28.53"/><path d="M41.90 33.90L44.37 36.37"/><path d="M35.62 37.52L36.53 40.90"/><path d="M28.38 37.52L27.47 40.90"/>' +
+  '<path d="M22.10 33.90L19.63 36.37"/><path d="M18.48 27.62L15.10 28.53"/><path d="M18.48 20.38L15.10 19.47"/><path d="M22.10 14.10L19.63 11.63"/>' +
+  '<path d="M28.38 10.48L27.47 7.10"/><path d="M35.62 10.48L36.53 7.10"/><path d="M41.90 14.10L44.37 11.63"/><path d="M45.52 20.38L48.90 19.47"/></g>' +
+  '<g transform="translate(32 26) scale(1.75)">' +
+  '<ellipse cx="-4" cy="-2.6" rx="3.2" ry="2.2" transform="rotate(-30 -4 -2.6)" fill="#FFE9A8"/>' +
+  '<ellipse cx="4" cy="-2.6" rx="3.2" ry="2.2" transform="rotate(30 4 -2.6)" fill="#FFE9A8"/>' +
+  '<path d="M-1 -3.5Q-1.8-6.6-3.4-7.8M1-3.5Q1.8-6.6 3.4-7.8" fill="none" stroke="#2A1D57" stroke-width=".8" stroke-linecap="round"/>' +
+  '<circle r="3.8" fill="url(#lg-b)"/><path d="M-2.9 1.2h5.8M-1.8 2.9h3.6" stroke="#2A1D57" stroke-width="1.3" stroke-linecap="round"/>' +
+  '<circle cx="-1.3" cy="-1.1" r=".85" fill="#2A1D57"/><circle cx="1.3" cy="-1.1" r=".85" fill="#2A1D57"/></g>' +
+  '<g transform="translate(13 44.5) scale(1.25)">' +
+  '<ellipse cx="-4" cy="-2.6" rx="3.2" ry="2.2" transform="rotate(-30 -4 -2.6)" fill="#fff" fill-opacity=".92"/>' +
+  '<ellipse cx="4" cy="-2.6" rx="3.2" ry="2.2" transform="rotate(30 4 -2.6)" fill="#fff" fill-opacity=".92"/>' +
+  '<path d="M-1 -3.5Q-1.7-6-3.1-7M1-3.5Q1.7-6 3.1-7" fill="none" stroke="#2A1D57" stroke-width=".8" stroke-linecap="round"/>' +
+  '<circle r="3.8" fill="#FFE07A"/><path d="M-2.9 1.2h5.8M-1.8 2.9h3.6" stroke="#2A1D57" stroke-width="1.3" stroke-linecap="round"/>' +
+  '<circle cx="-1.3" cy="-1.1" r=".85" fill="#2A1D57"/><circle cx="1.3" cy="-1.1" r=".85" fill="#2A1D57"/></g>' +
+  '<g transform="translate(32 54.6) scale(1.45)">' +
+  '<ellipse cx="-4" cy="-2.6" rx="3.2" ry="2.2" transform="rotate(-30 -4 -2.6)" fill="#fff" fill-opacity=".92"/>' +
+  '<ellipse cx="4" cy="-2.6" rx="3.2" ry="2.2" transform="rotate(30 4 -2.6)" fill="#fff" fill-opacity=".92"/>' +
+  '<path d="M-1 -3.5Q-1.7-6-3.1-7M1-3.5Q1.7-6 3.1-7" fill="none" stroke="#2A1D57" stroke-width=".8" stroke-linecap="round"/>' +
+  '<circle r="3.8" fill="#FFE07A"/><path d="M-2.9 1.2h5.8M-1.8 2.9h3.6" stroke="#2A1D57" stroke-width="1.3" stroke-linecap="round"/>' +
+  '<circle cx="-1.3" cy="-1.1" r=".85" fill="#2A1D57"/><circle cx="1.3" cy="-1.1" r=".85" fill="#2A1D57"/></g>' +
+  '<g transform="translate(51 44.5) scale(1.25)">' +
+  '<ellipse cx="-4" cy="-2.6" rx="3.2" ry="2.2" transform="rotate(-30 -4 -2.6)" fill="#fff" fill-opacity=".92"/>' +
+  '<ellipse cx="4" cy="-2.6" rx="3.2" ry="2.2" transform="rotate(30 4 -2.6)" fill="#fff" fill-opacity=".92"/>' +
+  '<path d="M-1 -3.5Q-1.7-6-3.1-7M1-3.5Q1.7-6 3.1-7" fill="none" stroke="#2A1D57" stroke-width=".8" stroke-linecap="round"/>' +
+  '<circle r="3.8" fill="#FFE07A"/><path d="M-2.9 1.2h5.8M-1.8 2.9h3.6" stroke="#2A1D57" stroke-width="1.3" stroke-linecap="round"/>' +
+  '<circle cx="-1.3" cy="-1.1" r=".85" fill="#2A1D57"/><circle cx="1.3" cy="-1.1" r=".85" fill="#2A1D57"/></g></svg>';
