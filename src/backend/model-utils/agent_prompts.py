@@ -62,6 +62,11 @@ Finish with one line: VERDICT: NO PROBLEMS FOUND or VERDICT: PROBLEMS FOUND
 {document}"""
 
 
+WORKER_PROMPT = """Do this work in your folder: {request}
+Use your tools to do it for real: look at what is there, make the changes, and check them (run a command if it helps).
+When the work is done, reply with a short report for the user: what you did, which files you created or changed, and what is left to do, if anything."""
+
+
 CODER_PROMPT = """Write the complete content of the file {fileName} for this task: {task}
 It is checked by running: {command}
 Current content of the file: {current}
@@ -116,6 +121,61 @@ SwarmUP answers:
 {next}"""
 FOLDER_NEXT_ROUND = "Now ask for more if your task really needs it, or write your answer, in exactly the format the task asks for, without any <swarmup_...> request."
 FOLDER_LAST_ROUND = "You cannot ask for more files now. Write your answer, in exactly the format the task asks for, without any <swarmup_...> request."
+
+
+# ==============
+# The conversation of an agent with its model (agent_conversation.py), with the tools of agent_tools.py.
+# AGENT_SYSTEM_PROMPT is the system prompt of the whole conversation: it is written once, so the providers can keep it in their cache.
+# ==============
+AGENT_SYSTEM_PROMPT = """You are {name}, an agent of a swarm of AI agents that SwarmUP runs for one person: the user.
+Your task: {task}
+
+{workplace}
+
+HOW YOU WORK
+- You talk with SwarmUP. Each message of SwarmUP is a request of your task: a plan, a draft, a change the user asked for. Answer it with exactly
+  what it asks for, in the format it asks for, and nothing else: SwarmUP shows your answer to the user and acts on it only after the user approves it.
+- Use your tools whenever they make your work better: look at the files before you rely on them, check what you did, and do the work instead of
+  describing it. Several tools can be called at once when they do not depend on each other.
+- Changing files, running commands and reading web pages wait for the permission of the user, who sees exactly what you want to do. If the user
+  refuses, go on without it. Change files only when your task or the user asks for it: SwarmUP saves your approved answer itself. The user can put
+  back every file you change.
+- The user and the other agents write to you between your steps, marked [Message from ...]. The user comes first: follow the newest message of the
+  user, inside your own task. Use send_message to give another agent or your leader what they need from you or to ask them something, read_result
+  to read the result of an agent that finished, and team_status to see who does what.
+- Use remember to write down what you must not forget for the rest of the mission. Ask the user with ask_user only when you cannot go on without the answer."""
+
+
+FOLDER_WORKPLACE = """YOUR FOLDER
+You work in the folder {folder}, chosen by the user. Every file of it, at every depth, is yours to read (the paths are relative to it):
+{tree}"""
+
+
+SCRATCH_WORKPLACE = """YOUR FOLDER
+The user gave you no folder, so you read none of the user's files. You have an empty folder of your own, {folder}, where you can write
+whatever helps your work without asking."""
+
+
+LOOK_ONLY_PROMPT = """NOW YOU ONLY LOOK
+For this work you can look at the files and talk with your swarm, but change nothing: no file, no command, no web page."""
+
+
+CONVERSATION_REVISION_PROMPT = """Write your answer again, with this change: {feedback}
+Give the whole new answer, in the same format as before."""
+
+
+OLD_RESULT = "[This old result was taken out to keep the conversation short. Ask again if you need it.]"
+CUT_CALL = "your answer was cut because it was too long, so this call is incomplete. Do the work in smaller steps (for example edit_file instead of write_file)."
+LAST_STEP = "You have one step left for this request: give your answer now, without calling any tool."
+
+
+# A local model whose chat template has no tools calls them in its text, in this format (LocalModel in model_clients.py).
+TEXT_TOOLS_PROMPT = """YOUR TOOLS
+To use a tool, write one line per call, exactly like this, and nothing after your calls:
+<tool_call>{{"name": "read_file", "arguments": {{"path": "notes/ideas.md"}}}}</tool_call>
+SwarmUP answers with the results, then you go on. When you need no tool, write your answer without any <tool_call>.
+The tools, in JSON Schema:
+{tools}"""
 
 
 # ==============
@@ -180,7 +240,8 @@ LEADER_RULES = """You are {leader}, the leader of a swarm of AI agents in SwarmU
 The user gave you a mission. Your job is to build the swarm of agents that carries it out, and to keep the swarm right while it works.
 
 HOW SWARMUP WORKS
-- An agent has exactly one task from the list of tasks below. Its task decides what it can do, and nothing else is possible for it.
+- An agent has exactly one task from the list of tasks below. Its task decides what it does. Every agent can read the files of its folder, write to
+  the other agents and to you, and, with the permission of the user, change files and run commands. The worker task does any work in the folder.
 - An agent has one model from the list of models below: the AI that thinks for it.
 - An agent has settings: the answers its task needs (what to write about, who receives an email, which file to check...).
 - The agents work at the same time, except an agent that waits for others: it starts when they are done, and it receives their results as messages.

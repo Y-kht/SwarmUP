@@ -238,6 +238,8 @@ function agentDetail(run, agent) {
         spec?.folder ? button('Open its folder', { kind: 'ghost', size: 'sm', iconName: 'folderOpen', onClick: () => act('openFolder', { path: spec.folder }) }) : null),
         clamped(String(agent.result), `res-${agent.name}`, 900, 'draft-box')) : null,
       agent.error ? h('div', { class: 'detail-section' }, callout('danger', 'xCircle', h('b', {}, 'It did not finish.'), h('div', {}, agent.error))) : null,
+      agent.activity?.length ? h('div', { class: 'detail-section' }, h('h4', {}, finished ? 'What it did with its tools' : 'What it is doing'),
+        h('ul', { class: 'action-list' }, agent.activity.slice(-8).reverse().map(item => h('li', {}, icon('activity', 'sm'), h('span', {}, h('span', { class: 'faint' }, item.time), ' ', item.text))))) : null,
       agent.actions.length ? h('div', { class: 'detail-section' }, h('h4', {}, 'What it changed on your computer or online'),
         h('ul', { class: 'action-list' }, agent.actions.map(action => h('li', {}, icon('check', 'sm'), h('span', {}, h('span', { class: 'faint' }, action.time.slice(11)), ' ', action.text))))) : null,
       agent.startAt ? h('div', { class: 'detail-section' }, h('div', { class: 'row' }, icon('clock'), h('div', { class: 'grow' }, h('b', {}, `It starts at ${agent.startAt.slice(11)}.`),

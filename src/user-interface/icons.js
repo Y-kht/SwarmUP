@@ -87,6 +87,7 @@ const TASK_STYLE = {
   format: { icon: 'layout', color: '#EC4899' },
   math: { icon: 'sigma', color: '#6366F1' },
   coder: { icon: 'code', color: '#F97316' },
+  worker: { icon: 'terminal', color: '#14B8A6' },
   leader: { icon: 'crown', color: '#F4A62A' },
 };
 

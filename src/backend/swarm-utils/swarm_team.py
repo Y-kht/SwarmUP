@@ -263,13 +263,66 @@ class SwarmTeam:
         start = self.getMember(name)["startAt"]
         return f"{start:%Y-%m-%d %H:%M}" if start else ""
 
+    # ---------- What an agent reaches of its swarm with its tools (agent_tools.py). ----------
+    # The name of an agent of the swarm as it was written by another agent: without capitals, and "leader" for the leader.
+    def findName(self, written):
+        written = str(written).strip().lstrip("@")
+        if written.lower() in ("leader", "the leader"):
+            return self.leader
+        return next((name for name in list(self.members) if name.lower() == written.lower()), None)
+
+    # An agent writes to another one (or to the leader), which reads it with its next step. It gives back what the agent is told.
+    def relay(self, sender, receiver, text):
+        target, text = self.findName(receiver), str(text).strip()
+        if not text:
+            raise ValueError("The message is empty.")
+        if target is None:
+            gone = any(item["name"].lower() == str(receiver).strip().lower() for item in self.removed)
+            raise ValueError(f"{receiver} left the swarm." if gone else f"There is no agent called {receiver}. The agents: {', '.join(self.members)}.")
+        if target == sender:
+            raise ValueError("You cannot write to yourself: use remember to keep a note.")
+        if self.members[target]["status"] in ("done", "failed"):
+            return f"{target} has finished, so it cannot read messages anymore. Read its result with read_result."
+        self.members[target]["agent"].receive(sender, text)
+        self.logMessage(sender, target, text, direct=True)
+        return f"Sent to {target}. It reads it with its next step."
+
+    def describeTeamFor(self, name):
+        lines = [f"You are {name}. The leader is {self.leader}: it works last, and receives the result of every agent."]
+        for other, member in list(self.members.items()):
+            waits = f" It waits for {', '.join(member['waitsFor'])}." if member["waitsFor"] and other != self.leader else ""
+            ready = " Its result is ready (read_result)." if member["result"] is not None and other != name else ""
+            lines.append(f"- {other}{' (leader)' if other == self.leader else ''}{' (you)' if other == name else ''}: the {member['role']}, {member['status']}. "
+                         f"Task: {member['task']}{waits}{ready}")
+        lines += [f"- {item['name']} left the swarm." for item in self.removed]
+        return "\n".join(lines)
+
+    def resultOf(self, written):
+        target = self.findName(written)
+        if target is None:
+            left = next((item for item in reversed(self.removed) if item["name"].lower() == str(written).strip().lower()), None)
+            if left and left["result"] is not None:
+                return f"The result of {left['name']}, which left the swarm:\n{left['result']}"
+            raise ValueError(f"There is no agent called {written}. The agents: {', '.join(self.members)}.")
+        member = self.members[target]
+        if member["result"] is None:
+            return f"{target} has no result yet: it is {member['status']}." + (f" {member['error']}" if member["error"] else "")
+        return f"The result of {target}:\n{member['result']}"
+
+    # An agent that was removed, or a swarm that was stopped, stops at its next step.
+    def shouldStop(self, name):
+        return self.stopped or self.isRemoved(name)
+
+    def noteActivity(self, name, text):
+        self.emit("activity", name, text=text)
+
     def getInfo(self, name):
         member = self.getMember(name)
         return {"name": name, "role": member["role"], "task": member["task"], "status": member["status"], "boss": self.getParent(name),
                 "waitsFor": member["waitsFor"], "waitingOn": self.getWaitingOn(name), "startAt": self.getStartAt(name), "isLeader": name == self.leader,
                 "result": member["result"], "error": member["error"], "model": member["model"], "mode": member["mode"], "review": member["review"],
                 "draft": member["draft"], "problem": member["problem"], "revision": member["revision"], "plan": member["agent"].approvedPlan,
-                "actions": list(member["agent"].actions)}
+                "actions": list(member["agent"].actions), "activity": list(member["agent"].activity)}
 
     # Who lost the connection and why ({agent: reason}) while the swarm waits for the user to continue or to cancel, otherwise None.
     def getInterruption(self):

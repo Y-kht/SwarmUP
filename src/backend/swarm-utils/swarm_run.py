@@ -150,6 +150,12 @@ class SwarmRun:
             member["error"] = f"{type(error).__name__}: {error}"
         if member["result"] is None and not member["error"]:
             member["error"] = "It did not finish, for example because the user did not approve."
+        # What an agent that did not finish changed with its tools is put back (a removed agent is put back when it retires).
+        if member["result"] is None and not member.get("removed"):
+            try:
+                member["agent"].rollback()
+            except Exception:
+                traceback.print_exc()
         self.setStatus(name, "done" if member["result"] is not None else "failed")
 
     # A result is delivered once: after a resume, the agent already has the results it received before the swarm stopped.
@@ -207,6 +213,7 @@ class SwarmRun:
             agent = member["agent"]
             if not resume:
                 agent.inbox, agent.userMessages, agent.progress, agent.actions = [], [], {}, []
+                agent.conversation, agent.activity = None, []
                 if self.mode == "plan":
                     agent.approvedPlan = ""
             self.connectAgent(name, member, resume)
@@ -220,7 +227,7 @@ class SwarmRun:
             self.getMember(self.leader)["agent"].receive("swarm", self.describe(self.leader))
 
     # What a swarm gives to the loop of an agent while it runs: who reviews its drafts, what happens when the connection is lost, when it is saved,
-    # and the memory of the session.
+    # the memory of the session, and the swarm itself, which its tools reach. What the user allowed its tools until the swarm runs again ends here.
     # What the user allowed a coding agent "until the swarm runs again" ends here. The leader of a managed swarm has what it writes read by the manager.
     def connectAgent(self, name, member, resume):
         agent = member["agent"]
@@ -228,6 +235,7 @@ class SwarmRun:
         if hasattr(agent.agent, "newRun"):
             agent.agent.newRun()
         agent.name, agent.reviewer, agent.session = name, partial(self.waitForReview, name), self.session
+        agent.team, agent.allowed, agent.onActivity = self, set(), partial(self.noteActivity, name)
         agent.onConnectionLost, agent.onProgress = partial(self.waitForResume, name), self.checkpoint
         agent.onAnswer = self.manager.readOutput if self.manager is not None and name == self.leader else None
 
@@ -318,7 +326,7 @@ class SwarmRun:
         finally:
             for member in self.members.values():
                 agent = member["agent"]
-                agent.reviewer = agent.onConnectionLost = agent.onProgress = agent.onAnswer = agent.session = None
+                agent.reviewer = agent.onConnectionLost = agent.onProgress = agent.onAnswer = agent.session = agent.team = agent.onActivity = None
                 agent.resumed = False
             self.stage = None
             self.closeRun(ended)

@@ -3,7 +3,7 @@ import re
 import shlex
 from pathlib import Path
 
-from checking_loops import CoderLoop, MathCheckLoop
+from checking_loops import CoderLoop, MathCheckLoop, WorkerLoop
 from harness_utils import PHONE_PATTERN, USER_NAME
 from message_loops import CalendarLoop, EMAIL_PATTERN, EmailLoop, NewsLoop, nextOccurrence
 from sources_library import EMAIL_PROVIDERS, MESSAGING_APPS
@@ -163,6 +163,17 @@ TASKS = {
                 "Each finding quotes the text, and a second check tries to refute the findings that report an error. It checks logic and proofs, not arithmetic. "
                 "The report is saved next to your file after you approve it.",
         "fields": [{"key": "filePath", "ask": "Path of the text to check (a text file, like .tex or .md)", "kind": "file", "required": True}],
+    },
+    "worker": {
+        "label": "Worker (any work in a folder)", "name": "Worker", "role": "worker", "recommend": "code",
+        "build": lambda model, answers: WorkerLoop(model, answers["request"], loops(answers)),
+        "folder": "It works in this folder: it reads every file, and creates, changes, moves or deletes files and runs commands, each time after you allow it. "
+                  "Without a folder it works in an empty folder of its own.",
+        "info": "This agent does any work you describe, in its folder, like Claude Code or Codex: it reads the files, changes them, and runs commands to check its work. "
+                "It asks your permission before every change, every command and every web page, and it ends with a report of what it did. If you do not approve "
+                "the report, every file it changed is put back.",
+        "fields": [{"key": "request", "ask": "What work must it do? (for example: sort my notes into one folder per topic, or update the numbers in report.md from data.csv)",
+                    "kind": "text", "required": True}],
     },
     "coder": {
         "label": "Coder", "name": "Coder", "role": "coder", "recommend": "code",

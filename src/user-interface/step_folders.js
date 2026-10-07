@@ -90,7 +90,7 @@ function viewFolders() {
     footer: footer({ onClick: () => go('agents') }, { label: 'Continue to the models', onClick: saveAll }, { text: `${agents.filter(agent => agent.folder).length} of ${agents.length} with a folder` }),
     guide: [
       { q: 'Do I need folders?', text: 'No. Without a folder, an agent reads none of your files, and what it makes is saved in agent-files/results of SwarmUP (the formatter and the math checker save next to your file).', tone: 'tip', icon: 'folder' },
-      { q: 'What goes in it?', text: ['the email writer: a copy of every email sent', 'the calendar planner: calendar_events.ics', 'the writers: every approved text', 'the coder: its file and its test run'] },
+      { q: 'What goes in it?', text: ['the email writer: a copy of every email sent', 'the calendar planner: calendar_events.ics', 'the writers: every approved text', 'the coder: its file and its test run', 'the worker: the files it creates or changes, after you allow each change'] },
       { q: 'Safety', text: 'An agent only writes inside its own folder, and only after you approve. The original of a document is never changed.' },
     ],
   };

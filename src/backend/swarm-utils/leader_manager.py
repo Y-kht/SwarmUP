@@ -51,6 +51,8 @@ class LeaderManager:
             self.queue.put(("event", f"{agent} {'is done' if event['status'] == 'done' else 'did not finish'}."))
         elif kind == "message" and event["sender"] == USER_NAME and event["receiver"] == self.swarm.getLeader():
             self.queue.put(("event", f"The user wrote to you: {event['message']}"))
+        elif kind == "message" and event.get("direct") and event["receiver"] == self.swarm.getLeader():
+            self.queue.put(("event", f"{event['sender']} wrote to you: {event['message']}"))
 
     # When the last agent finishes, the leader starts its own work at once: nothing is left to change, so the leader is not asked (it costs tokens).
     def othersAtWork(self, agent):

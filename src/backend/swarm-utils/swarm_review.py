@@ -13,9 +13,10 @@ REMOVED_MESSAGE = "This agent was removed from the swarm before it finished."
 # What a swarm (Swarm in swarm_harness.py) asks the user: the drafts of the agents, the summaries and the corrections of the leader,
 # the lost connections, and the stop.
 class SwarmReview:
-    def logMessage(self, sender, receiver, message):
+    # direct is True for a message an agent chose to write (send_message), and not a result that SwarmUP delivers.
+    def logMessage(self, sender, receiver, message, direct=False):
         self.messages.append({"time": f"{datetime.now():%H:%M:%S}", "sender": sender, "receiver": receiver, "message": message})
-        self.emit("message", receiver, sender=sender, receiver=receiver, message=message)
+        self.emit("message", receiver, sender=sender, receiver=receiver, message=message, direct=direct)
 
     def communicate(self, sender, receiver, message):
         self.getMember(sender)

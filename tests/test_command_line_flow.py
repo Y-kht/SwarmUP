@@ -445,7 +445,7 @@ class TaskQuestionsTests(unittest.TestCase):
         self.assertEqual(cli.chooseTask(script.console(), 1, 3), "calendar")
         self.assertIn("Agent 1 of 3: what must this agent do?", script.text())
         self.assertIn("  1. Email writer and sender", script.said)
-        self.assertEqual(sum(label.startswith("  ") for label in script.said), 8)
+        self.assertEqual(sum(label.startswith("  ") for label in script.said), 9)
         self.assertIn(cli.TASKS["calendar"]["info"], script.said)
         self.assertIn(cli.TASKS["news"]["info"], script.said)
         self.assertEqual(script.said.count("Write info and the number of a task, like: info 3"), 2)

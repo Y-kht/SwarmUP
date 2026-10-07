@@ -4,10 +4,15 @@
 # The libraries are only imported when a model is used, so a user who only needs one kind of model does not install the others.
 # The Hugging Face cache is the folder of the HF_HOME environment variable, so the user chooses where the models are stored.
 # The coding agents are in coding_agents.py and codex_agent.py, and what every client needs in model_support.py.
+# Besides input (one prompt, one answer), ApiModel and LocalModel hold a conversation with tools (converse, see agent_conversation.py): they
+# translate the messages and the tools of SwarmUP into those of their provider, and its answer back into text and calls of tools.
 import gc
+import json
 import re
 import threading
+import uuid
 
+import agent_prompts as prompts
 from codex_agent import CodexModel
 from coding_agents import ClaudeCodeModel
 from harness_utils import isOnline
@@ -21,6 +26,8 @@ ACCEPTED_ENCODINGS = "gzip, deflate"
 CLAUDE_MAX_TOKENS = 32000
 LOCAL_MAX_TOKENS = 4096
 THINKING_PATTERN = re.compile(r"<think>.*?</think>", re.DOTALL)
+TOOL_CALL_PATTERN = re.compile(r"<tool_call>\s*(.*?)\s*(?:</tool_call>|$)", re.DOTALL)
+STREAM_ATTEMPTS = 2
 
 
 # What went wrong with a call to an API, in words a user understands. The libraries of Anthropic and OpenAI have the same error classes.
@@ -56,6 +63,121 @@ def readOpenAiUsage(usage):
     return {"input": prompt - cached, "cachedInput": cached, "output": output}
 
 
+# ==============
+# The conversation of SwarmUP (agent_conversation.py) in the words of each provider.
+# ==============
+# Claude: the system prompt and the end of the conversation are kept in the cache of Anthropic, so each step only pays the new part in full.
+# What Claude answered is given back exactly as it came (its thinking included), because Claude needs the conversation unchanged.
+def claudeBlocks(message):
+    if message["role"] == "user":
+        return [{"type": "text", "text": message["content"]}] if message["content"] else []
+    if message["role"] == "tool":
+        return [{"type": "tool_result", "tool_use_id": message["id"], "content": message["content"] or "(empty)", **({"is_error": True} if message.get("error") else {})}]
+    raw = (message.get("raw") or {}).get("claude")
+    if raw:
+        return raw
+    text = [{"type": "text", "text": message["content"]}] if message["content"] else []
+    return text + [{"type": "tool_use", "id": call["id"], "name": call["name"], "input": call.get("arguments") or {}} for call in message.get("calls") or []]
+
+
+# The results of the tools and the messages that arrived meanwhile go together in one message of the user, as Claude wants them.
+def claudeMessages(messages):
+    result = []
+    for message in messages:
+        role, blocks = "assistant" if message["role"] == "assistant" else "user", claudeBlocks(message)
+        if not blocks:
+            continue
+        if result and result[-1]["role"] == role:
+            result[-1]["content"] = result[-1]["content"] + blocks
+        else:
+            result.append({"role": role, "content": list(blocks)})
+    return result
+
+
+def claudeBlock(block):
+    if block.type == "text":
+        return {"type": "text", "text": block.text}
+    if block.type == "tool_use":
+        return {"type": "tool_use", "id": block.id, "name": block.name, "input": block.input}
+    if block.type == "thinking":
+        return {"type": "thinking", "thinking": block.thinking, "signature": block.signature}
+    if block.type == "redacted_thinking":
+        return {"type": "redacted_thinking", "data": block.data}
+    return block.model_dump(mode="json", exclude_none=True)
+
+
+# The API of OpenAI, and those of Gemini and DeepSeek that work like it. What the model answered is given back as it came, with what some
+# providers add to it (the thinking of DeepSeek, the signatures of Gemini).
+def openAiMessages(system, messages):
+    result = [{"role": "system", "content": system}]
+    for message in messages:
+        if message["role"] == "user":
+            result.append({"role": "user", "content": message["content"]})
+        elif message["role"] == "tool":
+            result.append({"role": "tool", "tool_call_id": message["id"], "content": message["content"] or "(empty)"})
+        elif (message.get("raw") or {}).get("openai"):
+            result.append(message["raw"]["openai"])
+        else:
+            entry = {"role": "assistant", "content": message["content"] or ""}
+            if message.get("calls"):
+                entry["tool_calls"] = [{"id": call["id"], "type": "function", "function": {"name": call["name"], "arguments": json.dumps(call.get("arguments") or {})}}
+                                       for call in message["calls"]]
+            result.append(entry)
+    return result
+
+
+# A local model whose chat template knows tools gets them as such. Another one gets them in its system prompt (TEXT_TOOLS_PROMPT), writes its
+# calls in its text, and reads their results as messages of the user. Such templates often want the user and the model to speak in turn.
+def localMessages(system, messages, tools, native):
+    chat = [{"role": "system", "content": system if native else f"{system}\n\n" + prompts.TEXT_TOOLS_PROMPT.format(tools=json.dumps(tools, ensure_ascii=False))}]
+    for message in messages:
+        calls = message.get("calls") or []
+        if message["role"] == "user":
+            entry = {"role": "user", "content": message["content"]}
+        elif message["role"] == "tool":
+            entry = {"role": "tool", "name": message["name"], "tool_call_id": message["id"], "content": message["content"]} if native else \
+                {"role": "user", "content": f"[Result of {message['name']}]\n{message['content']}"}
+        elif native:
+            entry = {"role": "assistant", "content": message["content"] or ""}
+            if calls:
+                entry["tool_calls"] = [{"id": call["id"], "type": "function", "function": {"name": call["name"], "arguments": call.get("arguments") or {}}} for call in calls]
+        else:
+            written = [f"<tool_call>{json.dumps({'name': call['name'], 'arguments': call.get('arguments') or {}}, ensure_ascii=False)}</tool_call>" for call in calls]
+            entry = {"role": "assistant", "content": "\n".join([message["content"] or "", *written]).strip()}
+        if not native and chat[-1]["role"] == entry["role"] == "user":
+            chat[-1]["content"] += f"\n\n{entry['content']}"
+        else:
+            chat.append(entry)
+    return chat
+
+
+def readCall(body):
+    try:
+        data = json.loads(body)
+        arguments = data.get("arguments", data.get("parameters", {}))
+        arguments = json.loads(arguments) if isinstance(arguments, str) else arguments
+        return {"id": f"call_{uuid.uuid4().hex[:12]}", "name": str(data["name"]), "arguments": arguments}
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return {"id": f"call_{uuid.uuid4().hex[:12]}", "name": "unknown", "arguments": {}, "problem": "this tool call is not valid JSON. Write it again."}
+
+
+# The calls a local model wrote: <tool_call>{json}</tool_call> (Qwen, Hermes and most models), or its whole answer as JSON (Llama, Mistral).
+def readToolCalls(text):
+    calls = [readCall(body) for body in TOOL_CALL_PATTERN.findall(text)]
+    if calls:
+        return calls, TOOL_CALL_PATTERN.sub("", text).strip()
+    stripped = text.strip()
+    if stripped[:1] in ("[", "{"):
+        try:
+            data = json.loads(stripped)
+        except ValueError:
+            return [], text
+        items = data if isinstance(data, list) else [data]
+        if items and all(isinstance(item, dict) and "name" in item for item in items):
+            return [readCall(json.dumps(item)) for item in items], ""
+    return [], text
+
+
 class ApiModel:
     def __init__(self, provider, name, apiKey):
         self.provider = provider
@@ -65,6 +187,8 @@ class ApiModel:
         self.usage = {"calls": 0, "input": 0, "output": 0}
         self.client = None
         self.lock = threading.Lock()
+        # Claude needs the conversation to stay exactly as it was: its old messages are never shortened (see Conversation.shorten).
+        self.appendOnly = provider == "claude"
 
     # The answers are only asked compressed with gzip or deflate (ACCEPTED_ENCODINGS). Without it, the HTTP library of the providers asks for
     # Brotli when a brotli package is installed, and an old one (before 1.2, common in conda environments) makes every answer fail to decode.
@@ -84,15 +208,58 @@ class ApiModel:
     # Claude is asked with a stream and not with a single request, because a long answer would hit the time limit of a single request.
     # A refusal is a normal answer of the API (HTTP 200), so it is checked before the text is read. Thinking blocks are not part of the answer.
     def askClaude(self, prompt):
-        with self.client.messages.stream(model=self.name, max_tokens=CLAUDE_MAX_TOKENS, messages=[{"role": "user", "content": prompt}]) as stream:
-            message = stream.get_final_message()
+        message = self.streamClaude(messages=[{"role": "user", "content": prompt}])
+        return "".join(block.text for block in message.content if block.type == "text")
+
+    # A streamed answer can carry a call whose arguments cannot be read (they are streamed as they are written): it is asked once more.
+    def streamClaude(self, **options):
+        for attempt in range(STREAM_ATTEMPTS):
+            try:
+                with self.client.messages.stream(model=self.name, max_tokens=CLAUDE_MAX_TOKENS, **options) as stream:
+                    message = stream.get_final_message()
+                break
+            except ValueError:
+                if attempt + 1 == STREAM_ATTEMPTS:
+                    raise ModelError(f"{self.name} wrote a call of a tool that could not be read, twice. Try again, or choose another model.") from None
         usage = message.usage
         self.addUsage(input=usage.input_tokens, cachedInput=getattr(usage, "cache_read_input_tokens", 0), cacheWrite=getattr(usage, "cache_creation_input_tokens", 0),
                       output=usage.output_tokens)
         if message.stop_reason == "refusal":
             category = getattr(message.stop_details, "category", None)
             raise ModelError(f"{self.name} declined this request ({category or 'no reason given'}). Choose another model for this agent, or change what it is asked.")
-        return "".join(block.text for block in message.content if block.type == "text")
+        return message
+
+    def converseClaude(self, system, messages, tools):
+        options = {"system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}], "messages": claudeMessages(messages), "cache_control": {"type": "ephemeral"}}
+        if tools:
+            options["tools"] = [{"name": item["name"], "description": item["description"], "input_schema": item["parameters"], "eager_input_streaming": True} for item in tools]
+        message = self.streamClaude(**options)
+        calls = [{"id": block.id, "name": block.name, "arguments": block.input} for block in message.content if block.type == "tool_use"]
+        return {"text": "".join(block.text for block in message.content if block.type == "text"), "calls": calls, "raw": {"claude": [claudeBlock(block) for block in message.content]},
+                "cut": message.stop_reason == "max_tokens" and bool(calls)}
+
+    def converseOpenAi(self, system, messages, tools):
+        options = {"model": self.name, "messages": openAiMessages(system, messages)}
+        if tools:
+            options["tools"] = [{"type": "function", "function": {"name": item["name"], "description": item["description"], "parameters": item["parameters"]}} for item in tools]
+        response = self.client.chat.completions.create(**options)
+        self.addUsage(**readOpenAiUsage(response.usage))
+        choice = response.choices[0]
+        message = choice.message
+        if message.refusal and not message.content and not message.tool_calls:
+            raise ModelError(f"{self.name} declined this request: {message.refusal}")
+        calls, written = [], [item for item in message.tool_calls or [] if getattr(item, "function", None)]
+        for item in written:
+            try:
+                calls.append({"id": item.id, "name": item.function.name, "arguments": json.loads(item.function.arguments or "{}")})
+            except ValueError:
+                calls.append({"id": item.id, "name": item.function.name, "arguments": {}, "problem": "its arguments were not valid JSON. Write them again."})
+        raw = {"role": "assistant", "content": message.content or ""}
+        if written:
+            raw["tool_calls"] = [item.model_dump(mode="json", exclude_none=True) for item in written]
+        if getattr(message, "reasoning_content", None):
+            raw["reasoning_content"] = message.reasoning_content
+        return {"text": message.content or "", "calls": calls, "raw": {"openai": raw}, "cut": choice.finish_reason == "length" and bool(calls)}
 
     def askOpenAi(self, prompt):
         response = self.client.chat.completions.create(model=self.name, messages=[{"role": "user", "content": prompt}])
@@ -102,13 +269,20 @@ class ApiModel:
             raise ModelError(f"{self.name} declined this request: {choice.message.refusal}")
         return choice.message.content or ""
 
-    def input(self, prompt):
+    def ask(self, work):
         library = self.connect()
         try:
-            return self.askClaude(prompt) if self.provider == "claude" else self.askOpenAi(prompt)
+            return work()
         except library.APIError as error:
             lost = isinstance(error, library.APIConnectionError)
             raise (ModelConnectionError if lost else ModelError)(explainApiError(library, error, self.company, self.name)) from error
+
+    def input(self, prompt):
+        return self.ask(lambda: self.askClaude(prompt) if self.provider == "claude" else self.askOpenAi(prompt))
+
+    # One step of a conversation (agent_conversation.py): {"text", "calls", "raw", "cut"}.
+    def converse(self, system, messages, tools):
+        return self.ask(lambda: (self.converseClaude if self.provider == "claude" else self.converseOpenAi)(system, messages, tools))
 
 
 # A Hugging Face model on the GPUs. It is loaded when it is first asked something, one model at a time (a swarm has many),
@@ -155,25 +329,46 @@ class LocalModel:
 
     def answer(self, prompt):
         with self.lock:
-            if self.model is None:
-                with LocalModel.loading:
-                    self.load()
-            messages = [{"role": "user", "content": prompt}]
-            inputs = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt", return_dict=True, enable_thinking=False)
-            inputs = inputs.to(self.model.device)
-            with self.torch.no_grad():
-                output = self.model.generate(**inputs, max_new_tokens=self.maxNewTokens)
-            start = inputs["input_ids"].shape[-1]
-            self.usage["calls"] += 1
-            self.usage["input"] += start
-            self.usage["output"] += output.shape[-1] - start
-            text = self.tokenizer.decode(output[0][start:], skip_special_tokens=True)
-            return THINKING_PATTERN.sub("", text).split("<think>")[0].strip()
+            return self.generate([{"role": "user", "content": prompt}])
+
+    # A step of a conversation. The chat template of the model says if it knows tools; otherwise they are written in its system prompt.
+    def dialogue(self, system, messages, tools):
+        with self.lock:
+            self.ensureLoaded()
+            native = bool(tools) and "tools" in str(self.tokenizer.chat_template or "")
+            text = self.generate(localMessages(system, messages, tools, native), [{"type": "function", "function": item} for item in tools] if native else None)
+        calls, text = readToolCalls(text)
+        return {"text": text, "calls": calls, "raw": None, "cut": False}
+
+    def ensureLoaded(self):
+        if self.model is None:
+            with LocalModel.loading:
+                self.load()
+
+    # Must be called with self.lock held.
+    def generate(self, messages, tools=None):
+        self.ensureLoaded()
+        inputs = self.tokenizer.apply_chat_template(messages, tools=tools, add_generation_prompt=True, return_tensors="pt", return_dict=True, enable_thinking=False)
+        inputs = inputs.to(self.model.device)
+        with self.torch.no_grad():
+            output = self.model.generate(**inputs, max_new_tokens=self.maxNewTokens)
+        start = inputs["input_ids"].shape[-1]
+        self.usage["calls"] += 1
+        self.usage["input"] += start
+        self.usage["output"] += output.shape[-1] - start
+        text = self.tokenizer.decode(output[0][start:], skip_special_tokens=True)
+        return THINKING_PATTERN.sub("", text).split("<think>")[0].strip()
+
+    def input(self, prompt):
+        return self.guard(lambda: self.answer(prompt))
+
+    def converse(self, system, messages, tools):
+        return self.guard(lambda: self.dialogue(system, messages, tools))
 
     # The two things that go wrong most with a local model are told in words a user understands.
-    def input(self, prompt):
+    def guard(self, work):
         try:
-            return self.answer(prompt)
+            return work()
         except OSError as error:
             if not isOnline():
                 raise ModelConnectionError(f"{self.name} could not be loaded because it needs the internet and the connection is lost.") from error

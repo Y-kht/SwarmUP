@@ -9,7 +9,7 @@ from pathlib import Path
 # The modules of SwarmUP are in the folders of src/backend. Their names have hyphens, so they are not packages: each folder goes on the path.
 sys.path[:0] = [str(folder) for folder in sorted((Path(__file__).resolve().parent.parent / "src" / "backend").iterdir()) if folder.is_dir() and not folder.name.startswith(("_", "."))]
 import writing_loops
-from checking_loops import CoderLoop, MathCheckLoop
+from checking_loops import CoderLoop, MathCheckLoop, WorkerLoop
 from harness_utils import AGENT_RULES, loadRules
 from message_loops import CalendarLoop, EmailLoop, NewsLoop
 from models_library import RECOMMENDED_API, RECOMMENDED_LOCAL
@@ -66,7 +66,7 @@ class CatalogTests(unittest.TestCase):
                          ["telegramChat", "telegramToken", "whatsappPhoneId", "whatsappTo", "whatsappToken"])
 
     def testTheTasksOfTheDesignAreThere(self):
-        self.assertEqual(set(TASKS), {"email", "calendar", "news", "author", "literature", "format", "math", "coder"})
+        self.assertEqual(set(TASKS), {"email", "calendar", "news", "author", "literature", "format", "math", "coder", "worker"})
         self.assertEqual(len({task["name"] for task in TASKS.values()}), len(TASKS))
         self.assertEqual(len({task["label"] for task in TASKS.values()}), len(TASKS))
 
@@ -102,11 +102,12 @@ class BuildTests(unittest.TestCase):
             "format": {"filePath": str(self.document), "style": "IEEE"},
             "math": {"filePath": str(self.document)},
             "coder": {"task": "sort a list", "filePath": str(self.folder / "sort.py"), "testCommand": ["python", "-m", "pytest"]},
+            "worker": {"request": "sort my notes by topic"},
         }
 
     def testEveryTaskBuildsItsLoopWithTheModelAndDescribesItself(self):
         classes = {"email": EmailLoop, "calendar": CalendarLoop, "news": NewsLoop, "author": AuthorLoop, "literature": LiteratureSurveyLoop,
-                   "format": DocumentFormatLoop, "math": MathCheckLoop, "coder": CoderLoop}
+                   "format": DocumentFormatLoop, "math": MathCheckLoop, "coder": CoderLoop, "worker": WorkerLoop}
         for key, answers in self.answers().items():
             model = object()
             loop = TASKS[key]["build"](model, answers)

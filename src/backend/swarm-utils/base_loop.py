@@ -6,7 +6,9 @@ from datetime import datetime
 from pathlib import Path
 
 import agent_prompts as prompts
+from agent_conversation import canConverse, talk
 from agent_storehouse import consultFolder, describeWorkplace, folderProblem, resultsFolder, safeName
+from agent_tools import describeChanges, undoChanges
 from harness_utils import ConnectionLost, USER_LOCK, asConnectionLost, checkLength, isNo, isOnline, isYes, loadRules
 
 
@@ -43,6 +45,13 @@ class Loop:
         self.onUsage = None
         # The memory of the swarm session the agent works in (WorkSession in agent_storehouse.py), set by the swarm while it runs.
         self.session = None
+        # The conversation with a model that can hold one (agent_conversation.py), the swarm the agent reaches with its tools (relay,
+        # describeTeamFor, resultOf, shouldStop), what the user allowed it until the swarm runs again, and what it did lately with its tools.
+        self.conversation = None
+        self.team = None
+        self.allowed = set()
+        self.activity = []
+        self.onActivity = None
 
     # Messages sent by the other agents of a swarm. The agent reads them with every prompt.
     def receive(self, sender, message):
@@ -118,13 +127,21 @@ class Loop:
         self.logAction(f"Saved {path}.")
         return path
 
-    # Puts back what an unfinished run changed in the files the user already had. Only the agents that do that need it.
+    # Puts back what an unfinished run changed in the files with its tools (see undoChanges in agent_tools.py). It gives how many were put back.
     def rollback(self):
-        pass
+        return undoChanges(self)
 
     # What the agent would leave half done if the swarm were stopped now.
     def describePending(self):
-        return ""
+        return describeChanges(self)
+
+    # What the agent does with its tools, for the user to follow it live.
+    def recordActivity(self, text):
+        self.activity = [*self.activity[-19:], {"time": f"{datetime.now():%H:%M:%S}", "text": text}]
+        if self.onActivity:
+            self.onActivity(text)
+        else:
+            self.notifyUser(f"[{self.name}] {text}")
 
     # Runs a step that needs the network. If the connection is lost inside a swarm, the agent waits here until the user decides:
     # to continue (the step is tried again) or to stop (SwarmStopped). Outside of a swarm the error goes up as it is.
@@ -165,8 +182,14 @@ class Loop:
     # of the task of the leader, like the rules of emails, do not apply to them.
     # With tools (by default for its own calls) the agent sees the files of its folder and can read them before it answers, and it keeps
     # notes in the memory of the session (see agent_storehouse.py). The calls that only check a draft go without them.
+    # A model that can hold a conversation works in one, with all its tools (agent_conversation.py): its rules, its plan and the messages it
+    # receives are part of the conversation. Another model is asked one prompt at a time, with them written before the prompt.
     def askAgent(self, prompt, own=True, tools=None):
         tools = own if tools is None else tools
+        if tools and canConverse(self.agent):
+            with self.thinking:
+                answer = talk(self, prompt, own)
+            return self.onAnswer(answer) if self.onAnswer else answer
         prompt = describeWorkplace(self, prompt, tools)
         if own and self.approvedPlan:
             prompt = prompts.APPROVED_PLAN_PROMPT.format(plan=self.approvedPlan) + f"\n\n{prompt}"
@@ -180,13 +203,13 @@ class Loop:
             # A coding agent (Claude Code, Codex) works in the folder of the loop and asks the user through it before it acts.
             if hasattr(self.agent, "attach"):
                 self.agent.attach(self)
-            answer = consultFolder(self, prompt, lambda text: self.callModel(text, own), tools)
+            answer = consultFolder(self, prompt, lambda text: self.callModel(lambda: self.agent.input(text), own), tools)
         return self.onAnswer(answer) if self.onAnswer else answer
 
-    # The calls of a leader that manages the swarm never wait for the user: they have a fallback of their own.
-    def callModel(self, prompt, own):
+    # One call of the model (work). The calls of a leader that manages the swarm never wait for the user: they have a fallback of their own.
+    def callModel(self, work, own):
         try:
-            return self.keepTrying(lambda: self.agent.input(prompt)) if own else self.agent.input(prompt)
+            return self.keepTrying(work) if own else work()
         finally:
             if self.onUsage:
                 self.onUsage()
@@ -303,7 +326,8 @@ class Loop:
         try:
             plan = self.reviewLoop(prompts.PLAN_PROMPT.format(task=task, maxWords=PLAN_LENGTH), self.checkPlanText)
         finally:
-            self.planning = False
+            # The conversation of the plan only looked: the work starts a new one, with the approved plan.
+            self.planning, self.conversation = False, None
         self.approvedPlan = plan or ""
         return plan
 
@@ -318,7 +342,10 @@ class Loop:
         for attempt in range(1, self.numberOfLoops + 1):
             prompt = task
             if feedback:
-                prompt = f"{task}\n\nYour previous draft:\n{draft}\n\nImprove it. What to change: {feedback}"
+                # In a conversation the model still has the task and its draft, so it is only told what to change.
+                conversing = own and self.conversation is not None and canConverse(self.agent)
+                prompt = prompts.CONVERSATION_REVISION_PROMPT.format(feedback=feedback) if conversing else \
+                    f"{task}\n\nYour previous draft:\n{draft}\n\nImprove it. What to change: {feedback}"
             messagesBefore = len(self.userMessages)
             draft = self.askAgent(prompt, own)
             problem = verify(draft) or self.checkNewMessages(messagesBefore)

@@ -278,6 +278,8 @@ def formatEvent(event):
         return f"[{when}] {agent} is gone: what it left half done was put back, and its model freed its memory"
     if kind == "model":
         return f"[{when}] {agent} now uses {event['model']}"
+    if kind == "activity":
+        return f"[{when}] {agent}: {shorten(event['text'], 110)}"
     return None
 
 

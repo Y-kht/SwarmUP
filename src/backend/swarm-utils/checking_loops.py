@@ -1,4 +1,5 @@
-# The loops that check a work: the math checker, and the coder, which runs a command to check its code.
+# The loops that check a work or do it: the math checker, the coder, which runs a command to check its code, and the worker, which does any work
+# in its folder with its tools.
 import re
 import subprocess
 import sys
@@ -84,6 +85,31 @@ class MathCheckLoop(Loop):
 
 
 # ==============
+# Worker harness. It does what the user asks in its folder, with the tools of its conversation (agent_tools.py): it reads, writes, edits, runs
+# commands, every change with the permission of the user. Its result is the report of what it did. If the user does not approve the report,
+# every file it changed is put back.
+# ==============
+class WorkerLoop(Loop):
+    def __init__(self, agent, request, numberOfLoops=5):
+        super().__init__(agent, numberOfLoops, "WORKER_RULES.md")
+        self.request = request
+
+    def describeTask(self):
+        return f"Do this work in its folder: {self.request}"
+
+    def run(self):
+        report = self.reviewLoop(prompts.WORKER_PROMPT.format(request=self.request), lambda draft: "" if draft.strip() else "Write the report of what you did.", key="report")
+        if report is None:
+            if self.rollback():
+                self.notifyUser("The work was not approved, so every file it changed is back to how it was.")
+            return None
+        self.saveResult("work_report", report)
+        self.logAction("Finished the work and saved its report.")
+        self.notifyUser("The work is done.")
+        return report
+
+
+# ==============
 # Coding harness. The code is only written and run after the user agrees.
 # ==============
 class CoderLoop(Loop):
@@ -113,6 +139,7 @@ class CoderLoop(Loop):
         return f"Running {' '.join(self.testCommand)} failed with:\n{(result.stdout + result.stderr)[-2000:]}"
 
     def rollback(self):
+        super().rollback()
         if not self.progress.get("touched") or self.progress.get("kept"):
             return
         original = self.progress["original"]
@@ -125,7 +152,7 @@ class CoderLoop(Loop):
     def describePending(self):
         if self.progress.get("touched") and not self.progress.get("kept"):
             return f"{self.path} holds a draft of the code that the user did not approve yet. Stopping puts the original back."
-        return ""
+        return super().describePending()
 
     def run(self):
         command = " ".join(self.testCommand)
