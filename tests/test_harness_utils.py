@@ -2873,14 +2873,14 @@ class FolderTests(LoopTestCase):
         self.addCleanup(work.cleanup)
         self.work = Path(work.name).resolve()
 
-    def testAnAgentWithoutAFolderChangesNothing(self):
+    def testAnAgentWithoutAFolderSavesItsWorkInTheFilesOfSwarmUp(self):
         loop = self.script(AuthorLoop(FakeAgent(["A text"]), "birds", 50), ["yes"])
         loop.setFolder(None)
         self.assertEqual((loop.folder, loop.describeFolder()), (None, ""))
-        self.assertIsNone(loop.saveResult("text", "hello"))
         loop.run()
         self.assertEqual(list(self.work.iterdir()), [])
-        self.assertEqual(loop.progress.get("stamp"), None)
+        [copy] = list((self.folder / "results").glob("*/AuthorLoop_text.md"))
+        self.assertEqual(copy.read_text(encoding="utf-8"), "A text")
 
     def testTheFolderMustExistAndCanBeChangedOrRemoved(self):
         loop = Loop(FakeAgent())
@@ -2930,21 +2930,21 @@ class FolderTests(LoopTestCase):
         loop = self.script(AuthorLoop(FakeAgent(["A text about birds"]), "birds", 50), ["yes"])
         loop.setFolder(self.work)
         loop.run()
-        [copy] = list(self.work.glob("text_*.md"))
+        [copy] = list(self.work.glob("swarmup-results/*/AuthorLoop_text.md"))
         self.assertEqual(copy.read_text(encoding="utf-8"), "A text about birds")
         self.assertIn(f"Saved {copy}.", [action["text"] for action in loop.actions])
         loop = self.script(NewsLoop(FakeAgent(["Briefing"]), outlets=["BBC World"]), ["yes"])
         loop.setFolder(self.work)
         with self.fakeFeeds():
             loop.run()
-        [copy] = list(self.work.glob("news_briefing_*.md"))
+        [copy] = list(self.work.glob("swarmup-results/*/NewsLoop_news_briefing.md"))
         self.assertEqual(copy.read_text(encoding="utf-8"), "Briefing")
         paper = {"title": "Real", "summary": "x" * 500, "link": "https://a.test/1"}
         with mock.patch.dict(writing_loops.PAPER_SEARCHES, {"A": lambda subject: [paper]}, clear=True):
             loop = self.script(LiteratureSurveyLoop(FakeAgent(["See Real https://a.test/1."]), "graphs", 100, searches=("A",)), ["yes"])
             loop.setFolder(self.work)
             loop.run()
-        [copy] = list(self.work.glob("literature_survey_*.md"))
+        [copy] = list(self.work.glob("swarmup-results/*/LiteratureSurveyLoop_literature_survey.md"))
         self.assertEqual(copy.read_text(encoding="utf-8"), "See Real https://a.test/1.")
 
     def testACopyOfEverySentEmailIsSavedInTheFolder(self):
@@ -2952,7 +2952,7 @@ class FolderTests(LoopTestCase):
         loop = self.script(EmailLoop(FakeAgent(["Hello Sara", "OK"]), "me@example.com", "sara@example.com", "Meeting", "Ask"), ["yes"])
         loop.setFolder(self.work)
         loop.run()
-        [copy] = list(self.work.glob("sent_email_*.txt"))
+        [copy] = list(self.work.glob("swarmup-results/*/EmailLoop_sent_email.txt"))
         self.assertEqual(copy.read_text(encoding="utf-8"), "To: sara@example.com\nSubject: Meeting\n\nHello Sara")
 
     def testTheCalendarFileIsAlsoWrittenInTheFolderAndTheUserIsToldWhere(self):
@@ -3001,7 +3001,7 @@ class FolderTests(LoopTestCase):
         again.setState(first.getState())
         again.resumed = True
         again.run()
-        self.assertEqual(len(list(self.work.glob("text_*.md"))), 1)
+        self.assertEqual(len(list(self.work.glob("swarmup-results/*/AuthorLoop_text.md"))), 1)
 
 
 if __name__ == "__main__":

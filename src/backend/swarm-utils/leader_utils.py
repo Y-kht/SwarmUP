@@ -9,8 +9,8 @@
 #    findSuggestions finds the sentences that suggest a change without a block. They are never acted upon: the leader is asked to confirm them
 #    in a block, because a sentence can be read wrong and a block cannot. Words that only look like a change (a negation, a past event, a
 #    possessive) are left alone, and the worst a wrong catch costs is one more question to the leader, never a change of the swarm.
-# 2. LeaderCatalog tells the leader what it can choose from (the tasks and their settings, the models that are ready on this computer,
-#    the files of the folder), and checks every proposal: the task, the name, the model (it must fit in the GPUs with the others), who waits
+# 2. LeaderCatalog tells the leader what it can choose from (the tasks and their settings, the models that are ready on this computer),
+#    and checks every proposal: the task, the name, the model (it must fit in the GPUs with the others), who waits
 #    for whom, and every setting, with the same checks as the forms of the user (readAnswers in tasks_library.py).
 # 3. The user approves every proposal, with the reason the leader gave. Passwords, tokens and API keys are never taken from the leader: SwarmUP
 #    asks the user for them, and for the settings the leader could not know (the address of the user...).
@@ -115,16 +115,19 @@ def findChat(agent):
 
 # ==============
 # Building the swarm with the leader. leader is the LeaderLoop, connected to the user (askProposal, askQuestions, notifyUser).
+# The leader sees every file of the folder of the mission, and can read them before it proposes (agent_storehouse.py).
 # The leader writes its swarm, SwarmUP checks it and sends it back with what is wrong, then the user approves it, rejects it, or says
 # what to change, and the leader writes it again. It returns the agents (with every answer the user gave), or None if the user rejected it.
 # ==============
 def designSwarm(leader, catalog):
+    if catalog.folder and leader.folder is None:
+        leader.setFolder(catalog.folder)
     base = catalog.buildPrompt()
     prompt = base
     for revision in range(MAX_REVISIONS):
         agents, problems, previous, note = None, [], "", ""
         for attempt in range(REPAIR_ATTEMPTS + 1):
-            reply = leader.askAgent(prompt, own=False)
+            reply = leader.askAgent(prompt, own=False, tools=True)
             found = parseOutput(reply)
             builds = [block for block in found["blocks"] if block["action"] == "build"]
             previous, note = (builds[-1]["raw"] if builds else reply), found["text"]

@@ -8,6 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from agent_storehouse import folderProblem
 from harness_utils import ConnectionLost, USER_NAME, describeError
 from messengers import MessagingError
 from model_support import ModelError, getApiKey, getHubFolder, isDownloaded
@@ -217,7 +218,7 @@ def browseFolder(text, files=False, hidden=False):
             if isFolder or (files and entry.is_file()):
                 entries.append({"name": entry.name, "path": str(entry), "folder": isFolder})
     except OSError as error:
-        problem = f"This folder cannot be read: {describeError(error)}."
+        problem = folderProblem(folder) or f"This folder cannot be read: {describeError(error)}."
     entries.sort(key=lambda entry: (not entry["folder"], entry["name"].lower()))
     parent = str(folder.parent) if folder.parent != folder else None
     return {"path": str(folder), "parent": parent, "entries": entries, "problem": problem, "places": listPlaces(), "separator": os.sep}

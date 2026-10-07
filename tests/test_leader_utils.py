@@ -11,6 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 # The modules of SwarmUP are in the folders of src/backend. Their names have hyphens, so they are not packages: each folder goes on the path.
 sys.path[:0] = [str(folder) for folder in sorted((Path(__file__).resolve().parent.parent / "src" / "backend").iterdir()) if folder.is_dir() and not folder.name.startswith(("_", "."))]
+import agent_storehouse
 import harness_utils
 import leader_catalog
 import leader_checks
@@ -327,9 +328,9 @@ class CatalogTests(FolderTestCase):
         self.assertIn("    length (a whole number; default: 300): Maximum number of words", tasks)
         self.assertIn("The publishers: Springer Nature, Elsevier", tasks)
         self.assertNotIn("leader", re.findall(r"^- (\w+):", tasks, re.M))
-        self.assertEqual(leader_catalog.describeFiles(self.folder.resolve()).splitlines(), ["- paper.tex (29 bytes)", "- notes/ideas.md (5 bytes)"])
+        self.assertEqual(agent_storehouse.describeTree(self.folder.resolve()).splitlines(), ["- paper.tex (29 bytes)", "- notes/ideas.md (5 bytes)"])
         prompt = catalog.buildPrompt()
-        for part in ("You are Leader, the leader of a swarm", "Check my paper and write a summary of it.", str(self.folder.resolve()), "- paper.tex", "<swarmup_build>"):
+        for part in ("You are Leader, the leader of a swarm", "Check my paper and write a summary of it.", str(self.folder.resolve()), "<swarmup_build>"):
             self.assertIn(part, prompt)
 
 

@@ -3,11 +3,11 @@
 import asyncio
 import importlib.util
 import json
-import re
 import threading
-from pathlib import Path
 
 import harness_utils
+# Where a coding agent works, and what is inside its folder, are part of the storehouse of the agents (agent_storehouse.py).
+from agent_storehouse import WORKSPACES_FOLDER, agentWorkspace, isInside
 from harness_utils import isOnline
 from model_support import ModelConnectionError, ModelError, importLibrary, recordCall
 from models_library import DEFAULT_CLI_MODEL
@@ -24,28 +24,6 @@ CODING_AGENT_RULES = """You work as one agent of a swarm run by SwarmUP, a progr
 Reply with exactly what the request asks for (a text, a plan, an email, the content of a file...) and nothing else: SwarmUP shows your reply to the user and acts on it only after the user approves it.
 You may read files and run commands to do the task well. Every action other than reading your own folder is shown to the user first, who may refuse it: then go on without it.
 Do not create, change or delete files unless the request asks for it: SwarmUP saves the approved result itself."""
-WORKSPACES_FOLDER = "agent-workspaces"
-NAME_SIGNS = re.compile(r"[^\w.-]")
-
-
-# The folder where a coding agent works: the folder of its loop, or an empty one of its own, so it never reads the files of the user unasked.
-def agentWorkspace(loop):
-    if loop is not None and loop.folder:
-        return Path(loop.folder)
-    folder = harness_utils.AGENT_FILES / WORKSPACES_FOLDER / NAME_SIGNS.sub("_", loop.name if loop is not None else "agent")
-    folder.mkdir(parents=True, exist_ok=True)
-    return folder
-
-
-def isInside(folder, path, base=None):
-    candidate = Path(path).expanduser()
-    if not candidate.is_absolute():
-        candidate = Path(base or folder) / candidate
-    try:
-        resolved, root = candidate.resolve(), Path(folder).resolve()
-    except (OSError, RuntimeError):
-        return False
-    return resolved == root or root in resolved.parents
 
 
 # Without a loop (a test of the connection), nobody can be asked, so every action is refused.

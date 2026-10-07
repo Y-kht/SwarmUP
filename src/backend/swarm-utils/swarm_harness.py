@@ -85,6 +85,9 @@ class Swarm(SwarmTeam, SwarmReview, SwarmRun):
         self.manager = None
         # What the models of the mission spent. A user interface gives the swarm the costs of the whole mission (its building included).
         self.costs = MissionCosts()
+        # The memory of the session, shared by the agents (WorkSession in agent_storehouse.py), and the name of the run, where the results are saved.
+        self.session = None
+        self.runName = ""
 
     def getMember(self, name):
         if name not in self.members:
@@ -115,7 +118,7 @@ class Swarm(SwarmTeam, SwarmReview, SwarmRun):
         return {"version": STATE_VERSION, "id": self.id, "mission": self.mission, "mode": self.mode, "leader": self.leader,
                 "state": "paused" if self.interruption else "running", "heartbeat": datetime.now().timestamp(), "pid": os.getpid(),
                 "savedAt": f"{datetime.now():%Y-%m-%d %H:%M:%S}", "summary": self.summary, "messages": list(self.messages), "members": members,
-                "removed": list(self.removed), "managed": self.manager is not None, "costs": self.costs.state()}
+                "removed": list(self.removed), "managed": self.manager is not None, "costs": self.costs.state(), "runName": self.runName}
 
     # Writes the state to the disk. Whatever goes wrong, the swarm goes on, and the user is told once that the work cannot be continued after a stop.
     # The user is told from another thread, because speaking to the user can wait for a long time, and the locks of the swarm may be held here.
@@ -147,6 +150,7 @@ class Swarm(SwarmTeam, SwarmReview, SwarmRun):
         swarm.id, swarm.mode, swarm.leader = saved["id"], saved["mode"], saved["leader"]
         swarm.summary, swarm.messages = saved.get("summary", ""), list(saved.get("messages", []))
         swarm.removed = list(saved.get("removed", []))
+        swarm.runName = saved.get("runName", "")
         swarm.costs.restore(saved.get("costs") or {})
         for name, data in saved["members"].items():
             agent = makeAgent(name, data)

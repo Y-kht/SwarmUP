@@ -1,6 +1,5 @@
-# What the leader is told: the tasks with their settings, the models it can choose on this computer, the files of the folder
-# and the cost of the mission (see leader_utils.py). Its checks are in leader_checks.py.
-import os
+# What the leader is told: the tasks with their settings, the models it can choose on this computer and the cost of the mission
+# (see leader_utils.py). Its checks are in leader_checks.py. The files of the folder are shown to the leader like to every agent (agent_storehouse.py).
 import time
 from pathlib import Path
 
@@ -19,10 +18,6 @@ from user_settings import loadSettings
 
 
 STATUS_SECONDS = 60
-FILES_LIMIT = 120
-FILES_DEPTH = 3
-
-SKIPPED_FOLDERS = {"__pycache__", "node_modules", "venv", "env", "site-packages", "dist", "build"}
 
 KIND_WORDS = {"text": "text", "email": "an email address", "number": "a whole number", "file": "the path of a file that exists in the folder",
               "path": "the path of a file in the folder, created if it does not exist", "folder": "a folder", "phone": "a phone number with its country code, like +4915112345678",
@@ -71,27 +66,6 @@ def describeTasks():
     lines.append("The news outlets, by group: " + "; ".join(f"{group}: {', '.join(names)}" for group, names in NEWS_OUTLETS.items()) + ".")
     lines.append("The publishers: " + ", ".join(PAPER_PUBLISHERS) + ".")
     return "\n".join(lines)
-
-
-def describeFiles(folder):
-    if folder is None:
-        return "No folder."
-    lines, base = [], len(folder.parts)
-    for root, folders, files in os.walk(folder):
-        depth = len(Path(root).parts) - base
-        folders[:] = sorted(name for name in folders if not name.startswith(".") and name not in SKIPPED_FOLDERS and depth + 1 < FILES_DEPTH)
-        for name in sorted(files):
-            if name.startswith("."):
-                continue
-            path = Path(root) / name
-            try:
-                size = path.stat().st_size
-            except OSError:
-                continue
-            lines.append(f"- {path.relative_to(folder).as_posix()} ({size:,} bytes)")
-            if len(lines) >= FILES_LIMIT:
-                return "\n".join(lines + ["- ... (more files are not listed)"])
-    return "\n".join(lines) or "The folder is empty."
 
 
 # Everything the leader is told and checked against. keys and tokens are those of the program that runs the swarm (the API keys and
@@ -233,7 +207,7 @@ class LeaderCatalog(LeaderChecks):
 
     def buildPrompt(self):
         taken = self.leaderModel["vram"] if self.leaderModel else 0.0
-        return prompts.LEADER_BUILD_PROMPT.format(rules=self.rules(), mission=self.mission, folder=self.describeFolder(), files=describeFiles(self.folder),
+        return prompts.LEADER_BUILD_PROMPT.format(rules=self.rules(), mission=self.mission, folder=self.describeFolder(),
                                                   tasks=describeTasks(), models=self.describeModels(taken, self.moneyLeft(self.leaderTeam())),
                                                   costs=self.describeCosts(self.leaderTeam()), most=self.maxAgents)
 

@@ -78,7 +78,7 @@ MESSENGER_FIELDS += [{**field, "key": answerKey(app, field["key"]), "when": lamb
 TASKS = {
     "email": {
         "label": "Email writer and sender", "name": "Emailer", "role": "email writer", "recommend": "email", "build": buildEmail,
-        "folder": "A copy of every email it sends is saved in this folder.",
+        "folder": "It can read every file of this folder, and a copy of every email it sends is saved in its swarmup-results folder.",
         "info": "This agent writes an email and sends it from your account. If you give an IMAP server, it reads the latest email of the receiver with the same subject, "
                 "and it reads your earlier emails to them, to keep the same tone. It never sends anything before you approve the exact text. It needs your login, "
                 "which is only kept in memory while the program runs.",
@@ -100,14 +100,14 @@ TASKS = {
     },
     "calendar": {
         "label": "Calendar planner", "name": "Planner", "role": "calendar planner", "recommend": "calendar", "build": lambda model, answers: CalendarLoop(model, answers["request"], loops(answers)),
-        "folder": "The calendar file calendar_events.ics is also written in this folder.",
+        "folder": "It can read every file of this folder, and the calendar file calendar_events.ics is also written in it.",
         "info": "This agent books an event in a calendar file. It avoids the events already booked, tells you if the new one overlaps, and writes calendar_events.ics, "
                 "which you can import into Google Calendar, Outlook or Apple Calendar. The event is only booked after you approve it.",
         "fields": [{"key": "request", "ask": "Which event must be planned? (for example: dentist next Monday at 10:30 for one hour)", "kind": "text", "required": True}],
     },
     "news": {
         "label": "News briefer", "name": "NewsBriefer", "role": "news briefer", "recommend": "news", "build": buildNews,
-        "folder": "Every approved briefing is saved in this folder as a text file.",
+        "folder": "It can read every file of this folder, and every approved briefing is saved in its swarmup-results folder.",
         "info": "This agent reads the news feeds you choose, and writes a short briefing from their headlines, with the link of every story. It only uses facts "
                 "of the headlines. You choose the outlets, the topics you care about, and the time of the day when the feeds are collected. The briefing is saved "
                 "only after you approve it, and if you like it is also sent to your phone in Telegram or WhatsApp.",
@@ -125,7 +125,7 @@ TASKS = {
     "author": {
         "label": "Writer (texts, essays, articles)", "name": "Writer", "role": "writer", "recommend": "writing",
         "build": lambda model, answers: AuthorLoop(model, answers["subject"], answers["length"], loops(answers)),
-        "folder": "Every approved text is saved in this folder as a file.",
+        "folder": "It can read every file of this folder (your notes, your earlier texts...), and every approved text is saved in its swarmup-results folder.",
         "info": "This agent writes a text on a subject you give, with a maximum length. It reads your earlier texts to match your writing style, and saves the "
                 "text only after you approve it.",
         "fields": [{"key": "subject", "ask": "What must the text be about?", "kind": "text", "required": True},
@@ -133,7 +133,7 @@ TASKS = {
     },
     "literature": {
         "label": "Literature reviewer", "name": "Reviewer", "role": "literature reviewer", "recommend": "literature", "build": buildLiterature,
-        "folder": "Every approved survey is saved in this folder as a file.",
+        "folder": "It can read every file of this folder, and every approved survey is saved in its swarmup-results folder.",
         "info": "This agent searches papers on a subject, reads their abstracts, and writes a survey that cites each paper with its exact link. The links are checked, "
                 "so a paper that was not found cannot be invented. You choose where to search (search engines, and publishers) and you can add publishers by their name.",
         "fields": [
@@ -149,7 +149,7 @@ TASKS = {
     "format": {
         "label": "Document formatter", "name": "Formatter", "role": "document formatter", "recommend": "formatting",
         "build": lambda model, answers: DocumentFormatLoop(model, answers["filePath"], answers["style"], loops(answers)),
-        "folder": "The formatted copy is saved in this folder, so the document must be inside it.",
+        "folder": "The document must be inside this folder, and the formatted copy is saved next to it. It can also read the other files of the folder.",
         "info": "This agent changes only the layout of a document (headings, lists, punctuation) in the style you ask. It checks that no word was lost or changed. "
                 "Your file is never modified: the result is saved next to it with _formatted in its name, after you approve it.",
         "fields": [{"key": "filePath", "ask": "Path of the document to format", "kind": "file", "required": True},
@@ -158,7 +158,7 @@ TASKS = {
     "math": {
         "label": "Math checker", "name": "MathChecker", "role": "math checker", "recommend": "math",
         "build": lambda model, answers: MathCheckLoop(model, answers["filePath"], loops(answers)),
-        "folder": "The report is saved in this folder, so the text to check must be inside it.",
+        "folder": "The text to check must be inside this folder, and the report is saved next to it. It can also read the other files of the folder (the sections, the references...).",
         "info": "This agent referees a research text like a reviewer: it goes through every theorem, lemma and claim, and through the key steps of their proofs. "
                 "Each finding quotes the text, and a second check tries to refute the findings that report an error. It checks logic and proofs, not arithmetic. "
                 "The report is saved next to your file after you approve it.",
@@ -167,7 +167,7 @@ TASKS = {
     "coder": {
         "label": "Coder", "name": "Coder", "role": "coder", "recommend": "code",
         "build": lambda model, answers: CoderLoop(model, answers["task"], answers["filePath"], answers["testCommand"], loops(answers)),
-        "folder": "The code file must be inside this folder, and the command that checks the code starts in it.",
+        "folder": "The code file must be inside this folder, and the command that checks the code starts in it. It can read every other file of the folder.",
         "info": "This agent writes the code of one file and checks it by running a command. It writes and RUNS code on your computer, so it asks your permission "
                 "before it starts, and again for every draft. If you do not give a command, the file is run with Python.",
         "fields": [{"key": "task", "ask": "What must the code do?", "kind": "text", "required": True},
@@ -181,7 +181,7 @@ TASKS = {
 LEADER_TASK = {
     "label": "Leader that builds the swarm", "name": "Leader", "role": "leader", "recommend": "leading",
     "build": lambda model, answers: LeaderLoop(model, answers["mission"], loops(answers)),
-    "folder": "The folder of the mission: the agents work in it, and the final report is saved in it.",
+    "folder": "The folder of the mission: every agent can read all its files, at any depth, and what they make (the final report too) is saved in its swarmup-results folder.",
     "info": "This agent builds the swarm for your mission: it chooses the agents, their tasks and their models, and you approve its proposal. While the swarm works "
             "it can propose to add or remove agents, always with a reason, and nothing changes before you approve. At the end it writes the final report.",
     "fields": [{"key": "mission", "ask": "What must the swarm achieve?", "kind": "text", "required": True}],

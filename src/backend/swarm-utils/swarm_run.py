@@ -1,8 +1,10 @@
 import threading
+import time
 import traceback
 from datetime import datetime
 from functools import partial
 
+from agent_storehouse import WorkSession, clearSession, makeRunName
 from harness_utils import STATE_LOCK, STOPPED_MESSAGE, SwarmStopped
 from saved_swarms import clearSwarmState, saveSwarmState
 
@@ -24,13 +26,18 @@ class SwarmRun:
             if member["status"] != "done":
                 member["agent"].rollback()
         clearSwarmState(self.id)
+        clearSession(self.id)
         self.emit("stopped")
 
     def isRunning(self):
         return self.active or (self.thread is not None and self.thread.is_alive())
 
     # For a program that is about to stop while the swarm runs: the state is saved as interrupted, so the next start finds it at once.
+    # A run that is still getting ready (its thread started, but it is not active yet) is waited for, so it is saved too.
     def saveForExit(self):
+        deadline = time.monotonic() + STOP_TIMEOUT
+        while not self.active and self.thread is not None and self.thread.is_alive() and time.monotonic() < deadline:
+            time.sleep(0.01)
         if self.active:
             self.closeRun(False)
 
@@ -180,10 +187,14 @@ class SwarmRun:
             if name in self.finished:
                 self.finished[name].set()
 
-    # Everything of the last run is cleared, except the plans approved in plan mode, which the agents follow when they execute.
-    # A resumed run keeps it all: what is done stays done, and the agents that did not finish remember what they did.
+    # Everything of the last run is cleared, except the plans approved in plan mode, which the agents follow when they execute, and the notes of
+    # the session. A resumed run keeps it all: what is done stays done, and the agents that did not finish remember what they did.
+    # Each new run saves its results in a folder of its own, and a resumed run in the same one.
     def prepareRun(self, resume=False):
         self.stopped, self.interruption, self.saveFailed = False, None, False
+        if not (resume and self.runName):
+            self.runName = makeRunName(self.mission)
+        self.session = WorkSession(self.id, self.runName)
         if not resume:
             self.messages, self.summary = [], ""
         for name, member in self.members.items():
@@ -208,14 +219,15 @@ class SwarmRun:
                     self.communicate(self.leader, name, self.describe(name))
             self.getMember(self.leader)["agent"].receive("swarm", self.describe(self.leader))
 
-    # What a swarm gives to the loop of an agent while it runs: who reviews its drafts, what happens when the connection is lost, and when it is saved.
+    # What a swarm gives to the loop of an agent while it runs: who reviews its drafts, what happens when the connection is lost, when it is saved,
+    # and the memory of the session.
     # What the user allowed a coding agent "until the swarm runs again" ends here. The leader of a managed swarm has what it writes read by the manager.
     def connectAgent(self, name, member, resume):
         agent = member["agent"]
         agent.resumed = resume
         if hasattr(agent.agent, "newRun"):
             agent.agent.newRun()
-        agent.name, agent.reviewer = name, partial(self.waitForReview, name)
+        agent.name, agent.reviewer, agent.session = name, partial(self.waitForReview, name), self.session
         agent.onConnectionLost, agent.onProgress = partial(self.waitForResume, name), self.checkpoint
         agent.onAnswer = self.manager.readOutput if self.manager is not None and name == self.leader else None
 
@@ -306,7 +318,7 @@ class SwarmRun:
         finally:
             for member in self.members.values():
                 agent = member["agent"]
-                agent.reviewer = agent.onConnectionLost = agent.onProgress = agent.onAnswer = None
+                agent.reviewer = agent.onConnectionLost = agent.onProgress = agent.onAnswer = agent.session = None
                 agent.resumed = False
             self.stage = None
             self.closeRun(ended)

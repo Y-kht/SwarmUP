@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 import agent_prompts as prompts
+from agent_storehouse import consultFolder, describeWorkplace, folderProblem, resultsFolder, safeName
 from harness_utils import ConnectionLost, USER_LOCK, asConnectionLost, checkLength, isNo, isOnline, isYes, loadRules
 
 
@@ -40,6 +41,8 @@ class Loop:
         self.thinking = threading.RLock()
         # Called after every call of the model, even one that failed (it may have been billed), so the cost of the mission is shown as it grows.
         self.onUsage = None
+        # The memory of the swarm session the agent works in (WorkSession in agent_storehouse.py), set by the swarm while it runs.
+        self.session = None
 
     # Messages sent by the other agents of a swarm. The agent reads them with every prompt.
     def receive(self, sender, message):
@@ -87,6 +90,9 @@ class Loop:
         path = Path(folder).expanduser().resolve()
         if not path.is_dir():
             raise ValueError(f"There is no folder at {path}.")
+        problem = folderProblem(path)
+        if problem:
+            raise ValueError(problem)
         for file in self.files():
             if not file.expanduser().resolve().is_relative_to(path):
                 raise ValueError(f"{file.name} is not inside {path}. Choose a folder that contains it.")
@@ -95,14 +101,19 @@ class Loop:
     def describeFolder(self):
         return f" It works inside the folder {self.folder}." if self.folder else ""
 
-    # Saves what the agent produced as a file in its folder, if it has one. The name has the time of the run, and a run that is
-    # resumed keeps it, so the same file is written again instead of a new one.
+    # Saves what the agent produced in the folder of the run (resultsFolder in agent_storehouse.py): swarmup-results/<run> inside its folder,
+    # or agent-files/results/<run> without a folder. In a swarm the run is the one of the swarm. Alone, the run is named by the time of the
+    # first save, and a run that is resumed keeps it, so the same file is written again instead of a new one.
     def saveResult(self, name, text, suffix=".md"):
-        if not self.folder:
-            return None
-        if not (self.resumed and self.progress.get("stamp")):
-            self.progress["stamp"] = f"{datetime.now():%Y-%m-%d_%H-%M-%S}"
-        path = self.folder / f"{name}_{self.progress['stamp']}{suffix}"
+        if self.session:
+            runName = self.session.runName
+        else:
+            if not (self.resumed and self.progress.get("stamp")):
+                self.progress["stamp"] = f"{datetime.now():%Y-%m-%d_%H-%M-%S}"
+            runName = self.progress["stamp"]
+        folder = resultsFolder(self.folder, runName)
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"{safeName(self.name)}_{name}{suffix}"
         path.write_text(text, encoding="utf-8")
         self.logAction(f"Saved {path}.")
         return path
@@ -152,7 +163,11 @@ class Loop:
 
     # own is False for the calls a leader makes to manage the swarm (summaries, corrections): the rules and the plan
     # of the task of the leader, like the rules of emails, do not apply to them.
-    def askAgent(self, prompt, own=True):
+    # With tools (by default for its own calls) the agent sees the files of its folder and can read them before it answers, and it keeps
+    # notes in the memory of the session (see agent_storehouse.py). The calls that only check a draft go without them.
+    def askAgent(self, prompt, own=True, tools=None):
+        tools = own if tools is None else tools
+        prompt = describeWorkplace(self, prompt, tools)
         if own and self.approvedPlan:
             prompt = prompts.APPROVED_PLAN_PROMPT.format(plan=self.approvedPlan) + f"\n\n{prompt}"
         if self.userMessages:
@@ -165,13 +180,16 @@ class Loop:
             # A coding agent (Claude Code, Codex) works in the folder of the loop and asks the user through it before it acts.
             if hasattr(self.agent, "attach"):
                 self.agent.attach(self)
-            # The calls of a leader that manages the swarm never wait for the user: they have a fallback of their own.
-            try:
-                answer = self.keepTrying(lambda: self.agent.input(prompt)) if own else self.agent.input(prompt)
-            finally:
-                if self.onUsage:
-                    self.onUsage()
+            answer = consultFolder(self, prompt, lambda text: self.callModel(text, own), tools)
         return self.onAnswer(answer) if self.onAnswer else answer
+
+    # The calls of a leader that manages the swarm never wait for the user: they have a fallback of their own.
+    def callModel(self, prompt, own):
+        try:
+            return self.keepTrying(lambda: self.agent.input(prompt)) if own else self.agent.input(prompt)
+        finally:
+            if self.onUsage:
+                self.onUsage()
 
     # The next three are the only places where the user is spoken to. A user interface can replace them.
     def notifyUser(self, message):
@@ -258,7 +276,7 @@ class Loop:
         if not self.rules:
             return ""
         answer = self.askAgent("Check the draft below against the rules that apply to what the agent writes. "
-                               f"Reply only OK if it follows all of them, otherwise list the rules it breaks.\n\n{draft}")
+                               f"Reply only OK if it follows all of them, otherwise list the rules it breaks.\n\n{draft}", tools=False)
         return "" if answer.strip().upper().startswith("OK") else answer
 
     def checkNewMessages(self, messagesBefore):

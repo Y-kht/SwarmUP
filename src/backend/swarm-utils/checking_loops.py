@@ -42,7 +42,7 @@ class MathCheckLoop(Loop):
     def challenge(self, quote, why):
         answer = self.askAgent("You are a second, skeptical referee. A reviewer says the passage below has a problem. "
                                "Check it carefully against the whole document. Reply CONFIRMED if it really has this problem, "
-                               f"otherwise reply REJECTED and explain why.\nPassage: {quote}\nProblem: {why}\n\nDocument:\n{self.original}")
+                               f"otherwise reply REJECTED and explain why.\nPassage: {quote}\nProblem: {why}\n\nDocument:\n{self.original}", tools=False)
         return "" if answer.strip().upper().startswith("CONFIRMED") else answer
 
     def checkReport(self, report):

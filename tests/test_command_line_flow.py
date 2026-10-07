@@ -1111,7 +1111,7 @@ class EndToEndTests(ProgramCase):
         self.assertEqual(steps, sorted(steps))
         self.assertLess(text.index("--- Folder of agent 1 of 1: Writer (writer) ---"), text.index("--- Model of agent 1 of 1: Writer (writer) ---"))
         self.assertIn(f"It works inside the folder {work.resolve()}.", text.split("--- Model of agent 1 of 1")[1])
-        [saved] = list(work.glob("text_*.md"))
+        [saved] = list(work.glob("swarmup-results/*_write-a-text/Writer_text.md"))
         self.assertEqual(saved.read_text(encoding="utf-8"), "A short text.")
 
     def testTheMenuChangesTheOrderAndTheModelsBeforeTheStart(self):

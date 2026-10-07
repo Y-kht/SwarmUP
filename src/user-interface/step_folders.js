@@ -85,11 +85,11 @@ function viewFolders() {
     go('models');
   };
   return {
-    header: header(stepEyebrow('folders'), 'Where does each agent work?', 'Optional. An agent can work inside a folder of your computer: it saves what it makes there, and the files it works on must be in it.'),
+    header: header(stepEyebrow('folders'), 'Where does each agent work?', 'Optional. An agent can work inside a folder of your computer: it can read all its files, at any depth, and it saves what it makes in its swarmup-results folder.'),
     content: h('div', { class: 'agent-rows' }, agents.map(agent => folderRow(agent, save))),
     footer: footer({ onClick: () => go('agents') }, { label: 'Continue to the models', onClick: saveAll }, { text: `${agents.filter(agent => agent.folder).length} of ${agents.length} with a folder` }),
     guide: [
-      { q: 'Do I need folders?', text: 'No. Without a folder, an agent shows you its work here, and saves nothing on its own (the formatter and the math checker save next to your file).', tone: 'tip', icon: 'folder' },
+      { q: 'Do I need folders?', text: 'No. Without a folder, an agent reads none of your files, and what it makes is saved in agent-files/results of SwarmUP (the formatter and the math checker save next to your file).', tone: 'tip', icon: 'folder' },
       { q: 'What goes in it?', text: ['the email writer: a copy of every email sent', 'the calendar planner: calendar_events.ics', 'the writers: every approved text', 'the coder: its file and its test run'] },
       { q: 'Safety', text: 'An agent only writes inside its own folder, and only after you approve. The original of a document is never changed.' },
     ],

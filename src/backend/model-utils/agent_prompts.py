@@ -85,6 +85,40 @@ Never answer the user directly: keep replying in exactly the format your task as
 
 
 # ==============
+# The folder and the memory of an agent (agent_storehouse.py). Every model can reach the files of its folder with these blocks: SwarmUP answers
+# them and asks the model again, so a model without tools of its own reads the files too. The notes are the memory of the agent in a swarm session.
+# ==============
+FOLDER_TOOLS_PROMPT = """YOUR FOLDER
+You work in the folder {folder}. Its files, at every depth (the paths are relative to it):
+{tree}
+You can read any file of this folder before you answer: SwarmUP reads it for you. To do so, reply ONLY with one or more of these lines,
+and write your real answer after SwarmUP gives you what you asked:
+<swarmup_read>path/of/a/file</swarmup_read> gives the text of a file (also .docx and .pdf). A long file comes in parts: <swarmup_read part="2">path/of/a/file</swarmup_read>
+<swarmup_list>path/of/a/folder</swarmup_list> gives the files of a folder
+<swarmup_find>*.tex</swarmup_find> gives the files whose name matches, at any depth (a pattern, or a part of the name)
+<swarmup_search>some words</swarmup_search> gives the lines of the files that contain these words
+You can ask several at once, and ask again {rounds} times at most. Read only what your task needs. You can only read: nothing in the folder changes."""
+
+
+NOTES_PROMPT = """YOUR NOTES
+What you wrote down earlier in this mission, the oldest first:
+{notes}
+To remember something for the rest of the mission (a fact you found, a file that matters, a decision), write it anywhere in your answer as
+<swarmup_note>what to remember</swarmup_note>. SwarmUP keeps it, shows it to you with every prompt, and takes it out of your answer."""
+
+
+FOLDER_ANSWER_PROMPT = """You asked:
+{asked}
+
+SwarmUP answers:
+{files}
+
+{next}"""
+FOLDER_NEXT_ROUND = "Now ask for more if your task really needs it, or write your answer, in exactly the format the task asks for, without any <swarmup_...> request."
+FOLDER_LAST_ROUND = "You cannot ask for more files now. Write your answer, in exactly the format the task asks for, without any <swarmup_...> request."
+
+
+# ==============
 # Plan mode and execute mode of a swarm.
 # In plan mode every agent writes a plan for its own task, and the leader summarises all the plans for the user.
 # In execute mode the leader summarises what the agents have done so far and what they are about to do.
@@ -152,7 +186,8 @@ HOW SWARMUP WORKS
 - The agents work at the same time, except an agent that waits for others: it starts when they are done, and it receives their results as messages.
 - You do no task yourself. You work last: when all the agents are done, you receive their results and write the final report for the user.
 - The user approves the work of every agent before anything is sent, booked or saved.
-- All the agents work in the folder of the mission: they read their files there and save what they make there.
+- All the agents work in the folder of the mission. Every agent can read every file of it, at any depth, whatever its model, and what it makes
+  is saved in the folder swarmup-results of the mission, in one folder for each run.
 
 WHAT YOU CAN DO
 You never act yourself: you write proposals in blocks. SwarmUP reads each block, checks it, and shows it to the user with your reason.
@@ -217,8 +252,7 @@ THE MISSION OF THE USER
 
 THE FOLDER OF THE MISSION
 {folder}
-What it contains:
-{files}
+Its files are listed at the start of this prompt, and you can read them before you answer.
 
 THE TASKS AN AGENT CAN HAVE
 {tasks}

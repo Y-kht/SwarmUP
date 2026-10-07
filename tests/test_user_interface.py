@@ -591,7 +591,7 @@ class LeaderModeTests(SessionTestCase):
             time.sleep(0.05)
         run = self.waitForEnd()
         self.assertEqual((run["state"], run["agents"][0]["result"]), ("succeeded", "Report: every agent did its work."))
-        self.assertEqual(len(list(self.folder.glob("report_*.md"))), 1)
+        self.assertEqual(len(list(self.folder.glob("swarmup-results/*/Leader_report.md"))), 1)
 
     def testTheLeaderAddsAnAgentWhileTheSwarmRunsOnceTheUserApproves(self):
         agents = [{"name": "Writer", "task": "author", "model": "claude-sonnet-5-5", "settings": {"subject": "bees"}, "why": "It writes."},
