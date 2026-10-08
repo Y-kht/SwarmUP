@@ -227,6 +227,44 @@ class BuilderTests(SessionTestCase):
         self.assertEqual([entry["name"] for entry in self.act("browse", path=str(self.folder))["browse"]["entries"]], ["b-folder"])
 
 
+class GeneralAgentTests(SessionTestCase):
+    def testAgentsAreAddedWithTheirInstructionsAndWorkInTheFolderOfTheSwarm(self):
+        self.act("setMission", mission="A report on my notes")
+        ids = self.act("addAgents", count=2)["agentIds"]
+        state = self.session.describe()
+        self.assertEqual([(agent["task"], agent["name"], agent["prompt"], agent["rules"]) for agent in state["agents"]], [("agent", "Agent", "", []), ("agent", "Agent2", "", [])])
+        self.act("saveAgent", task="agent", agentId=ids[0], name="Analyst", values={"prompt": "List the findings of the notes", "rules": ["Author"]})
+        with self.assertRaises(interface_views.FormError):
+            self.act("saveAgent", task="agent", agentId=ids[1], values={"prompt": "", "rules": []})
+        work = self.folder / "work"
+        work.mkdir()
+        self.assertEqual(self.act("setSwarmFolder", folder=str(work))["kept"], [])
+        state = self.session.describe()
+        self.assertEqual((state["swarmFolder"], state["mixedFolders"], state["agents"][0]["rules"]), (str(work.resolve()), False, ["Author"]))
+        third = self.act("addAgents", count=1)["agentIds"][0]
+        self.assertEqual(self.session.findSpec(third)["answers"]["folder"], str(work.resolve()))
+        for agentId in (*ids, third):
+            self.chooseApi(agentId)
+        with self.assertRaisesRegex(ValueError, "Write what Agent2, Agent must do, in the step of the agents."):
+            self.session.buildSwarm()
+        self.assertIn("rules", self.act("taskForm", task="agent")["form"]["fields"][1]["key"])
+        catalog = interface_views.catalog()
+        self.assertEqual([task["key"] for task in catalog["tasks"] if not task["specialised"]], ["agent"])
+        self.assertIn({"name": "Author", "file": "AUTHOR_RULES.md", "about": "Rules for the text the agent writes"}, catalog["rules"])
+
+    def testAnAgentWhoseFileIsElsewhereKeepsItsFolder(self):
+        document = self.folder / "paper.tex"
+        document.write_text("Theorem 1.", encoding="utf-8")
+        agentId = self.act("saveAgent", task="math", values={"filePath": str(document)})["agentId"]
+        self.act("setFolder", agentId=agentId, folder=str(self.folder))
+        work = self.folder / "work"
+        work.mkdir()
+        kept = self.act("setSwarmFolder", folder=str(work))["kept"]
+        self.assertEqual(len(kept), 1)
+        self.assertIn("MathChecker keeps its folder", kept[0])
+        self.assertEqual(self.session.findSpec(agentId)["answers"]["folder"], str(self.folder.resolve()))
+
+
 class ModelTests(SessionTestCase):
     def testALocalModelThatDoesNotFitIsRefusedAndOneThatFitsIsChosen(self):
         self.act("setMission", mission="Bees.")

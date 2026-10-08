@@ -35,6 +35,7 @@ from models_library import getModelInfo
 from sources_library import MESSAGING_APPS
 from swarm_harness import Swarm
 from writing_loops import AuthorLoop, DocumentFormatLoop, LiteratureSurveyLoop
+from general_loop import GeneralLoop
 
 RSS = """<?xml version="1.0"?><rss version="2.0"><channel><title>T</title>
 <item><title>First &amp; best</title><link>http://x.test/1</link><description><![CDATA[<p>Hello <b>world</b> &amp; all</p>]]></description></item>
@@ -3002,6 +3003,39 @@ class FolderTests(LoopTestCase):
         again.resumed = True
         again.run()
         self.assertEqual(len(list(self.work.glob("swarmup-results/*/AuthorLoop_text.md"))), 1)
+
+
+
+class GeneralAgentTests(LoopTestCase):
+    def testItFollowsTheGeneralRulesAndTheRulesChosenForIt(self):
+        loop = GeneralLoop(FakeAgent(), "Write a poem", ["Author", "CODER_RULES.md"])
+        for title in ("Rules for every agent that follows the instructions of the user", "Rules for the text the agent writes", "Rules for the code the agent writes"):
+            self.assertIn(title, loop.rules)
+        self.assertEqual(loop.describeTask(), "Write a poem. It follows the rules: Author, CODER_RULES.md.")
+        self.assertEqual(GeneralLoop(FakeAgent(), "Write a poem.").describeTask(), "Write a poem.")
+        with self.assertRaisesRegex(ValueError, "There are no rules called Cooking in agent-rules."):
+            GeneralLoop(FakeAgent(), "Cook", ["Cooking"])
+
+    def testAReviewSendsTheDraftBackUntilItIsGoodThenTheUserApproves(self):
+        agent = FakeAgent(["A draft", "1) It misses the file names.", "A better draft", "GOOD"])
+        loop = self.script(GeneralLoop(agent, "List the findings of my notes, with their files", ["Author"]), ["yes"])
+        self.assertEqual(loop.run(), "A better draft")
+        self.assertIn("List the findings of my notes, with their files", agent.prompts[0])
+        self.assertIn("Rules for the text the agent writes", agent.prompts[1])
+        self.assertIn("The result of the agent:\nA draft", agent.prompts[1])
+        self.assertIn("Improve it. What to change: 1) It misses the file names.", agent.prompts[2])
+        self.assertEqual(list((self.folder / "results").glob("*/GeneralLoop_result.md"))[0].read_text(encoding="utf-8"), "A better draft")
+
+    def testTheReviewStopsAfterItsRoundsAndTheUserDecides(self):
+        agent = FakeAgent(["Draft 1", "Not good", "Draft 2", "Still not good", "Draft 3"])
+        loop = self.script(GeneralLoop(agent, "Write a plan"), ["no"])
+        self.assertIsNone(loop.run())
+        self.assertEqual(len(agent.prompts), 5)
+        self.assertIn("The result was not kept.", loop.said)
+        empty = self.script(GeneralLoop(FakeAgent(["", "A draft", "GOOD"]), "Write a plan"), ["yes"])
+        self.assertEqual(empty.run(), "A draft")
+        with self.assertRaisesRegex(ValueError, "This agent has no instructions"):
+            GeneralLoop(FakeAgent(), "  ").run()
 
 
 if __name__ == "__main__":

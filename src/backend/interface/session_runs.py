@@ -161,6 +161,9 @@ class SessionRuns:
         missing = [spec["name"] for spec in self.specs if not spec["model"]]
         if missing:
             raise ValueError(f"Choose a model for {', '.join(missing)} first.")
+        silent = [spec["name"] for spec in self.specs if spec["task"] == "agent" and not str(spec["answers"].get("prompt") or "").strip()]
+        if silent:
+            raise ValueError(f"Write what {', '.join(silent)} must do, in the step of the agents.")
         self.makeClients()
         leader = self.leaderSpec()
         if leader and not leader["answers"].get("folder"):

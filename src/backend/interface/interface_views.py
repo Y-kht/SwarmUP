@@ -9,12 +9,12 @@ import sys
 from pathlib import Path
 
 from agent_storehouse import folderProblem
-from harness_utils import ConnectionLost, USER_NAME, describeError
+from harness_utils import ConnectionLost, USER_NAME, describeError, listRules
 from messengers import MessagingError
 from model_support import ModelError, getApiKey, getHubFolder, isDownloaded
 from models_library import API_KEYS, BITS, DEFAULT_CLI_MODEL, MODELS_API, MODELS_CLI, MODELS_LOCAL, PRICING_PAGES, isGated
 from sources_library import MESSAGING_APPS, NEWS_OUTLETS, PAPER_PUBLISHERS
-from tasks_library import DEFAULT_LOOPS, LEADER_TASK, NO_MESSENGER, TASKS, getDefault, getHelp
+from tasks_library import DEFAULT_LOOPS, LEADER_TASK, NO_MESSENGER, SPECIALISED_TASKS, TASKS, getDefault, getHelp
 
 
 BROWSE_LIMIT = 3000
@@ -225,9 +225,10 @@ def browseFolder(text, files=False, hidden=False):
 
 
 def catalog():
-    tasks = [{"key": key, "label": task["label"], "role": task["role"], "info": task["info"], "folder": task["folder"], "name": task["name"]} for key, task in TASKS.items()]
+    tasks = [{"key": key, "label": task["label"], "role": task["role"], "info": task["info"], "folder": task["folder"], "name": task["name"], "specialised": key in SPECIALISED_TASKS}
+             for key, task in TASKS.items()]
     providers = {key: {**details, "models": MODELS_API[key], "pricing": PRICING_PAGES.get(key, "")} for key, details in API_KEYS.items()}
-    return {"tasks": tasks, "providers": providers, "families": list(MODELS_LOCAL), "bits": list(BITS), "outlets": {group: list(names) for group, names in NEWS_OUTLETS.items()},
+    return {"tasks": tasks, "rules": listRules(), "providers": providers, "families": list(MODELS_LOCAL), "bits": list(BITS), "outlets": {group: list(names) for group, names in NEWS_OUTLETS.items()},
             "publishers": PAPER_PUBLISHERS, "messaging": {app: details["info"] for app, details in MESSAGING_APPS.items()}, "noMessenger": NO_MESSENGER,
             "defaultLoops": DEFAULT_LOOPS, "platform": {"os": sys.platform, "separator": os.sep, "home": str(Path.home())}, "user": USER_NAME,
             "codingAgents": {key: {"label": agent["label"], "company": agent["company"], "page": agent["page"], "models": agent["models"], "provider": agent["provider"]}

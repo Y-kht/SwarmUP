@@ -68,7 +68,7 @@ class Session(SessionSteps, SessionModels, SessionRuns, SessionSaved):
             "browse", "pickPath", "setFolder", "openFolder", "modelCatalog", "lookupModel", "price", "chooseModel", "testModel", "checkPackages", "setOrder", "planOrder",
             "setMode", "start", "execute", "answer", "approve", "reject", "correct", "message", "startNow", "prepareStop", "stop", "clearJob", "newSwarm",
             "resumeForm", "resume", "prepareCancel", "abandon", "refreshUnfinished", "openLink", "codexAccount", "codexSignIn", "codexCancel", "joinLive",
-            "removeLive", "setBuildMode", "buildWithLeader", "setBudget", "saveSettings", "quit")}
+            "removeLive", "setBuildMode", "buildWithLeader", "setBudget", "saveSettings", "quit", "addAgents", "setSwarmFolder")}
 
     def reset(self):
         self.mission = ""
@@ -280,7 +280,8 @@ class Session(SessionSteps, SessionModels, SessionRuns, SessionSaved):
         return {"id": spec["id"], "name": spec["name"], "task": spec["task"], "label": task["label"], "role": task["role"], "description": spec["description"],
                 "folder": answers.get("folder"), "folderNote": task["folder"], "suggestion": suggestFolder(answers), "model": describeModel(spec["model"]),
                 "missing": spec["missing"], "isLeader": index == 0, "waitsFor": spec["waitsFor"], "loops": answers.get("numberOfLoops", DEFAULT_LOOPS),
-                "tested": spec.get("tested", ""), "pending": bool(spec.get("pending")), "builder": spec["task"] == "leader", "why": spec.get("why", "")}
+                "tested": spec.get("tested", ""), "pending": bool(spec.get("pending")), "builder": spec["task"] == "leader", "why": spec.get("why", ""),
+                "prompt": answers.get("prompt", ""), "rules": answers.get("rules") or []}
 
     def describeKeys(self):
         return {provider: {"company": details["company"], "variable": details["variable"], "page": details["page"],
@@ -331,6 +332,7 @@ class Session(SessionSteps, SessionModels, SessionRuns, SessionSaved):
             questions = [{key: value for key, value in question.items() if key not in ("event", "answer", "shown")} for question in self.questions.values()]
             jobs = {name: dict(job) for name, job in self.jobs.items()}
             agents = [self.describeSpec(spec, index) for index, spec in enumerate(self.specs)]
+            folders = {spec["answers"].get("folder") for spec in self.specs if spec["task"] != "leader"}
             cancelling = {key: value for key, value in self.cancelling.items() if key != "swarm"} if self.cancelling else None
             codexLogin = {key: value for key, value in self.codexLogin.items() if key != "login"} if self.codexLogin else None
         return {"version": version, "mission": self.mission, "buildMode": self.buildMode, "costs": self.describeCosts(), "settings": loadSettings(),
@@ -338,7 +340,7 @@ class Session(SessionSteps, SessionModels, SessionRuns, SessionSaved):
                 "maxAgentsLimit": MAX_AGENTS_LIMIT, "agents": agents, "mode": self.mode, "order": self.order, "keys": self.describeKeys(),
                 "gpu": self.describeGpus(), "run": self.describeRun(), "questions": questions, "jobs": jobs, "unfinished": self.unfinished, "busy": self.isBusy(),
                 "nativeDialogs": self.dialog is not None, "trash": self.trash["spec"]["name"] if self.trash else None, "cancelling": cancelling,
-                "codexLogin": codexLogin}
+                "codexLogin": codexLogin, "swarmFolder": next(iter(folders)) if len(folders) == 1 else None, "mixedFolders": len(folders) > 1}
 
     # Waits until something changed after the version the browser has, then gives the state and the new lines of the feed.
     def poll(self, version, feedAfter):

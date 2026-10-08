@@ -10,6 +10,9 @@ from tasks_library import (ADVANCED_FIELDS, TASKS, answerKey, buildLoop, checkAg
 from writing_loops import findPublishers
 
 
+MAX_NEW_AGENTS = 20
+
+
 # The first steps of the window (Session in session_core.py): the mission, the agents with the forms of their tasks, and their folders.
 class SessionSteps:
     # ---------- Step 1: the mission and the agents. ----------
@@ -107,6 +110,22 @@ class SessionSteps:
         spec.update(task=task, name=name, answers=answers, description=describeLoop(loop))
         self.dirty = self.dirty or not live
         return {"agentId": spec["id"], "description": spec["description"], "warning": warning}
+
+    # New agents that do what their instructions say, written right in the step of the agents. They work in the folder of the swarm.
+    def addAgents(self, payload):
+        self.checkIdle()
+        count = max(1, min(int(payload.get("count") or 1), MAX_NEW_AGENTS))
+        folder, added = self.sharedFolder(), []
+        for number in range(count):
+            self.agentNumber += 1
+            name = suggestName("agent", [spec["name"] for spec in self.specs])
+            answers = {"prompt": "", "rules": [], "folder": folder}
+            self.specs.append({"id": f"agent{self.agentNumber}", "task": "agent", "name": name, "answers": answers, "model": None, "client": None, "waitsFor": [],
+                               "missing": [], "pending": False, "description": describeLoop(buildLoop("agent", None, answers))})
+            added.append(self.specs[-1]["id"])
+        self.dirty, self.trash = True, None
+        self.sanitizeWaits()
+        return {"agentIds": added}
 
     def removeAgent(self, payload):
         spec = self.findSpec(payload.get("agentId"))
@@ -208,7 +227,33 @@ class SessionSteps:
             raise ValueError("The dialogs of the system are not available in this window.")
         return {"path": self.dialog(kind, str(payload.get("path") or ""))}
 
-    # ---------- Step 2: the folder of each agent. ----------
+    # ---------- Step 2: the folders. One folder for the whole swarm, and a folder of its own for an agent that needs one. ----------
+    # The folder the agents of the steps have in common, if they all have the same one (the folder of the swarm).
+    def sharedFolder(self):
+        folders = {spec["answers"].get("folder") for spec in self.specs if spec["task"] != "leader"}
+        return next(iter(folders)) if len(folders) == 1 else None
+
+    # Every agent works in the folder of the swarm. One that cannot (the file it works on is somewhere else) keeps its folder, and the user is told.
+    def setSwarmFolder(self, payload):
+        self.checkIdle()
+        text, folder = str(payload.get("folder") or "").strip(), None
+        if text:
+            folder, error = parseAnswer({"key": "folder", "ask": "", "kind": "folder"}, text)
+            if error:
+                raise FormError({"folder": error}, error)
+        kept = []
+        for spec in self.specs:
+            if spec["task"] == "leader":
+                continue
+            try:
+                loop = buildLoop(spec["task"], None, {**spec["answers"], "folder": folder})
+            except ValueError as problem:
+                kept.append(f"{spec['name']} keeps its folder: {problem}")
+                continue
+            spec["answers"]["folder"], spec["description"] = folder, describeLoop(loop)
+        self.dirty = True
+        return {"kept": kept}
+
     def setFolder(self, payload):
         spec = self.findSpec(payload.get("agentId"))
         self.checkIdle(spec)

@@ -456,12 +456,22 @@ class TaskQuestionsTests(unittest.TestCase):
     def testTheTaskIsChosenFromTheListAndInformationIsOneCommandAway(self):
         script = Script(["info 2", "info 99", "info", "?3", "2"])
         self.assertEqual(cli.chooseTask(script.console(), 1, 3), "calendar")
-        self.assertIn("Agent 1 of 3: what must this agent do?", script.text())
+        self.assertIn("Agent 1 of 3: which specialised task must it do?", script.text())
         self.assertIn("  1. Email writer and sender", script.said)
         self.assertEqual(sum(label.startswith("  ") for label in script.said), 9)
         self.assertIn(cli.TASKS["calendar"]["info"], script.said)
         self.assertIn(cli.TASKS["news"]["info"], script.said)
         self.assertEqual(script.said.count("Write info and the number of a task, like: info 3"), 2)
+
+    def testAnAgentIsItsInstructionsAndTheRulesItFollowsOrASpecialisedTask(self):
+        script = Script(["", "Summarise the notes of the folder for my manager", "1,3", "", "Summariser"])
+        spec = cli.chooseAgent(script.console(), 1, 2, [])
+        self.assertEqual(spec, {"task": "agent", "answers": {"prompt": "Summarise the notes of the folder for my manager", "rules": ["Author", "Coder"]}, "name": "Summariser"})
+        self.assertIn("Write what this agent must do, or type tasks.", script.text())
+        self.assertIn("Your choices (numbers like 1,3-4; Enter = none; none = none of them):", script.prompts()[2])
+        self.assertIn("Summariser will do this: Summarise the notes of the folder for my manager. It follows the rules: Author, Coder.", script.text())
+        script = Script(["tasks", "2", "dentist next Monday at 10", "", ""])
+        self.assertEqual(cli.chooseAgent(script.console(), 2, 2, ["Summariser"])["task"], "calendar")
 
     def testACalendarAgentNeedsOnlyItsRequestAndAName(self):
         script = Script(["dentist next Monday at 10", "", "my planner", "Planner"])
@@ -648,10 +658,20 @@ class TaskQuestionsTests(unittest.TestCase):
 
     def testEveryAgentIsAskedAboutItsFolder(self):
         specs = [self.folderSpec("author", subject="a", length=3), self.folderSpec("math", filePath=str(self.document)), self.folderSpec("calendar", request="x")]
-        script = Script([str(self.folder), "", "none"])
+        script = Script([str(self.folder), "y", "", "", "none"])
         cli.chooseFolders(script.console(), specs)
         self.assertEqual([spec["answers"]["folder"] for spec in specs], [str(self.folder.resolve()), str(self.folder.resolve()), None])
-        self.assertIn("This is optional, and every agent can have its own folder.", script.text())
+        self.assertIn("Folder of the swarm", script.prompts()[0])
+        self.assertIn("Must some agents work in another folder?", script.text() + " ".join(script.prompts()))
+
+    def testOneFolderForTheSwarmAndItsOwnForAnAgentWhoseFileIsElsewhere(self):
+        elsewhere = tempfile.TemporaryDirectory()
+        self.addCleanup(elsewhere.cleanup)
+        specs = [self.folderSpec("agent", prompt="Summarise the notes"), self.folderSpec("math", filePath=str(self.document))]
+        script = Script([elsewhere.name, "", "n"])
+        cli.chooseFolders(script.console(), specs)
+        self.assertEqual([spec["answers"]["folder"] for spec in specs], [str(Path(elsewhere.name).resolve()), str(self.folder.resolve())])
+        self.assertIn("cannot work in this folder", script.text())
 
     def testTheLiteratureAgentGetsItsSearchesItsPublishersAndItsAccounts(self):
         found = [{"name": "Oxford University Press (OUP)", "id": 286, "papers": 2387000}, {"name": "Oxford Academic", "id": 5, "papers": 12}]
@@ -1063,15 +1083,15 @@ class ProgramCase(GpuTestCase):
 class EndToEndTests(ProgramCase):
     def testTwoWritersPlanTheirWorkAndThenExecuteIt(self):
         script = self.program(["2", "Write two short texts",
-                               "4", "the sea", "", "", "",
-                               "4", "the sky", "100", "", "",
-                               "", "",
+                               "tasks", "4", "the sea", "", "", "",
+                               "tasks", "4", "the sky", "100", "", "",
+                               "",
                                "2", "1", "n", "n",
                                "2", "1", "n", "n",
                                "1", "1",
                                "yes", "y", "yes", "yes"])
         text = script.text()
-        for line in ("Step 1: the task of each agent", "Step 2: the folder of each agent", "Step 3: the model of each agent", "Your swarm", "How many agents do you want in your swarm?"):
+        for line in ("Step 1: what each agent must do", "Step 2: the folder of the swarm", "Step 3: the model of each agent", "Your swarm", "How many agents do you want in your swarm?"):
             self.assertIn(line, script.text() + "How many agents do you want in your swarm?")
         self.assertIn("Writer will do this: Write a text about the sea in at most 300 words.", text)
         self.assertIn("Writer2 will do this: Write a text about the sky in at most 100 words.", text)
@@ -1096,7 +1116,7 @@ class EndToEndTests(ProgramCase):
 
     def testASingleLocalAgentExecutesRightAwayAndIsNotSummarised(self):
         script = self.program(["1", "Write a text",
-                               "4", "the sea", "", "", "",
+                               "tasks", "4", "the sea", "", "", "",
                                "",
                                "1", "1",
                                "2", "1", "yes"])
@@ -1115,14 +1135,14 @@ class EndToEndTests(ProgramCase):
         work = self.folder / "essays"
         work.mkdir()
         script = self.program(["1", "Write a text",
-                               "4", "the sea", "", "", "",
+                               "tasks", "4", "the sea", "", "", "",
                                str(work),
                                "1", "1",
                                "2", "1", "yes"])
         text = script.text()
         steps = [text.index(f"Step {number}:") for number in (1, 2, 3)]
         self.assertEqual(steps, sorted(steps))
-        self.assertLess(text.index("--- Folder of agent 1 of 1: Writer (writer) ---"), text.index("--- Model of agent 1 of 1: Writer (writer) ---"))
+        self.assertLess(text.index("Step 2: the folder of the swarm"), text.index("--- Model of agent 1 of 1: Writer (writer) ---"))
         self.assertIn(f"It works inside the folder {work.resolve()}.", text.split("--- Model of agent 1 of 1")[1])
         [saved] = list(work.glob("swarmup-results/*_write-a-text/Writer_text.md"))
         self.assertEqual(saved.read_text(encoding="utf-8"), "A short text.")
@@ -1130,8 +1150,8 @@ class EndToEndTests(ProgramCase):
     def testTheMenuChangesTheOrderAndTheModelsBeforeTheStart(self):
         cli.os.environ["OPENAI_API_KEY"] = "sk-openai"
         script = self.program(["3", "Three texts",
-                               "4", "a", "", "", "", "4", "b", "", "", "", "4", "c", "", "", "",
-                               "", "", "",
+                               "tasks", "4", "a", "", "", "", "tasks", "4", "b", "", "", "", "tasks", "4", "c", "", "", "",
+                               "",
                                "2", "1", "n", "n", "2", "1", "n", "n", "2", "1", "n", "n",
                                "1",
                                "4",
@@ -1152,8 +1172,8 @@ class EndToEndTests(ProgramCase):
 
     def testTheLeaderCanDecideWhoWaitsForWhom(self):
         script = self.program(["3", "Three texts",
-                               "4", "a", "", "", "", "4", "b", "", "", "", "4", "c", "", "", "",
-                               "", "", "",
+                               "tasks", "4", "a", "", "", "", "tasks", "4", "b", "", "", "", "tasks", "4", "c", "", "", "",
+                               "",
                                "2", "1", "n", "n", "2", "1", "n", "n", "2", "1", "n", "n",
                                "1",
                                "3", "2", "yes",
@@ -1169,7 +1189,7 @@ class EndToEndTests(ProgramCase):
         busy = lambda: self.currentGpus.__setitem__(slice(None), [{"name": "G", "total": 51.6, "free": 5.0}]) or "1"
         free = lambda: self.currentGpus.__setitem__(slice(None), [dict(gpu) for gpu in GPUS]) or "1"
         script = self.program(["1", "A text",
-                               "4", "the sea", "", "", "",
+                               "tasks", "4", "the sea", "", "", "",
                                "",
                                "1", "1",
                                "2", busy, free, "yes"])
@@ -1210,12 +1230,12 @@ class EndToEndTests(ProgramCase):
         self.assertEqual(created, ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5"])
 
     def testLeavingBeforeTheStartDoesNotRunAnything(self):
-        script = self.program(["1", "A text", "4", "the sea", "", "", "", "", "2", "1", "n", "n", "1", "5"])
+        script = self.program(["1", "A text", "tasks", "4", "the sea", "", "", "", "", "2", "1", "n", "n", "1", "5"])
         self.assertNotIn("The swarm starts", script.text())
         self.assertEqual(sum(len(model.prompts) for model in self.models), 0)
 
     def testTheTreeShownBeforeTheStartListsEveryAgentWithItsModel(self):
-        script = self.program(["2", "Two texts", "4", "a", "", "", "", "4", "b", "", "", "", "", "", "2", "1", "n", "n", "2", "1", "n", "n", "1", "5"])
+        script = self.program(["2", "Two texts", "tasks", "4", "a", "", "", "", "tasks", "4", "b", "", "", "", "", "2", "1", "n", "n", "2", "1", "n", "n", "1", "5"])
         tree = script.text().split("Your swarm")[1]
         self.assertIn("Writer [writer] claude-sonnet-5-5, API -> waiting for Writer2", tree)
         self.assertIn("`-- Writer2 [writer] claude-sonnet-5-5, API -> waiting", tree)
@@ -1498,7 +1518,7 @@ class LiveTeamTests(ProgramCase):
         swarm = Swarm("Bees")
         swarm.addAgent("Leader", Loop(None), "leader", "lead")
         swarm.addAgent("A", Loop(None), "writer", "write")
-        script = Script(["4", "the sea", "", "", "", "", "2", "1", "n", "n", ""])
+        script = Script(["tasks", "4", "the sea", "", "", "", "", "2", "1", "n", "n", ""])
         console, specs, models = script.console(), [], {}
         cli.addLive(console, swarm, specs, {}, {}, models)
         self.assertEqual(script.answers, [], "The program did not ask all the questions of the script.")

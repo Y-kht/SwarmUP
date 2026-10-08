@@ -28,7 +28,7 @@ Some tools, such as email, can also need credentials. You give your own credenti
     - `session_core.py` holds the `Session`, which connects the window to the swarm. Its parts are the steps of the form (`session_steps.py`), the models (`session_models.py`), the swarm that runs (`session_runs.py`) and the saved swarms (`session_saved.py`).
   - `src/backend/swarm-utils/`:
     - The tools that all parts use: `harness_utils.py` (the context files, the internet and the feeds), `agent_storehouse.py` (how the agents read the files of their folder, where their results are saved, and the memory of a swarm session), `agent_conversation.py` (the conversation of each agent with its model), `agent_tools.py` (the tools of the agents, their permissions, and how their changes are put back), `internet_cache.py` (the data from the internet, kept for when there is no connection), `mission_costs.py`, `user_settings.py`, `gpu_check.py`, `messengers.py` (the messaging apps) and `saved_swarms.py`.
-    - The loops of the agents: `base_loop.py` (the `Loop` that all loops are based on), `message_loops.py` (email, calendar and news), `writing_loops.py` (writing, papers, literature review and formatting) and `checking_loops.py` (math, code and the worker).
+    - The loops of the agents: `base_loop.py` (the `Loop` that all loops are based on), `general_loop.py` (the agent that does what its instructions say, with its review), `message_loops.py` (email, calendar and news), `writing_loops.py` (writing, papers, literature review and formatting) and `checking_loops.py` (math, code and the worker).
     - The swarm: `swarm_harness.py` holds the `Swarm`. Its members are in `swarm_team.py`, its reviews are in `swarm_review.py` and its run is in `swarm_run.py`.
     - The leader, which builds and manages the swarm: `leader_utils.py` (`designSwarm`), `leader_parser.py`, `leader_catalog.py`, `leader_checks.py` and `leader_manager.py`.
   - `src/backend/model-utils/`:
@@ -41,13 +41,17 @@ Some tools, such as email, can also need credentials. You give your own credenti
   - The names of the folders in `src/backend/` have hyphens, so these folders are not Python packages. Thus, the programs and the tests add each folder to the Python path.
 - **`tests/`**: One test file for each part. `patching.py` has `everywhere`. For a test, this function replaces a function in all the modules that come from the same original file.
 - **`agent-files/`**: The files for the functions of the agents, such as context files, memory files and other related resources. SwarmUP saves the state of each swarm that runs in `agent-files/swarm-runs/`, the memory of each swarm session in `agent-files/sessions/`, and the results of the agents that have no folder in `agent-files/results/`.
-- **`agent-rules/`**: The rules and configurations for the behavior and the decisions of the agents. Each agent must use these rules to make sure that it stays within the defined parameters and guidelines. Each agent has its own rules file.
+- **`agent-rules/`**: The rules and configurations for the behavior and the decisions of the agents. Each agent must use these rules to make sure that it stays within the defined parameters and guidelines. `AGENT_RULES.md` has the general rules of every agent that follows instructions, and you (or the leader) choose the other files that apply to each agent. Each specialised agent has its own rules file. A file that you add here (`NAME_RULES.md`) can be chosen too.
 
 ## Available features
 
 ### Agents
 
-Each agent does one task. First, it writes a draft. Then it checks the draft automatically (length, format, the rules of `agent-rules/`, links, missing words, proofs...) and makes it better. Then it shows the draft to you. You approve it, reject it or ask for changes. The agent acts only after your approval.
+To build a swarm, you say how many agents you need, the folder of the swarm, the budget of the mission, and what each agent must do, in your own words.
+
+- **An agent does what its instructions say.** Write them as you would brief an expert: what it must make, from what (the files of the folder, the work of other agents), for whom, and in what form. Each agent can follow rules files of `agent-rules/`: you choose them (Author for a text, Coder for code, Literature survey for a review of papers...), or the leader chooses them when it builds the swarm. The general rules (`AGENT_RULES.md`) always apply. You can add your own rules files to `agent-rules/`: they show in the list at the next start.
+- **Its work gets better before you see it.** The agent works in a conversation with its tools (it reads the files, and asks your permission to change them). Then a strict review checks its draft against your instructions and its rules, and can read the files to verify it. If the review finds a real problem, the agent writes the draft again with what to fix, two times at most. Then it shows the draft to you. You approve it, reject it or ask for changes, as many times as you need. The result is saved only after your approval, and if you reject it, every file that the agent changed is put back.
+- **Specialised agents**, kept apart in a panel that you open when you need one, do one thing that instructions alone cannot. Each one also checks its draft automatically (length, format, its rules, links, missing words, proofs...) and makes it better before you see it. The agent acts only after your approval:
 
 - **Email writer and sender:** It writes in the language that you select, in the tone of your earlier emails. It can read the latest reply from the recipient (IMAP). It sends (SMTP) the exact text that you approved. It has presets for Gmail, Outlook, Yahoo, iCloud and Zoho, and a login test that does not send anything.
 - **Calendar planner:** It books an event that does not overlap with the other events. It exports `calendar_events.ics`, which you can import into Google Calendar, Outlook and Apple Calendar.
@@ -103,7 +107,7 @@ A swarm has one or more agents. The first agent is the leader.
 
 You can build the swarm one agent at a time, or you can let the leader build it. For the leader, you select its model and the folder of the mission, and you tell it the mission.
 
-- The leader reads the mission, the names of the files in the folder, and the tasks that an agent can have, with their settings. It also reads the models that can run on your computer now: the local models that fit together in your GPUs, the API models (with or without a key), and Claude Code and Codex if they are ready. Then it proposes the full swarm: the agents, their tasks and settings, their models, and which agent waits for which. It gives a reason for each agent.
+- The leader reads the mission, the files of the folder (it can open them), the general agent with the rules files it can choose, and the specialised tasks with their settings. It also reads the models that can run on your computer now: the local models that fit together in your GPUs, the API models (with or without a key), and Claude Code and Codex if they are ready. Then it proposes the full swarm: the agents with their instructions and their rules (or a specialised task when an agent needs one), their models, and which agent waits for which. It gives a reason for each agent.
 - You approve the proposal or reject it. You can also tell the leader in your own words what to change, and it writes the proposal again. After your approval, the agents are usual agents of the steps, so you can still change each of them before the run.
 - While the swarm runs, SwarmUP asks the leader if the swarm needs a change. It asks each time an agent finishes or you write to the leader. The leader can propose to add an agent, to remove an agent (for example, to release a GPU), or to change the model of an agent that did not start. Each proposal has its reason and waits for your approval. If you reject a proposal, SwarmUP never shows it again.
 - The leader never controls SwarmUP. SwarmUP tells the leader to write its proposals in blocks (`<swarmup_build>`, `<swarmup_add>`, `<swarmup_remove>`, `<swarmup_model>`), and it reads each answer of the leader. It finds the blocks even when their format is not exactly correct. It checks each proposal as it checks the forms that you complete: the task, the name, the model (which must fit in the GPUs with the other models), which agent waits for which, and each setting. If something is wrong, SwarmUP sends it back to the leader to write again, before you see it. SwarmUP never acts on a sentence that only suggests a change. It asks the leader to confirm the change in a block.
@@ -193,8 +197,8 @@ python src/backend/interface/user_interface.py
 The interface guides you through six steps. Each step has a guide on the side.
 
 1. **The mission**, and who builds the swarm: you, or the leader. The leader shows its proposal in a window, where you approve it, reject it or ask for changes.
-2. **The agents**: one card for each agent, with the questions of its task. You can check your email login or your messaging app without sending anything. If you remove an agent, you can use Undo.
-3. **The folders**, with the folder dialog of your system.
+2. **The agents**: how many agents, and a card for each one, where you write what it must do and choose its rules. The specialised agents are in a panel below the cards: for them you answer the questions of their task, and you can check your email login or your messaging app without sending anything. If you remove an agent, you can use Undo.
+3. **The folder of the swarm**, with the folder dialog of your system. Every agent works in it. An agent can also have a folder of its own (an agent that works on a file somewhere else keeps the folder of its file).
 4. **The models**: local models with a gauge of the VRAM of your GPUs, API models with their prices and your key, or a coding agent (Claude Code with your key, or Codex with the sign-in to your ChatGPT plan).
 5. **Who waits for whom**: you select, or the leader proposes and you approve.
 6. **The launch**: plan first, or execute immediately.
@@ -250,8 +254,8 @@ The questions of a session guide you as the window does:
 
 - who builds the swarm: you, or the leader, whose proposal you approve,
 - how many agents the swarm has,
-- the task of each agent (email, writing, coding, math checking, literature review, news briefing, any work in a folder...) and what it needs to work,
-- the folder of each agent,
+- what each agent must do, in your own words, and the rules that it follows (type `tasks` instead for a specialised task: email, calendar, news, papers, documents, proofs, code, files),
+- the folder of the swarm (and, if you want, a folder of its own for some agents),
 - the model of each agent: a local model on your GPUs (with the VRAM that it needs and a check of your GPUs), a paid model through an API (with the prices), or a coding agent (Claude Code or Codex, which ask you before they act).
 
 - SwarmUP does nothing before you approve it. It sends emails, books events and writes files only after you approve the exact result.

@@ -62,6 +62,29 @@ Finish with one line: VERDICT: NO PROBLEMS FOUND or VERDICT: PROBLEMS FOUND
 {document}"""
 
 
+# The general agent (general_loop.py): it does what its instructions say, and a strict review checks each draft before the user sees it.
+GENERAL_TASK_PROMPT = """Your instructions, from the user:
+{prompt}
+
+Do this work now. Use your tools when they help: read the files that matter, and check what you did.
+Then reply with the result itself, complete and ready to use, in the format the instructions ask for."""
+
+
+GENERAL_CHECK_PROMPT = """You check the work of an agent before the user sees it. Be strict about what matters, and ignore matters of taste.
+The instructions of the user:
+{prompt}
+
+The rules the agent must follow:
+{rules}
+
+The result of the agent:
+{draft}
+
+Check that the result does everything the instructions ask, that it is correct (read the files it relies on when you can), and that it
+follows every rule. If it does, reply exactly: GOOD
+Otherwise reply only with a short list of the problems that must be fixed, each with what to do instead. Do not rewrite the result."""
+
+
 WORKER_PROMPT = """Do this work in your folder: {request}
 Use your tools to do it for real: look at what is there, make the changes, and check them (run a command if it helps).
 When the work is done, reply with a short report for the user: what you did, which files you created or changed, and what is left to do, if anything."""
@@ -240,10 +263,17 @@ LEADER_RULES = """You are {leader}, the leader of a swarm of AI agents in SwarmU
 The user gave you a mission. Your job is to build the swarm of agents that carries it out, and to keep the swarm right while it works.
 
 HOW SWARMUP WORKS
-- An agent has exactly one task from the list of tasks below. Its task decides what it does. Every agent can read the files of its folder, write to
-  the other agents and to you, and, with the permission of the user, change files and run commands. The worker task does any work in the folder.
+- An agent is a general agent (the task agent): it does what its instructions say (the setting prompt), and follows the rules files you choose for
+  it (the setting rules) besides the general rules. This is what an agent should be, unless it needs a specialised task.
+- Write the instructions of an agent as you would brief an expert: what it must make, from what (the files of the folder, the work of the agents
+  it waits for), for whom, in what form and how long. One clear job per agent. Choose the rules that match its work: Author for a text, Coder for
+  code, Literature survey for a review of papers, and so on (they are listed with the task agent below). Choose none when none matches.
+- A specialised task (the other tasks of the list) does one thing that instructions alone cannot: send an email, book a calendar event, read news
+  feeds, search papers online, check that a formatted document lost no word, referee a proof... Give one to an agent only when it needs exactly that.
+- Every agent works in a conversation with its model: it can read the files of its folder, write to the other agents and to you, and, with the
+  permission of the user, change files and run commands. Its drafts are checked and improved before the user sees them.
 - An agent has one model from the list of models below: the AI that thinks for it.
-- An agent has settings: the answers its task needs (what to write about, who receives an email, which file to check...).
+- An agent has settings: the answers its task needs (its instructions and rules, or for a specialised task: who receives an email, which file to check...).
 - The agents work at the same time, except an agent that waits for others: it starts when they are done, and it receives their results as messages.
 - You do no task yourself. You work last: when all the agents are done, you receive their results and write the final report for the user.
 - The user approves the work of every agent before anything is sent, booked or saved.
@@ -258,14 +288,14 @@ an agent: only the user can do that, by approving your block. There are exactly 
 1. Build the whole swarm. Only when you are asked to build it.
 <swarmup_build>
 {{"agents": [
-  {{"name": "Researcher", "task": "literature", "model": "claude-sonnet-5-5", "waits_for": [], "settings": {{"subject": "battery recycling", "length": 400}}, "why": "Finds and summarises the recent papers."}},
-  {{"name": "Writer", "task": "author", "model": "claude-sonnet-5-5", "waits_for": ["Researcher"], "settings": {{"subject": "an article on battery recycling, based on the survey of Researcher", "length": 800}}, "why": "Turns the survey into the article."}}
+  {{"name": "Analyst", "task": "agent", "model": "claude-sonnet-5-5", "waits_for": [], "settings": {{"prompt": "Read the reports in the folder reports/ and list the main findings on battery recycling, each with the file it comes from.", "rules": []}}, "why": "Gathers the facts from the files of the user."}},
+  {{"name": "Writer", "task": "agent", "model": "claude-sonnet-5-5", "waits_for": ["Analyst"], "settings": {{"prompt": "Write an article of about 800 words on battery recycling for a general audience, from the findings of Analyst only.", "rules": ["Author"]}}, "why": "Turns the findings into the article."}}
 ]}}
 </swarmup_build>
 
 2. Add one agent while the swarm works.
 <swarmup_add>
-{{"name": "Translator", "task": "author", "model": "claude-haiku-4-5", "waits_for": ["Writer"], "settings": {{"subject": "the article of Writer, translated into French", "length": 800}}, "why": "The user asked for a French version."}}
+{{"name": "Translator", "task": "agent", "model": "claude-haiku-4-5", "waits_for": ["Writer"], "settings": {{"prompt": "Translate the article of Writer into French, keeping its tone and its length.", "rules": ["Author"]}}, "why": "The user asked for a French version."}}
 </swarmup_add>
 
 3. Remove one agent while the swarm works. An agent that is removed stops, and its model frees its memory (for a local model, the memory of the GPUs).
@@ -286,7 +316,7 @@ THE FORMAT OF A BLOCK
 
 THE FIELDS
 - name: one word of letters and digits that starts with a letter, like Writer or FactChecker. Every agent has its own name. Never "{user}", and never your own name, {leader}.
-- task: the key of one task of the list of tasks below, exactly as it is written there (like author or literature).
+- task: agent for a general agent, or the key of a specialised task of the list below, exactly as it is written there (like email or literature).
 - model: one model of the list of models below, exactly as it is written there. For a local model you can add "bits": 8 or "bits": 4 next to it:
   the model is then compressed and needs half or a quarter of its memory, for a small loss of quality.
 - waits_for: the names of the agents whose results this agent needs before it can start, or [] for none. Never yourself (you work last), and never in a circle.

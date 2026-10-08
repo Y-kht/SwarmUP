@@ -1,8 +1,8 @@
-// SwarmUP: the interface (see app.js). The step of the agents, with the form of the task of each agent.
+// SwarmUP: the interface (see app.js). The step of the agents: what each one must do, in the words of the user, or a specialised task.
 'use strict';
 
 // ==============
-// Step 2: the agents. Each one has a task, the answers that the task needs, and a name.
+// Step 2: the agents. Each one has its instructions and the rules it follows (or a specialised task with its answers), and a name.
 // ==============
 function viewAgents() {
   const state = store.state;
@@ -18,28 +18,119 @@ function viewAgents() {
       guide: null,
     };
   }
+  const addAgent = () => act('addAgents', { count: 1 }, { busy: 'addAgents' });
   return {
-    header: header(stepEyebrow('agents'), 'Who is in your team?', leaderMode ? 'The team the leader proposed and you approved. You can still change, add or remove agents: the leader stays first and leads.' :
-      'Add an agent for each task. The first agent is the leader: it does its own task, works last, and summarises the work of the others for you.', null),
+    header: header(stepEyebrow('agents'), 'What must each agent do?', leaderMode ? 'The team the leader proposed and you approved. You can still change its instructions, add or remove agents: the leader stays first and leads.' :
+      'Choose how many agents you need, and write what each one must do, in your own words. The first agent is the leader: it does its own work, works last, and summarises the work of the others for you.', null),
     content: h('div', { class: 'stack' },
+      leaderMode ? null : countCard(agents, addAgent),
       agents.length === 0 ? h('div', { class: 'card empty enter' }, h('div', { class: 'empty-icon' }, icon('users', 'xl')), h('h2', {}, 'Your team is empty'),
-        h('p', { style: { margin: '8px auto 18px', maxWidth: '440px' } }, 'Add your first agent: choose what it must do, then answer a few questions about it. One agent is enough to start.'),
-        button('Add your first agent', { kind: 'primary', size: 'lg', iconName: 'plus', onClick: () => openModal({ type: 'tasks' }) })) :
-        h('div', { class: 'agent-grid' }, agents.map((agent, index) => agentCard(agent, index, agents.length)),
-          h('button', { class: 'add-card enter', type: 'button', onClick: () => openModal({ type: 'tasks' }) }, h('span', { class: 'plus' }, icon('plus', 'lg')), 'Add an agent',
-            h('span', { class: 'small faint', style: { fontWeight: '500' } }, 'Email, survey, briefing, code…')))),
-    footer: footer({ onClick: () => go('mission') }, { label: 'Continue to the folders', disabled: !agents.length, onClick: () => go('folders') },
+        h('p', { style: { margin: '8px auto 18px', maxWidth: '440px' } }, 'Add your first agent and write what it must do. One agent is enough to start.'),
+        button('Add your first agent', { kind: 'primary', size: 'lg', iconName: 'plus', busy: ui.busy.addAgents, onClick: addAgent })) :
+        h('div', { class: 'agent-grid' }, agents.map((agent, index) => agent.task === 'agent' ? promptCard(agent, index, agents.length) : agentCard(agent, index, agents.length)),
+          h('button', { class: 'add-card enter', type: 'button', onClick: addAgent }, h('span', { class: 'plus' }, icon('plus', 'lg')), 'Add an agent',
+            h('span', { class: 'small faint', style: { fontWeight: '500' } }, 'You write what it must do'))),
+      specialisedPanel(false)),
+    footer: footer({ onClick: () => go('mission') }, { label: 'Continue to the folder', disabled: !agents.length, onClick: () => saveDrafts().then(saved => { if (saved) go('folders'); }) },
       agents.length ? { text: `${plural(agents.length, 'agent')} · ${agents[0].name} leads` } : { text: 'Add at least one agent to continue.' }),
     guide: leaderMode ? [
-      { q: 'Built by the leader', icon: 'crown', tone: 'tip', text: 'Each card says why the leader chose the agent. Click a card to change its settings, as if you had added it yourself.' },
+      { q: 'Built by the leader', icon: 'crown', tone: 'tip', text: 'Each card says why the leader chose the agent, and the instructions it wrote for it. Change them as you like.' },
       { q: 'Want another team?', text: 'Go back to the mission and ask the leader for a new proposal, in your own words.' },
       { q: 'During the run', text: 'The leader may propose to add or remove agents. Every proposal waits for your approval.' },
     ] : [
-      { q: 'The leader', icon: 'crown', text: 'The first agent leads the team. Use the arrows on a card to change who leads. Give the leader a capable model: it writes the summaries you approve.', tone: 'tip' },
-      { q: 'One task per agent', text: 'An agent does one thing well. For an email and a survey, add two agents: they work at the same time.' },
-      { q: 'You can change your mind', text: 'Click a card to edit it. A removed agent can be brought back right away with Undo.' },
+      { q: 'Good instructions', icon: 'sparkles', tone: 'tip', text: ['what the agent must make (a report, a list, a plan, an article, code...)', 'from what (the files of the folder, the work of other agents)', 'for whom, in what form, and how long'] },
+      { q: 'The rules', text: 'Choose the rules that match the work of an agent: Author for a text, Coder for code... The general rules always apply. You can add your own rules files to agent-rules.' },
+      { q: 'Better results by themselves', text: 'Before you see a draft, a strict review checks it against the instructions and the rules, and the agent improves it. You approve the result.' },
+      { q: 'The leader', icon: 'crown', text: 'The first agent leads the team. Use the arrows on a card to change who leads. Give the leader a capable model: it writes the summaries you approve.' },
     ],
   };
+}
+
+// The instructions typed in the cards are saved when the user leaves them, and before the next step.
+async function saveDrafts() {
+  for (const agent of store.state.agents.filter(item => item.task === 'agent')) {
+    const prompt = ui.promptDrafts[agent.id];
+    if (prompt !== undefined && prompt !== agent.prompt && !await savePrompt(agent, { prompt })) return false;
+  }
+  return true;
+}
+
+function countCard(agents, addAgent) {
+  const count = agents.filter(agent => !agent.builder).length;
+  const last = [...agents].reverse().find(agent => !agent.builder);
+  return h('div', { class: 'card pad row wrap enter', style: { gap: '16px', alignItems: 'center' } },
+    h('div', { class: 'grow', style: { minWidth: '240px' } }, h('h3', {}, 'How many agents?'),
+      h('div', { class: 'small muted' }, 'Each agent does one job, with its own instructions. Agents that do one thing well, and work together, give better results than one that does everything.')),
+    h('div', { class: 'row', style: { gap: '10px', alignItems: 'center' } },
+      button('−', { kind: 'soft', title: 'One agent less', disabled: !count || ui.busy.addAgents, onClick: () => removeAgent(last) }),
+      h('span', { style: { fontSize: '24px', fontWeight: '700', minWidth: '36px', textAlign: 'center' } }, String(count)),
+      button('+', { kind: 'soft', title: 'One agent more', busy: ui.busy.addAgents, onClick: addAgent })));
+}
+
+function savePrompt(agent, values) {
+  const form = ui.errors[`prompt-${agent.id}`] = {};
+  const rules = ui.ruleDrafts[agent.id] ?? agent.rules;
+  const prompt = values.prompt ?? ui.promptDrafts[agent.id] ?? agent.prompt;
+  return act('saveAgent', { task: 'agent', agentId: agent.id, name: agent.name, values: { prompt, rules, ...values } }, { busy: `prompt-${agent.id}`, form }).then(data => {
+    if (data) { ui.promptDrafts[agent.id] = undefined; ui.ruleDrafts[agent.id] = undefined; }
+    render();
+    return data;
+  });
+}
+
+// The card of an agent that does what its instructions say: its instructions and its rules are written right here.
+function promptCard(agent, index, total) {
+  const move = position => act('moveAgent', { agentId: agent.id, position });
+  const builderLeads = store.state.buildMode === 'leader';
+  const draft = ui.promptDrafts[agent.id] ?? agent.prompt;
+  const rules = ui.ruleDrafts[agent.id] ?? agent.rules;
+  const form = ui.errors[`prompt-${agent.id}`] || {};
+  const error = form.errors?.prompt || form.errors?.rules || form.error || '';
+  const toggle = name => {
+    ui.ruleDrafts[agent.id] = rules.includes(name) ? rules.filter(other => other !== name) : [...rules, name];
+    if (draft.trim()) savePrompt(agent, { rules: ui.ruleDrafts[agent.id] });
+    else render();
+  };
+  return h('div', { class: ['card agent-card', agent.isLeader && 'leader', ui.animate && 'enter'] },
+    h('div', { class: 'row' }, taskIcon('agent'),
+      h('div', { class: 'grow' }, h('div', { class: 'row', style: { gap: '6px' } }, h('h3', {}, agent.name), agent.isLeader ? h('span', { class: 'leader-mark', title: 'Leader' }, icon('crown', 'sm')) : null),
+        h('div', { class: 'small muted' }, agent.isLeader ? 'It leads the team, and works last' : 'It does what you write')),
+      agent.isLeader ? badge('Leader', 'honey') : badge(`#${index + 1}`, 'outline')),
+    agent.why ? h('p', { class: 'agent-why small' }, icon('crown', 'sm'), ` ${agent.why}`) : null,
+    h('div', { class: ['field', error && 'has-error'], style: { margin: '0' } },
+      h('textarea', { class: 'textarea', rows: 4, 'data-key': `prompt-${agent.id}`, value: draft, 'aria-label': `What ${agent.name} must do`,
+        placeholder: 'What must this agent do? For example: read the reports in my folder and list the main findings, each with the file it comes from.',
+        onInput: event => { ui.promptDrafts[agent.id] = event.target.value; }, onBlur: event => { if (event.target.value !== agent.prompt) savePrompt(agent, { prompt: event.target.value }); } }),
+      error ? h('div', { class: 'field-error' }, icon('alert'), error) : null),
+    h('div', { class: 'stack tight' }, h('div', { class: 'small muted' }, 'The rules it follows, besides the general rules:'),
+      h('div', { class: 'pills' }, store.catalog.rules.map(rule => h('button', { type: 'button', class: ['pill sm', rules.includes(rule.name) && 'selected'], title: rule.about, onClick: () => toggle(rule.name) },
+        h('span', { class: 'check' }, rules.includes(rule.name) ? icon('check') : null), rule.name)))),
+    h('div', { class: 'row wrap', style: { gap: '6px' } }, agent.folder ? badge(shorten(agent.folder.split(/[\\/]/).pop() || agent.folder, 24), '', 'folder') : null,
+      agent.model ? badge(shorten(modelName(agent.model), 30), { cli: 'honey', local: 'primary', api: 'info' }[modelKind(agent.model)], modelIcon(agent.model)) : null),
+    h('div', { class: 'agent-actions' },
+      button('More settings', { kind: 'ghost', size: 'sm', iconName: 'settings', onClick: () => saveDrafts().then(saved => { if (saved) openAgentForm('agent', agent.id); }) }),
+      !agent.isLeader && !builderLeads ? button('Make leader', { kind: 'ghost', size: 'sm', iconName: 'crown', onClick: () => move(0) }) : null,
+      h('div', { class: 'spacer grow' }),
+      button('', { kind: 'ghost', size: 'sm', iconName: 'chevronLeft', title: 'Move earlier', disabled: index === 0 || (builderLeads && index === 1), onClick: () => move(index - 1) }),
+      button('', { kind: 'ghost', size: 'sm', iconName: 'chevronRight', title: 'Move later', disabled: index === total - 1, onClick: () => move(index + 1) }),
+      button('', { kind: 'ghost', size: 'sm', iconName: 'trash', title: `Remove ${agent.name}`, onClick: () => removeAgent(agent) })));
+}
+
+// The specialised agents, folded away: most agents only need instructions.
+function specialisedPanel(live) {
+  const open = ui.specialisedOpen;
+  return h('div', { class: ['disclosure', open && 'open'] },
+    h('button', { type: 'button', onClick: () => { ui.specialisedOpen = !open; render(); } }, icon('layers', 'sm'), 'Specialised agents: email, calendar, news, papers, documents, proofs, code',
+      icon('chevronDown', 'sm chev')),
+    open ? h('div', { class: 'disclosure-body stack' },
+      h('p', { class: 'small muted', style: { margin: '0' } }, 'Most agents only need instructions. A specialised agent does one thing that instructions alone cannot: send an email, book an event, read news feeds, '
+        + 'search papers online, check that a formatted document lost no word, referee a proof, or test code with a command.'),
+      h('div', { class: 'task-grid' }, store.catalog.tasks.filter(task => task.specialised).map(task => taskTile(task, live)))) : null);
+}
+
+function taskTile(task, live) {
+  return h('button', { class: 'task-tile', type: 'button', style: { '--task': taskStyle(task.key).color, '--task-shadow': tint(taskStyle(task.key).color, 0.45) },
+    onClick: () => { if (ui.modal?.type === 'tasks') closeModal(); openAgentForm(task.key, null, live); } }, taskIcon(task.key), h('div', {}, h('h3', {}, task.label), h('p', {}, firstSentence(task.info))));
 }
 
 function agentCard(agent, index, total) {
@@ -79,12 +170,12 @@ async function removeAgent(agent) {
   if (data) toast(`${agent.name} was removed.`, 'info', { label: 'Undo', run: () => act('undoRemove', {}, { ok: `${agent.name} is back.` }) });
 }
 
+// The agent that joins a swarm while it runs: an agent with instructions, or a specialised one.
 function taskPickerModal(modal) {
   return modalFrame({
-    size: 'wide', iconEl: h('span', { class: 'task-icon lg', style: { '--task': '#5B4CF0', '--task-soft': '#5B4CF026' } }, icon('plus', 'lg')), title: 'What must this agent do?',
-    subtitle: 'Choose a task. Next, you answer a few questions about it.',
-    body: h('div', { class: 'task-grid' }, store.catalog.tasks.map(task => h('button', { class: 'task-tile', type: 'button', style: { '--task': taskStyle(task.key).color, '--task-shadow': tint(taskStyle(task.key).color, 0.45) },
-      onClick: () => { closeModal(); openAgentForm(task.key, null, modal.live); } }, taskIcon(task.key), h('div', {}, h('h3', {}, task.label), h('p', {}, firstSentence(task.info)))))),
+    size: 'wide', iconEl: h('span', { class: 'task-icon lg', style: { '--task': '#5B4CF0', '--task-soft': '#5B4CF026' } }, icon('plus', 'lg')), title: 'A new agent',
+    subtitle: 'Write what it must do. Next, you choose its model.',
+    body: h('div', { class: 'stack' }, h('div', { class: 'task-grid' }, taskTile(taskOf('agent'), modal.live)), specialisedPanel(modal.live)),
     foot: [h('div', { class: 'spacer' }), button('Cancel', { kind: 'ghost', onClick: closeModal })],
   });
 }
@@ -300,6 +391,8 @@ function fieldWidget(field, modal) {
     case 'file': case 'path': case 'folder': return pathInput(field, modal);
     case 'time': return timeInput(field, modal);
     case 'command': return textInput(field, modal, { mono: true, placeholder: 'Leave empty to run the file with Python' });
+    case 'prompt': return h('textarea', { id: `f-${field.key}`, 'data-key': `f-${field.key}`, class: 'textarea', rows: 6, value: modal.values[field.key] ?? '',
+      placeholder: 'For example: read the reports in my folder and list the main findings, each with the file it comes from.', onInput: event => setValue(modal, field.key, event.target.value) });
     case 'choice': return choiceInput(field, modal);
     case 'choices': return choicesInput(field, modal);
     case 'outlets': return outletsInput(field, modal);

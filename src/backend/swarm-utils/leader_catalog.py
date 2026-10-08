@@ -6,20 +6,20 @@ from pathlib import Path
 import agent_prompts as prompts
 from codex_agent import checkCodex, listCodexModels, readCodexAccount
 from gpu_check import checkVram, readGpus
-from harness_utils import USER_NAME
+from harness_utils import USER_NAME, listRules
 from internet_cache import describeCached
 from leader_checks import LeaderChecks, canJoin, showValue
 from mission_costs import MissionCosts, formatDollars
 from model_support import ModelError, findMissingPackages, getApiKey
 from models_library import API_KEYS, MODELS_API, MODELS_LOCAL, RECOMMENDED_API, RECOMMENDED_LOCAL, getModelInfo, getVram
 from sources_library import NEWS_OUTLETS, PAPER_PUBLISHERS
-from tasks_library import DEFAULT_LOOPS, SECRET_KINDS, TASKS, isAsked
+from tasks_library import DEFAULT_LOOPS, SECRET_KINDS, SPECIALISED_TASKS, TASKS, isAsked
 from user_settings import loadSettings
 
 
 STATUS_SECONDS = 60
 
-KIND_WORDS = {"text": "text", "email": "an email address", "number": "a whole number", "file": "the path of a file that exists in the folder",
+KIND_WORDS = {"text": "text", "prompt": "the instructions of the agent, in plain words", "email": "an email address", "number": "a whole number", "file": "the path of a file that exists in the folder",
               "path": "the path of a file in the folder, created if it does not exist", "folder": "a folder", "phone": "a phone number with its country code, like +4915112345678",
               "time": "a time of the day HH:MM", "command": "a command line, run in the folder", "outlets": "a list of news outlets: names of the list of outlets below, or addresses of RSS feeds",
               "publishers": "a list of publishers: names of the list of publishers below", "secret": "a secret: never write it, the user gives it",
@@ -57,11 +57,18 @@ def describeKind(field, fields):
     return "; ".join(parts)
 
 
+def describeTask(key, task):
+    lines = [f"- {key}: {task['label']}. {task['info']} Its folder: {task['folder']}"]
+    return lines + [f"    {field['key']} ({describeKind(field, task['fields'])}): {field['ask']}" for field in task["fields"]]
+
+
+# The general agent first, with the rules it can follow, then the specialised tasks, for when an agent needs exactly what one of them does.
 def describeTasks():
-    lines = []
-    for key, task in TASKS.items():
-        lines.append(f"- {key}: {task['label']}. {task['info']} Its folder: {task['folder']}")
-        lines += [f"    {field['key']} ({describeKind(field, task['fields'])}): {field['ask']}" for field in task["fields"]]
+    lines = ["THE GENERAL AGENT, for most agents:", *describeTask("agent", TASKS["agent"]), "  The rules it can follow (the general rules always apply):"]
+    lines += [f"    {rules['name']}: {rules['about'][:1].lower() + rules['about'][1:]}." for rules in listRules()]
+    lines.append("THE SPECIALISED TASKS, only for an agent that needs exactly what one of them does:")
+    for key in SPECIALISED_TASKS:
+        lines += describeTask(key, TASKS[key])
     lines.append(f"Every task also has numberOfLoops (a whole number; default: {DEFAULT_LOOPS}): how many drafts the agent may write at most before it stops.")
     lines.append("The news outlets, by group: " + "; ".join(f"{group}: {', '.join(names)}" for group, names in NEWS_OUTLETS.items()) + ".")
     lines.append("The publishers: " + ", ".join(PAPER_PUBLISHERS) + ".")

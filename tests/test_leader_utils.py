@@ -290,6 +290,21 @@ class CatalogTests(FolderTestCase):
         self.assertNotIn("hunter2", json.dumps(shown))
         self.assertEqual(shown["needs"], ["Your email address (the one the email is sent from)", "Password of that account", "An API key of OpenAI"])
 
+    def testTheLeaderGivesInstructionsAndRulesToGeneralAgents(self):
+        catalog = makeCatalog(self.folder, keys={"claude": "sk"})
+        agents, errors = catalog.checkBuild({"agents": [
+            {"name": "Analyst", "model": "claude-sonnet-5-5", "settings": {"instructions": "List the findings of the notes", "rules": "AUTHOR_RULES.md, coder"}},
+            {"name": "Drafter", "task": "general", "model": "claude-sonnet-5-5", "settings": {"prompt": "Write the email"}}]})
+        self.assertEqual(errors, [])
+        self.assertEqual([(agent["task"], agent["answers"]["prompt"], agent["answers"]["rules"]) for agent in agents],
+                         [("agent", "List the findings of the notes", ["Author", "Coder"]), ("agent", "Write the email", [])])
+        agents, errors = catalog.checkBuild({"agents": [{"name": "A", "task": "agent", "model": "claude-sonnet-5-5", "settings": {"prompt": "x", "rules": ["Cooking"]}}]})
+        self.assertTrue(any("Cooking" in error for error in errors), errors)
+        tasks = leader_catalog.describeTasks()
+        self.assertLess(tasks.index("THE GENERAL AGENT"), tasks.index("THE SPECIALISED TASKS"))
+        self.assertIn("    Author: rules for the text the agent writes.", tasks)
+        self.assertIn('"task": "agent"', catalog.buildPrompt())
+
     def testTheWholeSwarmIsCheckedTogether(self):
         catalog = makeCatalog(self.folder, leaderModel="Qwen/Qwen3-8B")
         agents, errors = catalog.checkBuild({"agents": [{"name": "A", "task": "author", "model": "Qwen/Qwen3-8B", "settings": {"subject": "a"}},

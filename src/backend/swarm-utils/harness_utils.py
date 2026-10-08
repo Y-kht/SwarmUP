@@ -26,6 +26,7 @@ from pathlib import Path
 PROJECT_FOLDER = Path(__file__).resolve().parents[3]
 AGENT_FILES = Path(os.environ["SWARMUP_HOME"]).expanduser() if os.environ.get("SWARMUP_HOME") else PROJECT_FOLDER / "agent-files"
 AGENT_RULES = PROJECT_FOLDER / "agent-rules"
+GENERAL_RULES = "AGENT_RULES.md"
 MAX_CONTEXT_ITEMS = 5
 
 SUMMARY_LENGTH = 1500
@@ -100,10 +101,32 @@ def retrieveContext(fileName, keys):
     return json.dumps(recent, indent=2, ensure_ascii=False) if recent else "Nothing yet."
 
 
+# The rules of an agent: one file of agent-rules, or several (a general agent follows the rules the user or the leader chose for it).
 def loadRules(fileName):
+    if isinstance(fileName, (list, tuple)):
+        return "\n\n".join(rules for rules in (loadRules(name) for name in fileName) if rules)
     if not fileName or not (AGENT_RULES / fileName).exists():
         return ""
     return (AGENT_RULES / fileName).read_text(encoding="utf-8").strip()
+
+
+# The rules files a general agent can follow, by a name a person reads (EMAIL_RULES.md is Email, DOCUMENT_FORMAT_RULES.md is Document format),
+# with the first rule of each, which says what they are about. The general rules (GENERAL_RULES) always apply, so they are not listed.
+# A rules file that a user adds to agent-rules is listed too.
+def listRules():
+    found = []
+    for path in sorted(AGENT_RULES.glob("*_RULES.md")):
+        if path.name == GENERAL_RULES:
+            continue
+        words = path.stem[:-len("_RULES")].replace("_", " ").lower()
+        lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        about = next((line for line in lines if line.startswith("## ")), lines[0] if lines else "").strip("# :").strip()
+        found.append({"name": words[:1].upper() + words[1:], "file": path.name, "about": about})
+    return found
+
+
+def rulesFileOf(name):
+    return next((rules["file"] for rules in listRules() if rules["name"].lower() == str(name).strip().lower() or rules["file"].lower() == str(name).strip().lower()), None)
 
 
 def isYes(reply):

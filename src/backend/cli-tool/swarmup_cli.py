@@ -48,7 +48,7 @@ from cli_console import Console, askUntilValid, askYesNo, chooseFrom, heading, s
 from cli_models import chooseModel, labelLocal
 from cli_program import addLive, buildAgent, buildWithLeader, changeModel, chooseBuilder, chooseMode, chooseOrder, runSwarm, startSwarm, unloadModels
 from cli_resume import offerUnfinished
-from cli_steps import askAgentCount, askBudget, askFolder, askMission, chooseFolders, chooseTask, describeAgent, fillTask
+from cli_steps import askAgentCount, askBudget, askFolder, askMission, chooseAgent, chooseFolders, chooseTask, describeAgent, fillTask
 from cli_view import TreeView, formatEvent, openAgent, renderTree, runCommand
 from model_support import ModelError
 from messengers import MessagingError
@@ -77,10 +77,10 @@ def runProgram(console):
         count = askAgentCount(console)
         swarm = Swarm(askMission(console))
         askBudget(console, swarm.costs)
-        heading(console, "Step 1: the task of each agent")
+        heading(console, "Step 1: what each agent must do")
         for number in range(1, count + 1):
-            specs.append(fillTask(console, chooseTask(console, number, count), [spec["name"] for spec in specs]))
-        heading(console, "Step 2: the folder of each agent")
+            specs.append(chooseAgent(console, number, count, [spec["name"] for spec in specs]))
+        heading(console, "Step 2: the folder of the swarm")
         chooseFolders(console, specs)
         heading(console, "Step 3: the model of each agent")
         for number, spec in enumerate(specs, 1):

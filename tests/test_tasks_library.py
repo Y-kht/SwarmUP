@@ -10,15 +10,16 @@ from pathlib import Path
 sys.path[:0] = [str(folder) for folder in sorted((Path(__file__).resolve().parent.parent / "src" / "backend").iterdir()) if folder.is_dir() and not folder.name.startswith(("_", "."))]
 import writing_loops
 from checking_loops import CoderLoop, MathCheckLoop, WorkerLoop
+from general_loop import GeneralLoop
 from harness_utils import AGENT_RULES, loadRules
 from message_loops import CalendarLoop, EmailLoop, NewsLoop
 from models_library import RECOMMENDED_API, RECOMMENDED_LOCAL
 from sources_library import EMAIL_PROVIDERS, MESSAGING_APPS
-from tasks_library import (ADVANCED_FIELDS, NO_MESSENGER, OTHER_PROVIDER, TASKS, answerKey, buildLoop, checkAgentName, describeLoop, getDefault, getHelp, isAsked,
+from tasks_library import (ADVANCED_FIELDS, NO_MESSENGER, OTHER_PROVIDER, SPECIALISED_TASKS, TASKS, answerKey, buildLoop, checkAgentName, describeLoop, getDefault, getHelp, isAsked,
                            messengerSettings, parseAnswer, parseChoices, publicAnswers, restoreAnswers, secretFields, suggestFolder, suggestName)
 from writing_loops import AuthorLoop, DocumentFormatLoop, LiteratureSurveyLoop
 
-KINDS = {"text", "email", "secret", "number", "file", "path", "folder", "phone", "time", "command", "choice", "choices", "outlets", "publishers", "accounts"}
+KINDS = {"text", "email", "secret", "number", "file", "path", "folder", "phone", "time", "command", "choice", "choices", "outlets", "publishers", "accounts", "prompt"}
 
 
 class CatalogTests(unittest.TestCase):
@@ -66,7 +67,8 @@ class CatalogTests(unittest.TestCase):
                          ["telegramChat", "telegramToken", "whatsappPhoneId", "whatsappTo", "whatsappToken"])
 
     def testTheTasksOfTheDesignAreThere(self):
-        self.assertEqual(set(TASKS), {"email", "calendar", "news", "author", "literature", "format", "math", "coder", "worker"})
+        self.assertEqual(set(TASKS), {"agent", "email", "calendar", "news", "author", "literature", "format", "math", "coder", "worker"})
+        self.assertEqual((list(TASKS)[0], SPECIALISED_TASKS), ("agent", tuple(key for key in TASKS if key != "agent")))
         self.assertEqual(len({task["name"] for task in TASKS.values()}), len(TASKS))
         self.assertEqual(len({task["label"] for task in TASKS.values()}), len(TASKS))
 
@@ -103,11 +105,12 @@ class BuildTests(unittest.TestCase):
             "math": {"filePath": str(self.document)},
             "coder": {"task": "sort a list", "filePath": str(self.folder / "sort.py"), "testCommand": ["python", "-m", "pytest"]},
             "worker": {"request": "sort my notes by topic"},
+            "agent": {"prompt": "Summarise the notes of the folder", "rules": []},
         }
 
     def testEveryTaskBuildsItsLoopWithTheModelAndDescribesItself(self):
         classes = {"email": EmailLoop, "calendar": CalendarLoop, "news": NewsLoop, "author": AuthorLoop, "literature": LiteratureSurveyLoop,
-                   "format": DocumentFormatLoop, "math": MathCheckLoop, "coder": CoderLoop, "worker": WorkerLoop}
+                   "format": DocumentFormatLoop, "math": MathCheckLoop, "coder": CoderLoop, "worker": WorkerLoop, "agent": GeneralLoop}
         for key, answers in self.answers().items():
             model = object()
             loop = TASKS[key]["build"](model, answers)

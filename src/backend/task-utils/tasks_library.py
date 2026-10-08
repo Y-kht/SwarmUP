@@ -4,11 +4,16 @@ import shlex
 from pathlib import Path
 
 from checking_loops import CoderLoop, MathCheckLoop, WorkerLoop
-from harness_utils import PHONE_PATTERN, USER_NAME
+from general_loop import GeneralLoop
+from harness_utils import PHONE_PATTERN, USER_NAME, listRules
 from message_loops import CalendarLoop, EMAIL_PATTERN, EmailLoop, NewsLoop, nextOccurrence
 from sources_library import EMAIL_PROVIDERS, MESSAGING_APPS
 from writing_loops import AuthorLoop, DocumentFormatLoop, LeaderLoop, LiteratureSurveyLoop, PAPER_SEARCHES
 
+# An agent does what its instructions say (the task agent, GeneralLoop): the user, or the leader, writes them, and chooses the rules files of
+# agent-rules that it follows. This is what an agent is by default. The other tasks are specialised: each one is a loop that can do one thing
+# that instructions alone cannot (send an email, book an event, read news feeds, search papers, check the words of a formatted document...), and
+# the interface shows them apart (SPECIALISED_TASKS).
 # The tasks a user can give to an agent, each one a loop of message_loops.py, writing_loops.py or checking_loops.py. For every task: what the user is told (info),
 # the questions to ask (fields), how to build the loop once the model is chosen (build), and which recommendations of
 # models_library.py to show (recommend). The command line test uses this now, and the graphical interface will use it later.
@@ -75,7 +80,23 @@ MESSENGER_FIELDS = [{"key": "messenger", "ask": "Do you also want to receive the
 MESSENGER_FIELDS += [{**field, "key": answerKey(app, field["key"]), "when": lambda answers, app=app: answers.get("messenger") == app}
                      for app, details in MESSAGING_APPS.items() for field in details["fields"]]
 
+def describeRulesChoice(answers):
+    return "The general rules always apply. Add the rules of the kinds of work it does: " + "; ".join(f"{rules['name']}: {rules['about'].lower()}" for rules in listRules()) + "."
+
+
 TASKS = {
+    "agent": {
+        "label": "Agent (your instructions)", "name": "Agent", "role": "agent", "recommend": "leading",
+        "build": lambda model, answers: GeneralLoop(model, answers["prompt"], answers.get("rules") or (), loops(answers)),
+        "folder": "It can read every file of this folder, change files and run commands when its instructions need it (after you allow it), and its approved result is "
+                  "saved in its swarmup-results folder.",
+        "info": "This agent does what you write in its instructions, in your own words: research, writing, analysis, planning, working on the files of its folder... "
+                "Before you see its work, a strict review checks it against your instructions and its rules, and the agent improves it. You approve the result.",
+        "fields": [{"key": "prompt", "ask": "What must this agent do? (its instructions, in your own words)", "kind": "prompt", "required": True,
+                    "help": "Say what it must make, from what, and for whom. It can read the files of its folder, and the work of the agents it waits for."},
+                   {"key": "rules", "ask": "Which rules must it follow?", "kind": "choices", "options": [rules["name"] for rules in listRules()], "default": [],
+                    "help": describeRulesChoice}],
+    },
     "email": {
         "label": "Email writer and sender", "name": "Emailer", "role": "email writer", "recommend": "email", "build": buildEmail,
         "folder": "It can read every file of this folder, and a copy of every email it sends is saved in its swarmup-results folder.",
@@ -186,6 +207,9 @@ TASKS = {
                    {"key": "testCommand", "ask": "Command that checks the code (leave empty to run the file with Python; example: python -m pytest tests)", "kind": "command", "default": None}],
     },
 }
+
+# The tasks that do one thing that instructions alone cannot. The interface shows them apart, for when an agent needs one.
+SPECIALISED_TASKS = tuple(key for key in TASKS if key != "agent")
 
 # The task of the leader that builds the swarm itself (leader_utils.py). It is not one of TASKS: nobody chooses it for an agent, the user
 # chooses it by letting the leader build the swarm. The mission is the one the user gave, and the folder is the folder of the mission.
@@ -300,6 +324,8 @@ def parseAnswer(field, text, answers=None):
         except ValueError as error:
             return None, str(error)
         return f"{int(text.split(':')[0]):02d}:{int(text.split(':')[1]):02d}", ""
+    if kind == "prompt":
+        return text, ""
     if kind == "command":
         try:
             return shlex.split(text, posix=os.name != "nt"), ""

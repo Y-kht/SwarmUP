@@ -188,7 +188,7 @@ function viewHome() {
       h('section', { class: 'stack enter-3' }, h('div', { class: 'section-title' }, h('h2', {}, 'How it works')),
         h('div', { class: 'how' }, [
           ['Say the mission', 'One or two sentences about what the swarm must achieve. Every agent reads it.'],
-          ['Pick the agents', 'Each agent does one task: an email, a survey, a briefing, code… The first one leads.'],
+          ['Say what each agent does', 'How many agents, and what each one must do, in your own words. The first one leads.'],
           ['Give them a brain', 'Choose an AI model for each agent: free on your own GPUs, or paid through an API.'],
           ['Approve everything', 'The agents show you their plan and their work. Nothing is sent or saved before you say yes.'],
         ].map(([title, text], index) => h('div', { class: 'card' }, h('div', { class: 'num' }, String(index + 1)), h('h3', {}, title), h('p', {}, text))))),
@@ -274,8 +274,8 @@ function viewMission() {
         h('div', { class: 'pills' }, EXAMPLES.map(example => h('button', { class: 'pill', type: 'button', onClick: () => { ui.missionDraft = example; ui.errors.mission = ''; render(); } }, icon('sparkles', 'sm'), example)))),
       h('div', { class: 'stack enter-2' }, h('h2', {}, 'Who builds the swarm?'),
         h('div', { class: 'choice-cards' }, [
-          ['manual', 'users', 'I build it myself', 'You add each agent, answer its questions, and choose its folder and its model. Full control, step by step.'],
-          ['leader', 'crown', 'The leader builds it', 'You choose the model of the leader and the folder of the mission. It proposes the agents, their tasks and their models, and you approve.'],
+          ['manual', 'users', 'I build it myself', 'You choose how many agents, write what each one must do, and choose the folder and the models. Full control, step by step.'],
+          ['leader', 'crown', 'The leader builds it', 'You choose the model of the leader and the folder of the mission. It proposes the agents, their instructions, their rules and their models, and you approve.'],
         ].map(([mode, iconName, title, text]) => h('button', { type: 'button', class: ['choice-card', state.buildMode === mode && 'selected'], disabled: building || ui.busy.setBuildMode,
           onClick: () => { if (state.buildMode !== mode) act('setBuildMode', { mode }); } }, h('span', { class: 'cc-icon' }, icon(iconName, 'lg')),
           h('div', {}, h('div', { class: 'cc-title' }, title, mode === 'leader' ? badge('New', 'honey') : null), h('div', { class: 'cc-text' }, text)), h('span', { class: 'radio' }))))),

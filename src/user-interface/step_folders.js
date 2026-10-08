@@ -68,30 +68,64 @@ function browseModal(modal) {
 
 
 // ==============
-// Step 3: the folder of each agent.
+// Step 3: the folder of the swarm, where every agent works, and a folder of its own for an agent that needs one.
 // ==============
 function viewFolders() {
-  const agents = store.state.agents;
+  const state = store.state;
+  const agents = state.agents;
   const save = (agent, folder) => act('setFolder', { agentId: agent.id, folder }, { busy: `folder-${agent.id}`, form: folderForm(agent) }).then(data => {
     if (data) { ui.folderDrafts[agent.id] = undefined; toast(folder ? `${agent.name} works in ${folder}.` : `${agent.name} has no folder.`, 'success'); }
     render();
     return data;
   });
+  const swarmForm = ui.errors.swarmFolder = ui.errors.swarmFolder || {};
+  const swarmDraft = ui.swarmFolderDraft ?? (state.swarmFolder || '');
+  const saveSwarm = folder => act('setSwarmFolder', { folder }, { busy: 'swarmFolder', form: swarmForm }).then(data => {
+    if (data) {
+      ui.swarmFolderDraft = null;
+      toast(folder ? `Every agent works in ${folder}.` : 'The agents work without a folder.', 'success');
+      for (const text of data.kept || []) toast(text, 'warning');
+    }
+    render();
+    return data;
+  });
+  const own = ui.ownFolders ?? state.mixedFolders;
   const saveAll = async () => {
+    if (ui.swarmFolderDraft !== null && ui.swarmFolderDraft !== (state.swarmFolder || '') && !await saveSwarm(ui.swarmFolderDraft)) return;
     for (const agent of agents) {
       const draft = ui.folderDrafts[agent.id];
       if (draft !== undefined && draft !== (agent.folder || '')) { if (!await save(agent, draft)) return; }
     }
     go('models');
   };
+  const swarmError = swarmForm.errors?.folder || swarmForm.error || '';
+  const suggestion = agents.map(agent => agent.suggestion).find(Boolean);
+  const workers = agents.filter(agent => !agent.builder);
   return {
-    header: header(stepEyebrow('folders'), 'Where does each agent work?', 'Optional. An agent can work inside a folder of your computer: it can read all its files, at any depth, and it saves what it makes in its swarmup-results folder.'),
-    content: h('div', { class: 'agent-rows' }, agents.map(agent => folderRow(agent, save))),
-    footer: footer({ onClick: () => go('agents') }, { label: 'Continue to the models', onClick: saveAll }, { text: `${agents.filter(agent => agent.folder).length} of ${agents.length} with a folder` }),
+    header: header(stepEyebrow('folders'), 'Where does the swarm work?', 'Optional. The agents work in a folder of your computer: they read all its files, at any depth, and save what they make in its swarmup-results folder.'),
+    content: h('div', { class: 'stack' },
+      h('div', { class: ['card pad enter', swarmError && 'has-error'] }, h('div', { class: 'field', style: { margin: '0' } },
+        h('label', { class: 'field-label', for: 'swarm-folder' }, 'The folder of the swarm', h('span', { class: 'opt' }, 'optional')),
+        h('div', { class: 'input-group' },
+          h('div', { class: 'input-wrap' }, h('span', { class: 'input-icon' }, icon('folder', 'sm')),
+            h('input', { id: 'swarm-folder', class: 'input with-icon', 'data-key': 'swarm-folder', value: swarmDraft, placeholder: state.mixedFolders ? 'The agents have different folders' : 'No folder: write a path or press Browse',
+              onInput: event => { ui.swarmFolderDraft = event.target.value; }, onKeydown: event => { if (event.key === 'Enter') saveSwarm(event.target.value); },
+              onBlur: event => { if (event.target.value !== (state.swarmFolder || '')) saveSwarm(event.target.value); } })),
+          button('Browse…', { iconName: 'folderOpen', onClick: () => pickPath('folder', swarmDraft || suggestion || '', path => { ui.swarmFolderDraft = path; saveSwarm(path); }) }),
+          state.swarmFolder ? button('', { kind: 'ghost', iconName: 'external', title: 'Open the folder', onClick: () => act('openFolder', { path: state.swarmFolder }) }) : null,
+          state.swarmFolder ? button('', { kind: 'ghost', iconName: 'x', title: 'No folder', busy: ui.busy.swarmFolder, onClick: () => { ui.swarmFolderDraft = ''; saveSwarm(''); } }) : null),
+        swarmError ? h('div', { class: 'field-error' }, icon('alert'), swarmError) :
+          h('div', { class: 'field-help' }, icon('info'), `Every agent works in it (${plural(workers.length, 'agent')}). An agent that works on a file somewhere else keeps the folder of its file.`))),
+      suggestion && suggestion !== state.swarmFolder ? h('div', {}, h('button', { class: 'pill sm', type: 'button', onClick: () => { ui.swarmFolderDraft = suggestion; saveSwarm(suggestion); } },
+        icon('sparkles', 'sm'), `Use the folder of the file of an agent: ${shorten(suggestion, 60)}`)) : null,
+      h('div', { class: ['disclosure', own && 'open'] },
+        h('button', { type: 'button', onClick: () => { ui.ownFolders = !own; render(); } }, icon('folderOpen', 'sm'), 'A different folder for some agents', icon('chevronDown', 'sm chev')),
+        own ? h('div', { class: 'disclosure-body' }, h('div', { class: 'agent-rows' }, agents.map(agent => folderRow(agent, save)))) : null)),
+    footer: footer({ onClick: () => go('agents') }, { label: 'Continue to the models', onClick: saveAll }, { text: state.swarmFolder ? `In ${shorten(state.swarmFolder, 40)}` : state.mixedFolders ? 'Different folders' : 'No folder' }),
     guide: [
-      { q: 'Do I need folders?', text: 'No. Without a folder, an agent reads none of your files, and what it makes is saved in agent-files/results of SwarmUP (the formatter and the math checker save next to your file).', tone: 'tip', icon: 'folder' },
-      { q: 'What goes in it?', text: ['the email writer: a copy of every email sent', 'the calendar planner: calendar_events.ics', 'the writers: every approved text', 'the coder: its file and its test run', 'the worker: the files it creates or changes, after you allow each change'] },
-      { q: 'Safety', text: 'An agent only writes inside its own folder, and only after you approve. The original of a document is never changed.' },
+      { q: 'Do I need a folder?', text: 'No. Without a folder, the agents read none of your files, and what they make is saved in agent-files/results of SwarmUP (the formatter and the math checker save next to your file).', tone: 'tip', icon: 'folder' },
+      { q: 'What goes in it?', text: ['every approved result, in swarmup-results', 'the files an agent creates or changes, after you allow each change', 'the email writer: a copy of every email sent', 'the calendar planner: calendar_events.ics'] },
+      { q: 'Safety', text: 'An agent only writes inside its own folder, and only after you approve. Every file it changes can be put back.' },
     ],
   };
 }

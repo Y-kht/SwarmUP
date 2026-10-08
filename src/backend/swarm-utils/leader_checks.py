@@ -22,6 +22,7 @@ IGNORED_KEYS = ("provider", "company", "vendor", "api", "local", "vram", "cli", 
 # What the leader can choose from, and the checks of what it chose.
 # ==============
 TASK_WORDS = {
+    "agent": ("agent", "general", "generalagent", "custom", "prompt", "instructions", "assistant", "generic"),
     "email": ("email", "emailer", "emailwriter", "mail", "mailer", "emailsender", "sendemail"),
     "calendar": ("calendar", "calendarplanner", "planner", "event", "scheduler", "schedule", "booking"),
     "news": ("news", "newsbriefer", "briefer", "briefing", "newsbriefing", "headlines"),
@@ -33,6 +34,8 @@ TASK_WORDS = {
 }
 # Other names of the settings, by the key of the setting. Only the keys of the task of the agent are used.
 SETTING_WORDS = {
+    "prompt": ("prompt", "instructions", "instruction", "brief", "job", "goal", "what", "description", "taskprompt", "assignment"),
+    "rules": ("rules", "rulesfiles", "rulefiles", "rule", "agentrules", "guidelines"),
     "filePath": ("file", "path", "filepath", "filename", "document", "documentpath", "codefile", "target", "input"),
     "maxWords": ("maxwords", "words", "wordlimit", "maximumwords", "length", "wordcount"),
     "length": ("length", "words", "maxwords", "wordcount", "wordlimit", "maximumwords"),
@@ -283,7 +286,10 @@ class LeaderChecks:
     def checkAgent(self, raw, names, waitable, taken, money=None):
         keys, extra = normalizeKeys(raw)
         errors, needs = [], {}
-        task = self.findTask(keys.get("task")) or (self.findTask(keys.get("role")) if not keys.get("task") else None)
+        # Without a task, an agent with instructions is a general agent, and so is one whose role is not a specialised task.
+        settings = keys.get("settings") if isinstance(keys.get("settings"), dict) else {}
+        written = any(squash(key) in ("prompt", *SETTING_WORDS["prompt"]) for key in settings)
+        task = self.findTask(keys.get("task")) or (None if keys.get("task") else "agent" if written else self.findTask(keys.get("role")) or "agent")
         if task is None:
             errors.append(f"'{keys.get('task') or ''}' is not a task of the list. Write the key of a task: {', '.join(TASKS)}.")
         name = cleanName(keys.get("name")) or (TASKS[task]["name"] if task else "")

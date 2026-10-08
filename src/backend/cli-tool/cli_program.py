@@ -1,7 +1,7 @@
 # The swarm of the command line: its agents, its order, its run, and the leader that builds it.
 from cli_console import askUntilValid, askYesNo, chooseFrom, heading, shorten
 from cli_models import chooseModel
-from cli_steps import askFolder, chooseTask, fillTask
+from cli_steps import askFolder, chooseAgent
 from cli_view import TreeView, describeCosts, renderTree, runCommand, watchCosts
 from leader_catalog import LeaderCatalog
 from leader_manager import LeaderManager
@@ -44,7 +44,7 @@ def buildAgent(console, swarm, spec, info, model, waitsFor=()):
 # Every agent of the swarm is told. If it cannot join (the leader already started its final work), its model is let go.
 def addLive(console, swarm, specs, keys, tokens, models):
     number = len(swarm.getAgents()) + 1
-    spec = fillTask(console, chooseTask(console, number, number), swarm.getAgents())
+    spec = chooseAgent(console, number, number, swarm.getAgents())
     spec["answers"]["folder"] = askFolder(console, spec, number, number)
     info, model = chooseModel(console, swarm, spec, number, number, keys, tokens)
     others = [name for name in swarm.getAgents() if name != swarm.getLeader()]

@@ -6,7 +6,7 @@ from message_loops import checkEmailLogin, nextOccurrence
 from messengers import MessagingError, checkMessenger, findTelegramChats
 from mission_costs import checkBudget
 from sources_library import ALL_NEWS_OUTLETS, MESSAGING_APPS, NEWS_OUTLETS, PAPER_PUBLISHERS
-from tasks_library import ADVANCED_FIELDS, TASKS, answerKey, buildLoop, checkAgentName, describeLoop, getDefault, getHelp, getTask, isAsked, messengerSettings, parseAnswer, parseChoices, suggestFolder, suggestName
+from tasks_library import ADVANCED_FIELDS, SPECIALISED_TASKS, TASKS, answerKey, buildLoop, checkAgentName, describeLoop, getDefault, getHelp, getTask, isAsked, messengerSettings, parseAnswer, parseChoices, suggestFolder, suggestName
 from writing_loops import findPublishers
 
 
@@ -35,8 +35,20 @@ def askMission(console):
     return askUntilValid(console, "What is the mission of the swarm? (one or two sentences)", lambda text: parseAnswer({"key": "mission", "ask": "", "kind": "text", "required": True}, text))
 
 
+# What an agent must do: its instructions, in the words of the user (the general agent), or a specialised task for one that needs it.
+def chooseAgent(console, number, total, taken):
+    console.say(f"\nAgent {number} of {total}: what must this agent do? Write its instructions in your own words: what it must make, from what, for whom.\n"
+                "(For a specialised task instead, type tasks: sending an email, booking an event, a news briefing, a survey of papers, formatting a document, "
+                "checking a proof, writing code, or work on the files of a folder.)")
+    text = askUntilValid(console, "Its instructions:", lambda text: (text.strip(), "") if text.strip() else (None, "Write what this agent must do, or type tasks."))
+    if text.lower() in ("tasks", "task", "specialised", "specialized"):
+        return fillTask(console, chooseTask(console, number, total), taken)
+    return fillTask(console, "agent", taken, given={"prompt": text})
+
+
+# The specialised tasks, for an agent that needs one.
 def chooseTask(console, number, total):
-    keys = list(TASKS)
+    keys = list(SPECIALISED_TASKS)
     labels = [TASKS[key]["label"] for key in keys]
     def showInfo(text):
         if not text.lower().startswith(("info", "?")):
@@ -44,7 +56,7 @@ def chooseTask(console, number, total):
         chosen, error = parseChoices(labels, text.lstrip("?").strip() if text.startswith("?") else text[4:], one=True)
         console.say(TASKS[keys[labels.index(chosen[0])]]["info"] if not error else "Write info and the number of a task, like: info 3")
         return True
-    label = chooseFrom(console, f"\nAgent {number} of {total}: what must this agent do? (type info 2 to read about task 2)", labels, extra=showInfo)
+    label = chooseFrom(console, f"\nAgent {number} of {total}: which specialised task must it do? (type info 2 to read about task 2)", labels, extra=showInfo)
     return keys[labels.index(label)]
 
 
@@ -124,8 +136,10 @@ def askField(console, field, answers):
         default = getDefault(field, answers)
         return chooseFrom(console, field["ask"], field["options"], default=default, hint=f"Your choice (a number, Enter = {default}):" if default else "")
     if kind == "choices":
-        picked = chooseFrom(console, field["ask"], field["options"], one=False, default=field["default"], none=True,
-                            hint="Your choices (numbers like 1,3-4; Enter = all; none = none of them):")
+        default = field["default"]
+        enter = "all" if default == field["options"] else ", ".join(default) if default else "none"
+        picked = chooseFrom(console, field["ask"], field["options"], one=False, default=default, none=True,
+                            hint=f"Your choices (numbers like 1,3-4; Enter = {enter}; none = none of them):")
         return picked
     if kind == "outlets":
         return chooseOutlets(console)
@@ -207,11 +221,12 @@ def verifyMessenger(console, answers):
             answers[answerKey(app, field["key"])] = askField(console, field, answers)
 
 
-def fillTask(console, key, taken):
-    task, answers = TASKS[key], {}
+# given are the answers that are already known (the instructions of a general agent, typed first).
+def fillTask(console, key, taken, given=None):
+    task, answers = TASKS[key], dict(given or {})
     console.say(f"\n--- {task['label']} ---\n{task['info']}")
     for field in task["fields"]:
-        if not isAsked(field, answers):
+        if not isAsked(field, answers) or field["key"] in answers:
             continue
         answers[field["key"]] = askField(console, field, answers)
         if field["key"] == "collectAt":
@@ -236,9 +251,10 @@ def fillTask(console, key, taken):
 # ==============
 # The folder of each agent: where it saves what it makes, and where the files it works on must be.
 # ==============
+# The folder the agent has (the folder of the swarm), or the folder of its file, is what Enter keeps.
 def askFolder(console, spec, number, total):
     task = getTask(spec["task"])
-    suggestion = suggestFolder(spec["answers"])
+    suggestion = spec["answers"].get("folder") or suggestFolder(spec["answers"])
     console.say(f"\n--- Folder of agent {number} of {total}: {spec['name']} ({task['role']}) ---\n{describeAgent(spec)}\n{task['folder']}")
     def parse(text):
         if text.strip().lower() == "none" or not (text.strip() or suggestion):
@@ -255,7 +271,25 @@ def askFolder(console, spec, number, total):
     return askUntilValid(console, f"Folder of {spec['name']}{shown} (a path, Enter = {'the one in brackets' if suggestion else 'no folder'}, none = no folder):", parse)
 
 
+# One folder for the swarm: every agent works in it. An agent whose file is somewhere else (a document to format...) is asked its own folder,
+# and the user can give other agents a folder of their own too.
 def chooseFolders(console, specs):
-    console.say("An agent can work inside a folder of your computer, where it saves what it makes. This is optional, and every agent can have its own folder.")
+    console.say("The agents can work in a folder of your computer: they read all its files, at any depth, and save what they make in its swarmup-results "
+                "folder. This is optional.")
+    suggestion = next((suggestFolder(spec["answers"]) for spec in specs if suggestFolder(spec["answers"])), None)
+    def parse(text):
+        if text.strip().lower() == "none" or not (text.strip() or suggestion):
+            return None, ""
+        return parseAnswer({"key": "folder", "ask": "", "kind": "folder"}, text.strip() or suggestion)
+    shown = f" [{suggestion}]" if suggestion else ""
+    folder = askUntilValid(console, f"Folder of the swarm{shown} (a path, Enter = {'the one in brackets' if suggestion else 'no folder'}, none = no folder):", parse)
     for number, spec in enumerate(specs, 1):
-        spec["answers"]["folder"] = askFolder(console, spec, number, len(specs))
+        try:
+            buildLoop(spec["task"], None, {**spec["answers"], "folder": folder})
+            spec["answers"]["folder"] = folder
+        except ValueError as problem:
+            console.say(f"{spec['name']} cannot work in this folder: {problem}")
+            spec["answers"]["folder"] = askFolder(console, spec, number, len(specs))
+    if folder and len(specs) > 1 and askYesNo(console, "Must some agents work in another folder?", False):
+        for number, spec in enumerate(specs, 1):
+            spec["answers"]["folder"] = askFolder(console, spec, number, len(specs))

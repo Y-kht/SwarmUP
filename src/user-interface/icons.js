@@ -79,6 +79,7 @@ const ICONS = {
 
 // The task of an agent: its icon and its colour, used everywhere the agent appears.
 const TASK_STYLE = {
+  agent: { icon: 'sparkles', color: '#5B4CF0' },
   email: { icon: 'mail', color: '#3B82F6' },
   calendar: { icon: 'calendar', color: '#10B981' },
   news: { icon: 'newspaper', color: '#EAB308' },
