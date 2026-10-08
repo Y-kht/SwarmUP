@@ -25,6 +25,8 @@ class Loop:
         self.inbox = []
         self.userMessages = []
         self.approvedPlan = ""
+        # In a round after the first, the part of the new request of the user that this agent must do (swarm_rounds.py).
+        self.roundRequest = ""
         self.planning = False
         self.reviewer = None
         self.name = type(self).__name__
@@ -52,6 +54,9 @@ class Loop:
         self.allowed = set()
         self.activity = []
         self.onActivity = None
+        # What the loop says and asks is never mixed with what another loop says and asks to the same user. A window with several missions gives
+        # each of them its own lock, so a question of one mission never waits for the answer to another.
+        self.userLock = USER_LOCK
 
     # Messages sent by the other agents of a swarm. The agent reads them with every prompt.
     def receive(self, sender, message):
@@ -65,7 +70,7 @@ class Loop:
     # Everything an agent needs to go on after the program stopped. It holds no password: those are never saved.
     def getState(self):
         return {"progress": dict(self.progress), "actions": list(self.actions), "inbox": list(self.inbox), "userMessages": list(self.userMessages),
-                "approvedPlan": self.approvedPlan}
+                "approvedPlan": self.approvedPlan, "roundRequest": self.roundRequest}
 
     def setState(self, state):
         self.progress = dict(state.get("progress", {}))
@@ -73,6 +78,7 @@ class Loop:
         self.inbox = list(state.get("inbox", []))
         self.userMessages = list(state.get("userMessages", []))
         self.approvedPlan = state.get("approvedPlan", "")
+        self.roundRequest = state.get("roundRequest", "")
 
     def saveProgress(self):
         if self.onProgress:
@@ -216,22 +222,22 @@ class Loop:
 
     # The next three are the only places where the user is spoken to. A user interface can replace them.
     def notifyUser(self, message):
-        with USER_LOCK:
+        with self.userLock:
             print(message)
 
     def askUser(self, question):
-        with USER_LOCK:
+        with self.userLock:
             return input(f"{question} ")
 
     def askSecret(self, question):
-        with USER_LOCK:
+        with self.userLock:
             return getpass.getpass(f"{question} ")
 
     # A coding agent wants to act: run a command, change files, read outside its folder, use the web... request is
     # {"action": what it wants to do, in words, "detail": the command, file or address, "folder": where, "reason": why (may be empty)}.
     # The answer is {"decision": "once", "run" (the same action is allowed until the swarm runs again) or "deny", "message": why it is denied}.
     def askPermission(self, request):
-        with USER_LOCK:
+        with self.userLock:
             reason = f"\nWhy: {request['reason']}" if request.get("reason") else ""
             self.notifyUser(f"[{self.name}] wants to {request['action']}:\n{request['detail']}\nIn: {request.get('folder') or 'its folder'}{reason}")
             reply = self.askUser("Type yes to allow it this time, always to allow it until the swarm runs again, or no (followed by why, if you like):").strip()
@@ -246,7 +252,7 @@ class Loop:
     # "multiple": several options can be chosen, "secret": the answer is hidden}. The answer is {id: [chosen labels, or the text typed]}.
     def askQuestions(self, questions):
         answers = {}
-        with USER_LOCK:
+        with self.userLock:
             for question in questions:
                 options = question.get("options") or []
                 listed = "".join(f"\n  {number}. {option['label']}" + (f": {option['description']}" if option.get("description") else "") for number, option in enumerate(options, 1))
@@ -261,7 +267,7 @@ class Loop:
     # or model, "agent": the agent it is about, "why": the reason of the leader, "text": the change in a sentence, "summary": all of it in plain
     # text, and the details}. The answer is {"decision": "approve" or "reject", "message": what the user tells the leader to change}.
     def askProposal(self, proposal):
-        with USER_LOCK:
+        with self.userLock:
             self.notifyUser(f"[{self.name}] {proposal.get('summary') or 'proposes: ' + proposal['text']}" + (f"\nWhy: {proposal['why']}" if proposal.get("why") else ""))
             reply = self.askUser("Type yes to approve it, or no (followed by what you want instead, if you like):").strip()
         word, _, rest = reply.partition(" ")
@@ -279,7 +285,7 @@ class Loop:
 
     # Returns (username, password) of an account the user has on a website, or None if the user has none.
     def askLogin(self, host):
-        with USER_LOCK:
+        with self.userLock:
             self.notifyUser(f"[{self.name}] {host} asks for an account. It is only used for this run and never saved. Leave the username empty to skip.")
             username = self.askUser(f"Username for {host}:").strip()
             return (username, self.askSecret(f"Password for {host}:")) if username else None
@@ -314,7 +320,7 @@ class Loop:
         shown = draft if self.planning else self.describe(draft)
         if self.reviewer:
             return self.reviewer(shown, problem)
-        with USER_LOCK:
+        with self.userLock:
             self.notifyUser(f"[{self.name}]\n{shown}")
             self.notifyUser(f"Warning, the automatic checks found a problem: {problem}" if problem else "The automatic checks passed.")
             return self.askUser("Is this good to go? Type yes, no, or what you want changed:")

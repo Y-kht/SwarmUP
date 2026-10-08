@@ -2188,6 +2188,12 @@ class PublisherTests(LoopTestCase):
 
 
 class GpuReadingTests(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.dict(os.environ)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+
     def smi(self, output="", code=0, error=None):
         run = everywhere(checking_loops.subprocess, "run", side_effect=error, return_value=subprocess.CompletedProcess([], code, stdout=output, stderr=""))
         finder = everywhere(harness_utils, "findNvidiaSmi", return_value="nvidia-smi")
@@ -2200,6 +2206,14 @@ class GpuReadingTests(unittest.TestCase):
         self.smi("NVIDIA RTX A5000, 24564, 24098\nNVIDIA RTX A5000, 24564, 23915\n")
         self.assertEqual(gpu_check.readNvidiaGpus(), [{"name": "NVIDIA RTX A5000", "total": 25.8, "free": 25.3},
                                                           {"name": "NVIDIA RTX A5000", "total": 25.8, "free": 25.1}])
+
+    # The models only see the GPUs of CUDA_VISIBLE_DEVICES, so only those are counted. Names (like GPU-uuid) cannot be matched: all are counted.
+    def testOnlyTheVisibleGpusAreCounted(self):
+        self.smi("GPU A, 8192, 100\nGPU B, 8192, 200\nGPU C, 8192, 300\n")
+        os.environ["CUDA_VISIBLE_DEVICES"] = "2,0"
+        self.assertEqual([gpu["name"] for gpu in gpu_check.readNvidiaGpus()], ["GPU C", "GPU A"])
+        os.environ["CUDA_VISIBLE_DEVICES"] = "GPU-1234"
+        self.assertEqual(len(gpu_check.readNvidiaGpus()), 3)
 
     def testLinesThatCannotBeReadAreSkippedAndNamesMayHaveCommas(self):
         self.smi("GPU A, 8192, 100\nGPU B, [N/A], [N/A]\nbroken\nVendor, Inc GPU, 4096, 4096\n\n")

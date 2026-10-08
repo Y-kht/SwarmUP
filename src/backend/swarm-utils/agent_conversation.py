@@ -17,6 +17,7 @@ import agent_prompts as prompts
 from agent_storehouse import describeTree, safeName
 from agent_tools import Toolbox, describeCall
 from harness_utils import STOPPED_MESSAGE, SwarmStopped
+from memory_cache import describeMemory
 
 
 MAX_STEPS = 25
@@ -29,7 +30,8 @@ def canConverse(agent):
     return callable(getattr(agent, "converse", None))
 
 
-# What the agent knows of itself for the whole conversation: who it is, where it works and how, its rules, its approved plan and its notes.
+# What the agent knows of itself for the whole conversation: who it is, where it works and how, its rules, its approved plan, and the memory
+# (its notes included) with the temp folder.
 def describeAgent(loop, toolbox, own):
     workplace = prompts.FOLDER_WORKPLACE.format(folder=toolbox.root, tree=describeTree(toolbox.root)) if loop.folder else \
         prompts.SCRATCH_WORKPLACE.format(folder=toolbox.root)
@@ -41,7 +43,7 @@ def describeAgent(loop, toolbox, own):
     if own and loop.approvedPlan:
         parts.append(prompts.APPROVED_PLAN_PROMPT.format(plan=loop.approvedPlan))
     if loop.session:
-        parts.append(f"YOUR NOTES (what you wrote down earlier in this mission, with remember):\n{loop.session.readNotes(loop.name) or 'None yet.'}")
+        parts.append(describeMemory(loop.session.memory, loop.name))
     return "\n\n".join(parts)
 
 

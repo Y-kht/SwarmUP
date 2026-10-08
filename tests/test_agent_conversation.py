@@ -15,7 +15,7 @@ import agent_conversation
 import agent_prompts as prompts
 import harness_utils
 from agent_conversation import Conversation
-from agent_storehouse import WorkSession
+from mission_memory import WorkSession
 from agent_tools import Toolbox, undoChanges
 from base_loop import Loop
 from checking_loops import WorkerLoop

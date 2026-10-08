@@ -1,17 +1,20 @@
-# The swarms that were interrupted: the command line offers to continue them where they stopped, or to cancel them after a summary.
+# The missions of the history (mission_history.py) in the command line. A swarm that was interrupted is continued where it stopped, or cancelled
+# after a summary. A mission whose round is over is followed up, as in a chat: the user gives a new request and the same swarm works on it,
+# right after the round, or later from the history (swarmup_cli.py open).
 from base_loop import Loop
 from cli_console import askUntilValid, chooseFrom, heading, shorten
 from cli_models import prepareApi, prepareLocal, signInCodex
-from cli_program import ConsoleMaker, addLive, connect, startSwarm, unloadModels
+from cli_program import ConsoleMaker, addLive, chooseMode, connect, startSwarm, unloadModels
 from cli_steps import askAccounts, askField
 from cli_view import renderTree, watchCosts
 from codex_agent import readCodexAccount
 from leader_catalog import LeaderCatalog
 from leader_manager import LeaderManager
+from mission_history import loadMission
 from model_clients import createModel
 from model_support import ModelError, getApiKey
 from models_library import API_KEYS
-from saved_swarms import findUnfinishedSwarms
+from saved_swarms import UNFINISHED_STATES, findUnfinishedSwarms
 from swarm_harness import Swarm
 from tasks_library import buildLoop, getTask, restoreAnswers, secretFields
 
@@ -52,18 +55,18 @@ def rebuildAgent(console, name, data, keys, tokens, models, specs=None):
     return loop
 
 
-def resumeSaved(console, saved):
-    keys, tokens, models, specs = {}, {}, {}, []
+# The swarm of a saved mission, built again with its agents (their secrets and keys are asked again), or None if it cannot be.
+def restoreSwarm(console, saved, models):
+    keys, tokens, specs = {}, {}, []
     if not all(member.get("recipe") for member in saved["members"].values()):
         console.say("This swarm was made by another program, so it cannot be continued here.")
-        return False
-    heading(console, "Continuing your swarm")
+        return None
     try:
         swarm = Swarm.restore(saved, lambda name, data: rebuildAgent(console, name, data, keys, tokens, models, specs))
     except (ValueError, ModelError) as error:
         console.say(f"The swarm cannot be continued yet: {error} It stays saved, so you can try again.")
         unloadModels(models)
-        return False
+        return None
     console.say("\n" + renderTree(swarm, console.color))
     for name in swarm.getAgents():
         watchCosts(console, swarm, swarm.getMember(name)["agent"])
@@ -72,9 +75,66 @@ def resumeSaved(console, saved):
         catalog = LeaderCatalog(saved["mission"], leader["recipe"]["answers"].get("folder"), saved["leader"], leader["model"], keys, tokens, swarm.costs)
         LeaderManager(swarm, catalog, ConsoleMaker(console, swarm, specs, keys, tokens, models))
     console.newAgent = lambda swarm: addLive(console, swarm, specs, keys, tokens, models)
+    return swarm
+
+
+def resumeSaved(console, saved):
+    models = {}
+    heading(console, "Continuing your swarm")
+    swarm = restoreSwarm(console, saved, models)
+    if swarm is None:
+        return False
     startSwarm(console, swarm, swarm.getMode(), models, resume=True)
+    followUps(console, swarm, models)
     unloadModels(models)
     return True
+
+
+# ==============
+# Following up, as in a chat. After a round, the session asks for the next request (a session that is not interactive, like a script, ends).
+# ==============
+def askRequest(console):
+    return askUntilValid(console, "Your new request for the swarm (the leader gives each agent its part):", lambda text: (text.strip(), "" if text.strip() else "Write a request."))
+
+
+def followUps(console, swarm, models):
+    while console.interactive:
+        options = ["Follow up: give the swarm a new request", "End here (the mission stays in the history: swarmup_cli.py open continues it)"]
+        if chooseFrom(console, f"\nRound {swarm.round} is over. What now?", options) != options[0]:
+            return
+        swarm.followUp(askRequest(console))
+        startSwarm(console, swarm, chooseMode(console), models)
+
+
+def describeLastRound(saved):
+    requests = saved.get("requests") or [{"round": 1, "text": saved["mission"]}]
+    report = saved["members"][saved["leader"]].get("result")
+    lines = [f"The mission: {saved['mission']}"] + [f"Round {item['round']}: {shorten(item['text'], 200)}" for item in requests[1:]]
+    return "\n".join(lines + ([f"\nThe last report of {saved['leader']}:\n{report}"] if report else []))
+
+
+def followUpSaved(console, saved):
+    models = {}
+    heading(console, "Following up on your mission")
+    console.say(describeLastRound(saved))
+    swarm = restoreSwarm(console, saved, models)
+    if swarm is None:
+        return False
+    swarm.followUp(askRequest(console))
+    startSwarm(console, swarm, chooseMode(console), models)
+    followUps(console, swarm, models)
+    unloadModels(models)
+    return True
+
+
+# A mission chosen from the history (swarmup_cli.py open): continued where it stopped, or followed up.
+def openMission(console, missionId):
+    try:
+        saved = loadMission(missionId)
+    except ValueError as error:
+        console.say(str(error))
+        return False
+    return resumeSaved(console, saved) if saved["state"] in UNFINISHED_STATES else followUpSaved(console, saved)
 
 
 # The leader writes the summary with its model if that can be made again (an API key is asked for it, and can be skipped).

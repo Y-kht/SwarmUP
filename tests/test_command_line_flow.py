@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import queue
@@ -24,7 +25,7 @@ from swarm_harness import Swarm
 from tasks_library import NO_MESSENGER
 from test_harness_utils import DraftLoop, FakeAgent
 from test_leader_utils import usePrices
-from test_saved_swarms import waitUntil
+from test_saved_swarms import savedState, waitUntil
 
 GPUS = [{"name": "RTX A5000", "total": 25.8, "free": 25.3}, {"name": "RTX A5000", "total": 25.8, "free": 25.8}]
 
@@ -1291,7 +1292,7 @@ class InterruptedSwarmTests(ProgramCase):
         self.assertEqual(sorted(harness_utils.loadContext("author_contexts.json")), ["the sky"])
         self.assertFalse(any("Write a text about the sea" in prompt for prompt in self.promptsOfModels()))
         self.assertTrue(any("Write a text about the sky" in prompt for prompt in self.promptsOfModels()))
-        self.assertFalse(swarmStatePath(saved["id"]).exists())
+        self.assertEqual(savedState(saved["id"]), "finished")
         self.assertIn("- Writer2: done. result: A short text.", text)
 
     def testAConnectionThatWasLostIsToldAsSuch(self):
@@ -1309,7 +1310,7 @@ class InterruptedSwarmTests(ProgramCase):
         self.assertIn("If you stop here, everything above stays as it is, but the agents that did not finish are cut in the middle of their task.", text)
         self.assertIn("The swarm is stopped.", text)
         self.assertNotIn("The swarm goes on", text)
-        self.assertFalse(swarmStatePath(saved["id"]).exists())
+        self.assertEqual(savedState(saved["id"]), "stopped")
         self.assertEqual(findUnfinishedSwarms(), [])
         self.assertTrue(any("wants to cancel the swarm" in prompt and "Writer2 (writer): has not started yet" in prompt for prompt in self.promptsOfModels()))
 
@@ -1319,7 +1320,7 @@ class InterruptedSwarmTests(ProgramCase):
         self.assertTrue(result)
         self.assertIn("Summary of what the swarm did so far", script.text())
         self.assertIn("The swarm goes on.", script.text())
-        self.assertFalse(swarmStatePath(saved["id"]).exists())
+        self.assertEqual(savedState(saved["id"]), "finished")
 
     def testWithoutTheKeyOfTheLeaderTheUserGetsTheFactsAsTheyAre(self):
         self.leave()
@@ -1407,7 +1408,7 @@ class InterruptedSwarmTests(ProgramCase):
         release.set()
         swarm.wait(10)
         self.assertEqual(script.answers, [])
-        self.assertFalse(swarmStatePath(swarm.id).exists())
+        self.assertEqual(savedState(swarm.id), "finished")
         saveSwarmState(snapshot["id"], snapshot)
         self.assertEqual({name: member["status"] for name, member in snapshot["members"].items()}, {"Writer": "waiting", "Writer2": "working"})
         result, script = self.offer(["1", "yes", "yes"])
@@ -1429,6 +1430,59 @@ class InterruptedSwarmTests(ProgramCase):
             cli.runSwarm(console, swarm)
         self.assertEqual(json.loads(swarmStatePath(swarm.id).read_text(encoding="utf-8"))["state"], "interrupted")
         gate.set()
+        swarm.thread.join(10)
+
+
+# The history of the missions in the command line: a finished mission is followed up, and the commands history, open and delete.
+class HistoryCommandTests(ProgramCase):
+    def finished(self, swarmId="20261004_073000_abcd", age=1000):
+        saved = savedSwarm(swarmId, members={"Writer": savedMember("the sea", "done", "Text about the sea."), "Writer2": savedMember("the sky", "done", "Text about the sky.")},
+                           state="finished", heartbeat=datetime.now().timestamp() - age)
+        saveSwarmState(saved["id"], saved)
+        return saved
+
+    def testAFinishedMissionIsFollowedUpWithANewRequest(self):
+        saved = self.finished()
+        script = Script(["Make both texts shorter.", "2", "yes", "yes"])
+        self.assertTrue(cli.openMission(script.console(), saved["id"]))
+        self.assertEqual(script.answers, [], "The program did not ask all the questions of the script.")
+        text = script.text()
+        self.assertIn("Following up on your mission", text)
+        self.assertIn("The last report of Writer:\nText about the sea.", text)
+        self.assertIn("Round 2: Writer2 work on it.", text)
+        self.assertIn("== The swarm starts in execute mode ==", text)
+        state = json.loads(swarmStatePath(saved["id"]).read_text(encoding="utf-8"))
+        self.assertEqual((state["state"], state["round"], state["requests"][-1]["text"]), ("finished", 2, "Make both texts shorter."))
+        self.assertTrue(any("Make both texts shorter." in prompt for model in self.models for prompt in model.prompts))
+
+    def testAMissionThatRunsElsewhereIsLeftToIt(self):
+        saved = savedSwarm(heartbeat=datetime.now().timestamp())
+        saveSwarmState(saved["id"], saved)
+        script = Script([])
+        self.assertFalse(cli.openMission(script.console(), saved["id"]))
+        self.assertIn("running in another session", script.text())
+
+    def testTheHistoryListsTheMissionsAndDeletesThem(self):
+        self.finished()
+        self.finished("20261005_080000_beef", age=2000)
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            cli.main(["history"])
+        listed = out.getvalue()
+        self.assertIn("  1. 20261004_073000_abcd  finished, can be followed up, 2 agents", listed)
+        self.assertIn("  2. 20261005_080000_beef", listed)
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            cli.main(["history", "--json"])
+        self.assertEqual(len(json.loads(out.getvalue())), 2)
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            cli.main(["delete", "20261005", "--yes"])
+        self.assertIn("Deleted the mission 20261005_080000_beef", out.getvalue())
+        self.assertFalse(swarmStatePath("20261005_080000_beef").exists())
+        with mock.patch("builtins.input", return_value="n"), mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            cli.main(["delete", "1"])
+        self.assertIn("Kept.", out.getvalue())
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as error, self.assertRaises(SystemExit):
+            cli.main(["delete", "7"])
+        self.assertIn("There is no mission 7 in the history", error.getvalue())
 
 
 # A model that loses the connection the first time it is asked to write.
@@ -1489,7 +1543,7 @@ class KeyboardTests(ProgramCase):
             self.finish()
         self.assertEqual(self.swarm.getStatuses(), {"Writer": "done", "Writer2": "done"})
         self.assertIn("The swarm goes on", "\n".join(self.said))
-        self.assertFalse(swarmStatePath(self.swarm.id).exists())
+        self.assertEqual(savedState(self.swarm.id), "finished")
 
     def testTypingCancelThenStopStopsTheSwarmAfterTheSummary(self):
         self.question("Type continue to try again, or cancel to stop here:")
@@ -1506,7 +1560,7 @@ class KeyboardTests(ProgramCase):
         self.assertEqual(self.swarm.getStatus("Writer2"), "failed")
         self.assertEqual(self.swarm.getInfo("Writer2")["error"], "The user stopped the swarm before this agent finished.")
         self.assertIn("== The swarm was stopped by you ==", "\n".join(self.said))
-        self.assertFalse(swarmStatePath(self.swarm.id).exists())
+        self.assertEqual(savedState(self.swarm.id), "stopped")
 
 
 if __name__ == "__main__":

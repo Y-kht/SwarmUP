@@ -7,7 +7,9 @@ from interface_views import FormError, describeField, describeModel, hasCredenti
 from model_clients import createModel
 from model_support import findMissingPackages
 from models_library import API_KEYS, isGated
-from saved_swarms import findUnfinishedSwarms
+from harness_utils import USER_NAME
+from mission_history import loadMission
+from saved_swarms import UNFINISHED_STATES, findUnfinishedSwarms
 from swarm_harness import Swarm
 from tasks_library import buildLoop, describeLoop, restoreAnswers, secretFields
 
@@ -15,7 +17,8 @@ from tasks_library import buildLoop, describeLoop, restoreAnswers, secretFields
 SHUTDOWN_DELAY = 0.5
 
 
-# The swarms that were interrupted (Session in session_core.py), the pages of the providers, and the end of the program.
+# The missions of the history (Session in session_core.py): the swarms that were interrupted, continued where they stopped, and the missions whose
+# round is over, opened again to follow them up. Also the pages of the providers, and the end of the program.
 class SessionSaved:
     # ---------- The swarms that were interrupted. ----------
     def refreshUnfinished(self, payload=None):
@@ -29,12 +32,14 @@ class SessionSaved:
         self.unfinished = found
 
     def findSaved(self, swarmId):
-        saved = next((saved for saved in findUnfinishedSwarms() if saved["id"] == swarmId), None)
-        if saved is None:
-            raise ValueError("This swarm is not saved anymore.")
-        if saved["running"]:
-            raise ValueError("This swarm is working in another window of the program. If that window was closed a few seconds ago, try again in half a minute.")
-        return saved
+        try:
+            return loadMission(swarmId)
+        except ValueError as error:
+            raise ValueError(f"{error} If its window was closed a few seconds ago, try again in half a minute." if "running" in str(error) else str(error)) from None
+
+    # A mission whose round is over is followed up: every agent may work again, so it needs its secrets again.
+    def isFollowUp(self, saved):
+        return saved["state"] not in UNFINISHED_STATES
 
     # What the user must give again to continue a swarm: the secrets of every agent (never saved), the API keys and the Hugging Face tokens.
     def resumeForm(self, payload):
@@ -42,8 +47,9 @@ class SessionSaved:
         if not all(member.get("recipe") for member in saved["members"].values()):
             raise ValueError("This swarm was made by another program, so it cannot be continued here.")
         agents, providers, gated, codex = [], {}, [], False
+        following = self.isFollowUp(saved)
         for name, member in saved["members"].items():
-            task, answers, finished = member["recipe"]["task"], member["recipe"]["answers"], member["status"] in ("done", "failed")
+            task, answers, finished = member["recipe"]["task"], member["recipe"]["answers"], member["status"] in ("done", "failed") and not following
             fields = [{**describeField(field, answers), "required": field.get("required", False) and not finished} for field in secretFields(task, answers)]
             info = member["model"]
             agents.append({"name": name, "role": member["role"], "task": task, "status": member["status"], "finished": finished, "fields": fields,
@@ -54,10 +60,10 @@ class SessionSaved:
             if info and info["local"] and isGated(info["name"]) and not os.environ.get("HF_TOKEN") and not finished:
                 gated.append(info["name"])
         return {"resume": {"id": saved["id"], "mission": saved["mission"], "mode": saved["mode"], "agents": agents, "providers": providers, "gated": gated,
-                           "codex": codex}}
+                           "codex": codex, "followUp": following, "round": saved.get("round", 1), "requests": saved.get("requests") or []}}
 
-    def rebuildAgent(self, name, data, secretValues, rebuilt):
-        recipe, finished = data["recipe"], data["status"] in ("done", "failed")
+    def rebuildAgent(self, name, data, secretValues, rebuilt, following=False):
+        recipe, finished = data["recipe"], data["status"] in ("done", "failed") and not following
         task, values = recipe["task"], secretValues.get(name) or {}
         secrets, errors = {}, {}
         for field in secretFields(task, recipe["answers"]):
@@ -95,8 +101,8 @@ class SessionSaved:
         self.rememberKeys(payload)
         if any((member.get("model") or {}).get("cli") == "codex" and member["status"] not in ("done", "failed") for member in saved["members"].values()):
             self.checkCodexReady()
-        rebuilt = []
-        swarm = Swarm.restore(saved, lambda name, data: self.rebuildAgent(name, data, payload.get("secrets") or {}, rebuilt))
+        rebuilt, following = [], self.isFollowUp(saved)
+        swarm = Swarm.restore(saved, lambda name, data: self.rebuildAgent(name, data, payload.get("secrets") or {}, rebuilt, following))
         swarm.addListener(self.onEvent)
         self.unloadModels()
         self.reset()
@@ -107,8 +113,25 @@ class SessionSaved:
             self.manage(swarm, self.leaderSpec())
         self.order = "custom" if any(spec["waitsFor"] for spec in rebuilt) else "together"
         self.cancelling = None
-        self.launch(swarm, resume=True)
+        if following:
+            self.showTranscript(saved)
+            with self.lock:
+                self.runInfo = {"startedAt": saved.get("savedAt"), "finishedAt": saved.get("savedAt"), "resume": False, "reopened": True}
+        else:
+            self.launch(swarm, resume=True)
         self.refreshUnfinished()
+
+    # What a mission that is opened again already said: the requests of the user and the messages of its rounds, as they were in the conversation.
+    def showTranscript(self, saved):
+        requests = saved.get("requests") or [{"round": 1, "text": saved["mission"]}]
+        self.addFeed("", f"The mission is open again. It had {len(requests)} {'round' if len(requests) == 1 else 'rounds'}: what was said is below.", "info", "event")
+        for request in requests:
+            self.addFeed(USER_NAME, f"Round {request['round']}: {request['text']}", "info", "answer")
+        for message in saved.get("messages") or []:
+            self.addFeed(message["sender"], message["message"], "info", "message" if message["sender"] != USER_NAME else "answer", message["receiver"])
+        report = saved["members"][saved["leader"]].get("result")
+        if report:
+            self.addFeed(saved["leader"], f"My last report:\n{report}", "info", "note")
 
     # Before a saved swarm is cancelled, the leader says what it already changed. It writes that with its model if it can be made again.
     def prepareCancel(self, payload):

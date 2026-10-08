@@ -2,12 +2,25 @@ import json
 from datetime import datetime
 
 import agent_prompts as prompts
-from harness_utils import STOPPED_MESSAGE, SUMMARY_LENGTH, SwarmStopped, USER_LOCK, USER_NAME, isNo, isOnline, isYes, stripFences
+from harness_utils import STOPPED_MESSAGE, SUMMARY_LENGTH, SwarmStopped, USER_NAME, isNo, isOnline, isYes, stripFences
+from memory_cache import describeLongTerm
+from mission_memory import USER_PROMPTS, splitRecord
 
 
 CORRECTION_REPLY = "The user asked for a correction. It is in your newest messages, apply it."
 
 REMOVED_MESSAGE = "This agent was removed from the swarm before it finished."
+
+APPROVALS = ("yes", "y", "ok", "approve", "approved its draft.")
+
+
+# Whether what the user wrote in a round (its part of USER_PROMPTS.md) says more than the mission and approvals.
+def hasFeedback(written):
+    for section in splitRecord(written):
+        title, _, body = section.partition("\n")
+        if section.strip() and ": The mission" not in title and body.strip().lower() not in APPROVALS:
+            return True
+    return False
 
 
 # What a swarm (Swarm in swarm_harness.py) asks the user: the drafts of the agents, the summaries and the corrections of the leader,
@@ -35,6 +48,7 @@ class SwarmReview:
             raise ValueError(f"{name} has already finished, so it cannot read new messages.")
         member["agent"].receiveFromUser(message)
         self.logMessage(USER_NAME, name, message)
+        self.record("addUserPrompt", self.round, message, name)
         self.askCorrection(member)
 
     # Gives the answer of the user to the agent that waits for it. It must be called with self.changed held.
@@ -80,9 +94,11 @@ class SwarmReview:
 
     def approveDraft(self, name, revision=None):
         self.decideDraft(name, "yes", revision)
+        self.record("addUserPrompt", self.round, "Approved its draft.", name, kind="Decision about")
 
     def rejectDraft(self, name, revision=None):
         self.decideDraft(name, "no", revision)
+        self.record("addUserPrompt", self.round, "Rejected its draft.", name, kind="Decision about")
 
     def correctDraft(self, name, comment):
         self.checkReady(name)
@@ -93,7 +109,9 @@ class SwarmReview:
 
     def describeMember(self, name, member):
         approved = " and approved by the user" if member["review"] == "approved" else ""
-        if member["status"] == "paused":
+        if member.get("sitsOut"):
+            state = "has no part in this round, and keeps its last result"
+        elif member["status"] == "paused":
             state = "paused because the connection was lost"
         elif member["review"] == "rejected":
             state = "rejected by the user"
@@ -149,6 +167,7 @@ class SwarmReview:
             if summary is None:
                 leader["agent"].notifyUser("The leader could not write the summary, so the state of every agent is shown as it is.")
         self.summary = summary or progress
+        self.record("addProgress", self.round, f"Summary of the {'plans' if leader['mode'] == 'plan' else 'results'}", self.summary)
         self.emit("summary", self.leader, text=self.summary)
         return self.summary
 
@@ -187,7 +206,7 @@ class SwarmReview:
     def reviewAlone(self, name, revision, what):
         leader = self.getMember(self.leader)["agent"]
         member = self.members[name]
-        with USER_LOCK:
+        with leader.userLock:
             leader.notifyUser(f"[{name}] its {what}:\n{member['draft']}")
             if member["problem"]:
                 leader.notifyUser(f"Warning, the automatic checks found a problem: {member['problem']}")
@@ -209,7 +228,7 @@ class SwarmReview:
         leader = self.getMember(self.leader)["agent"]
         what = "plan" if self.members[self.leader]["mode"] == "plan" else "result"
         summary = self.writeSummary(request)
-        with USER_LOCK:
+        with leader.userLock:
             leader.notifyUser(f"[{self.leader}] Summary of the {what}s:\n{summary}")
             leader.notifyUser(f"You can also check, approve or correct the {what} of each agent by clicking on its name in the swarm.")
             for name in shown:
@@ -218,6 +237,7 @@ class SwarmReview:
             reply = leader.askUser("Do you approve? Type yes to approve, no to reject, or write what you want changed:" if len(self.members) == 1 else
                                    "Do you approve? Type yes to approve all of them, no to reject all of them, the name of an agent to look at it alone, or write what you want changed:")
         answered = isYes(reply) or isNo(reply)
+        self.record("addUserPrompt", self.round, reply, f"the summary of the {what}s", kind="Answer to")
         with self.changed:
             waiting = [name for name in shown if name in self.members and self.members[name]["review"] == "ready" and self.members[name]["revision"] == shown[name]]
             changed = [name for name in shown if name in self.members and (self.members[name]["review"] == "" or self.members[name]["revision"] != shown[name])]
@@ -286,6 +306,7 @@ class SwarmReview:
             for member in self.members.values():
                 member["wake"].set()
             self.changed.notify_all()
+        self.record("addProgress", self.round, "The user stopped the swarm", "The agents that did not finish were stopped.")
         self.emit("stopped")
 
     # The leader tells the user every change that was made, before the user confirms to stop. If the leader cannot write it (the lost
@@ -317,7 +338,7 @@ class SwarmReview:
     def askAboutInterruption(self, interruption):
         leader = self.getMember(self.leader)["agent"]
         reasons = "\n".join(f"- {name}: {reason}" for name, reason in interruption["agents"].items())
-        with USER_LOCK:
+        with leader.userLock:
             leader.notifyUser(f"[{self.leader}] The swarm lost its connection and is paused. Everything done so far is saved, so nothing is lost.\n{reasons}")
             while self.interruption is interruption:
                 reply = leader.askUser("Type continue to try again, or cancel to stop here:").strip().lower()
@@ -332,3 +353,29 @@ class SwarmReview:
                         leader.notifyUser("Please type continue or cancel.")
                 except ValueError as error:
                     leader.notifyUser(str(error))
+
+    # ---------- The long-term memory (mission_memory.py). ----------
+    # At the end of a round the leader keeps in the long-term memory what the next swarms of the user should know. It writes it freely, and the
+    # user is told of every change (tellLongTermChange). A round where the user only gave the mission and approved has nothing to teach, so the
+    # leader is asked only after a correction, a rejection, a message, an answer or a follow-up.
+    def updateLongTermMemory(self):
+        if self.session is None:
+            return
+        memory, leader = self.session.memory, self.getMember(self.leader)["agent"]
+        written = memory.readRound(USER_PROMPTS, self.round)
+        if not hasFeedback(written):
+            return
+        prompt = prompts.LONG_TERM_UPDATE_PROMPT.format(mission=self.mission, prompts=written, memory=describeLongTerm(memory))
+        try:
+            answer = leader.askAgent(prompt, own=False, tools=False)
+            changed, problems = memory.applyBlocks(self.leader, answer)
+        except Exception as error:
+            changed, problems = [], [f"{type(error).__name__}: {error}"]
+        if problems:
+            leader.notifyUser(f"[{self.leader}] Some of the long-term memory could not be updated: {'; '.join(problems)}")
+        elif not changed:
+            leader.notifyUser(f"[{self.leader}] I read what you wrote in this round, and found nothing new to keep in the long-term memory for the next swarms.")
+
+    def tellLongTermChange(self, agent, relative, change):
+        self.getMember(self.leader)["agent"].notifyUser(f"[{self.leader}] The long-term memory, which every next swarm reads, has changed: "
+                                                        f"{agent} wrote @long-term/{relative}.\n{change}")

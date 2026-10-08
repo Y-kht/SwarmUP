@@ -5,7 +5,8 @@
 # models_library.py and the modules of swarm-utils: the mission, the task of each agent, its folder, its model, who waits for whom, and the run of
 # the swarm, which is followed live. The user can also let the leader build the swarm (leader_utils.py): the user chooses the model of the
 # leader and the folder of the mission, the leader proposes the agents, and the user approves. The agents speak to the user through the
-# Session (notify, ask and askSecret), and the browser asks the Session for news (poll). Passwords, API keys and tokens are only kept in memory,
+# Session (notify, ask and askSecret), and the browser asks the Session for news (poll). The window holds several missions at once, each in a tab
+# with its Session (Desk in session_desk.py). Passwords, API keys and tokens are only kept in memory,
 # and they are never sent back to the browser.
 import argparse
 import os
@@ -21,7 +22,7 @@ from pathlib import Path
 sys.path[:0] = [str(folder) for folder in sorted(Path(__file__).resolve().parents[1].iterdir()) if folder.is_dir() and not folder.name.startswith(("_", "."))]
 from interface_views import folderOf
 from internet_cache import keepFresh
-from session_core import Session
+from session_desk import Desk
 from web_server import HOST, makeServer
 
 
@@ -114,7 +115,7 @@ def main():
     options = parser.parse_args()
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(errors="replace")
-    session = Session()
+    session = Desk()
     keepFresh()
     server = makeServer(session, options.port)
     address = f"http://{HOST}:{server.server_port}/"

@@ -70,6 +70,20 @@ Do this work now. Use your tools when they help: read the files that matter, and
 Then reply with the result itself, complete and ready to use, in the format the instructions ask for."""
 
 
+# A round after the first (swarm_rounds.py): the user follows up on the mission, and the agent does its part of the new request.
+FOLLOW_UP_TASK_PROMPT = """The user follows up on the mission with a new request:
+{request}
+
+Your part in it, from your leader:
+{part}
+
+Your standing instructions, from the user (they still apply, unless the request changes them):
+{prompt}
+
+You remember what you did in the earlier rounds, and the memory of the mission has what the others did. Do your part now. Use your tools when
+they help: read the files that matter, and check what you did. Then reply with the result itself, complete and ready to use."""
+
+
 GENERAL_CHECK_PROMPT = """You check the work of an agent before the user sees it. Be strict about what matters, and ignore matters of taste.
 The instructions of the user:
 {prompt}
@@ -129,10 +143,61 @@ You can ask several at once, and ask again {rounds} times at most. Read only wha
 
 
 NOTES_PROMPT = """YOUR NOTES
-What you wrote down earlier in this mission, the oldest first:
-{notes}
-To remember something for the rest of the mission (a fact you found, a file that matters, a decision), write it anywhere in your answer as
+Your notes are in the memory above. To remember something for the rest of the mission (a fact you found, a file that matters, a decision), write it anywhere in your answer as
 <swarmup_note>what to remember</swarmup_note>. SwarmUP keeps it, shows it to you with every prompt, and takes it out of your answer."""
+
+
+# ==============
+# The memory of the mission, the long-term memory and the temp folder (mission_memory.py, memory_cache.py), shown to every agent.
+# ==============
+MEMORY_PROMPT = """YOUR MEMORY AND YOUR TEMP FOLDER
+Besides your folder, you reach three places of SwarmUP. Write their paths with these prefixes, in every tool and request that takes a path:
+- @memory/ is the memory of this mission ({memory}): Markdown files about this mission only, which every agent of the swarm reads and writes.
+  SwarmUP keeps in it every prompt of the user (USER_PROMPTS.md), the progress (PROGRESS.md), the approved plans (PLANS.md), the approved results
+  of every agent (outputs/) and your notes (notes/). Write there what the next steps, the next rounds or the other agents should know, in files
+  with clear names in capitals, like @memory/API_FINDINGS.md. MISSION.md is its index, which SwarmUP keeps.
+- @long-term/ is the long-term memory ({longTerm}): what every swarm of the user reads when it starts, like the preferences, the styles, the
+  requests that come back and the important notes of the user. Follow it.
+- @temp/ is the temp folder of this mission ({temp}). Put there everything that is only needed for a while: the scripts and the commands you run
+  for your work, the outputs of the commands that run in the background, your drafts and notes for the moment, and the copies of files you
+  process or keep as a backup. Nothing there is the user's, so it changes without asking. Never leave such files in the folder of the user.
+{role}
+{how}"""
+MEMORY_TOOLS_HOW = """Copy files and folders with copy_path (also from your folder to @temp and back), and blocks of text with copy_text and paste_text: they
+copy the exact text, so prefer them to writing a long text again. Run long commands with background, and follow them with process_status."""
+MEMORY_CODING_HOW = """These places are folders of this computer: use them with your own tools, at the paths above. Changing @temp needs no permission."""
+MEMORY_BLOCKS_HOW = """You only read these places, with the same requests as for a folder, for example <swarmup_read>@memory/PROGRESS.md</swarmup_read> or
+<swarmup_list>@temp</swarmup_list>: reply ONLY with such requests, then write your real answer after SwarmUP gives you what you asked."""
+MEMORY_AGENT_RIGHTS = """You can read every file of @memory and @long-term. In @memory you create files, and you change or delete only the files
+you wrote: a file written by another agent or by SwarmUP is theirs, so write a file of your own or send a message to its writer. Only the
+leader writes @long-term: send it what deserves to be kept for the next missions."""
+MEMORY_LEADER_RIGHTS = """You are the leader: you read and change every file of @memory, and you write @long-term. Keep @long-term short and true:
+only what will help the next swarms of this user (their preferences, their styles, their repeated requests, important notes), never a password,
+a key or a passing detail. The user is told each time you change it."""
+
+
+# The leader keeps the long-term memory up to date at the end of each round of a mission.
+LONG_TERM_UPDATE_PROMPT = """The round of the mission is over. Decide what the next swarms of this user should know from it, and update the
+long-term memory, which every swarm reads when it starts.
+
+The mission: {mission}
+
+What the user wrote in this round (requests, corrections, rejections, answers):
+{prompts}
+
+The long-term memory now:
+{memory}
+
+Keep only what lasts beyond this mission: the preferences of the user (tone, length, language, format, tools), the styles they want, the
+requests that come back, the important notes of the user and about how this system works for them. A request comes back only if the user says
+so or the long-term memory already has it. Never a password, a key, an address that is private, or a detail of this mission only (a date, a
+place, a task): the next swarms work on other missions. Do not repeat what is already there; correct what the user contradicted. Write in the
+language the user writes to you in, in short lines.
+Write only what the user really said or showed; never copy this example. For each change write a block (mode append adds at the end of the
+file, mode replace writes the whole file again), like:
+<swarmup_memory file="FILE_NAME.md" mode="append">- what to keep, in one short line</swarmup_memory>
+Use files with clear names in capitals, like USER_PREFERENCES.md, STYLE.md, REPEATED_REQUESTS.md, USER_NOTES.md or SYSTEM_NOTES.md.
+If there is nothing worth keeping, reply only NOTHING."""
 
 
 FOLDER_ANSWER_PROMPT = """You asked:
@@ -251,6 +316,21 @@ The agents that have something waiting for the user:
 Decide which of these agents must change their work to satisfy the correction, and leave out the agents it does not concern.
 Reply only with JSON that gives, for every concerned agent, what it must change, like {example}
 If no agent is concerned, because the correction is only about the wording of your summary, reply {{}}"""
+
+
+FOLLOW_UP_ROUTE_PROMPT = """You are the leader of a swarm of agents working on this mission: {mission}
+The last round is over. Your report on it: {report}
+The user follows up with a new request: {request}
+The agents of the swarm:
+{agents}
+Decide which agents must work on this request, and what each of them must do. Leave out the agents it does not concern: they keep their
+last result. You always work on it yourself, and you report on the round at the end.
+Reply only with JSON that gives, for every agent that must work, its part of the request, like {example}
+If only you are concerned, reply {{}}"""
+
+
+FOLLOW_UP_MESSAGE = """Round {round} of the mission. The user follows up: {request}
+Your part in this round: {part}"""
 
 
 # ==============

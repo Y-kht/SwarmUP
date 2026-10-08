@@ -5,6 +5,7 @@ from collections import Counter
 from datetime import datetime
 
 import agent_prompts as prompts
+from background_processes import stopProcesses
 from gpu_check import checkVram, readGpus
 from harness_utils import SUMMARY_LENGTH, USER_NAME, stripFences
 
@@ -67,7 +68,7 @@ class SwarmTeam:
     def newMember(self, name, agent, role, task, boss, waitsFor, model, recipe):
         return {"name": name, "agent": agent, "role": role, "task": task, "boss": boss, "waitsFor": list(waitsFor), "model": model, "recipe": recipe,
                 "status": "waiting", "result": None, "error": "", "mode": self.mode, "review": "", "draft": "", "problem": "",
-                "decision": None, "revision": 0, "startAt": None, "started": False, "resumeStart": None, "wake": threading.Event()}
+                "decision": None, "revision": 0, "startAt": None, "started": False, "resumeStart": None, "sitsOut": False, "wake": threading.Event()}
 
     # Takes an agent out of the swarm (never the leader), while it runs or not. One that finished first gives its result to the agents that wait
     # for it. One that did not finish is stopped at its next step, and the agents that wait for it go on without it. Its loop and its model are
@@ -112,6 +113,7 @@ class SwarmTeam:
     def retire(self, name, member, thread, done):
         if thread is not None:
             thread.join()
+        stopProcesses(self.id, name)
         try:
             if not done:
                 member["agent"].rollback()
@@ -322,7 +324,7 @@ class SwarmTeam:
                 "waitsFor": member["waitsFor"], "waitingOn": self.getWaitingOn(name), "startAt": self.getStartAt(name), "isLeader": name == self.leader,
                 "result": member["result"], "error": member["error"], "model": member["model"], "mode": member["mode"], "review": member["review"],
                 "draft": member["draft"], "problem": member["problem"], "revision": member["revision"], "plan": member["agent"].approvedPlan,
-                "actions": list(member["agent"].actions), "activity": list(member["agent"].activity)}
+                "actions": list(member["agent"].actions), "activity": list(member["agent"].activity), "sitsOut": bool(member.get("sitsOut"))}
 
     # Who lost the connection and why ({agent: reason}) while the swarm waits for the user to continue or to cancel, otherwise None.
     def getInterruption(self):

@@ -138,7 +138,7 @@ def tailLog(sessionId):
 
 # Starts the daemon of a new session, detached from this terminal: it has a session of its own on POSIX and no console on Windows, it reads nothing,
 # and it writes to its log. It returns the file of the session once the daemon answers.
-def startDaemon(sessionId):
+def startDaemon(sessionId, missionId=None):
     sessionsFolder().mkdir(parents=True, exist_ok=True)
     options = {"stdin": subprocess.DEVNULL, "stderr": subprocess.STDOUT, "close_fds": True, "env": {**os.environ, "PYTHONUNBUFFERED": "1"}}
     if os.name == "nt":
@@ -146,7 +146,7 @@ def startDaemon(sessionId):
     else:
         options["start_new_session"] = True
     with open(logPath(sessionId), "wb") as log:
-        process = subprocess.Popen([sys.executable, str(ENTRY), "serve", "--session", sessionId], stdout=log, **options)
+        process = subprocess.Popen([sys.executable, str(ENTRY), "serve", "--session", sessionId, *(["--mission", missionId] if missionId else [])], stdout=log, **options)
     deadline = time.monotonic() + START_SECONDS
     while time.monotonic() < deadline:
         info = readSession(sessionPath(sessionId))

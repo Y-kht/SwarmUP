@@ -11,6 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 # The modules of SwarmUP are in the folders of src/backend. Their names have hyphens, so they are not packages: each folder goes on the path.
 sys.path[:0] = [str(folder) for folder in sorted((Path(__file__).resolve().parent.parent / "src" / "backend").iterdir()) if folder.is_dir() and not folder.name.startswith(("_", "."))]
+import agent_prompts as prompts
 import agent_storehouse
 import harness_utils
 import leader_catalog
@@ -79,6 +80,8 @@ class LeaderModel:
         for marker, kind in self.KINDS:
             if marker in prompt:
                 return self.replies[kind].pop(0) if self.replies.get(kind) else "NO CHANGE"
+        # The memory of the mission comes before the request, and the fake only reads the request.
+        prompt = prompt.split(prompts.NOTES_PROMPT)[-1]
         names = re.findall(r"^- ([A-Za-z][\w.-]*) \(", prompt, re.M)
         if "final report" in prompt:
             return "Report: every agent did its work."

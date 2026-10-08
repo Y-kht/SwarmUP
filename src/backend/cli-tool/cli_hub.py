@@ -3,7 +3,8 @@
 # (window 0: the tree, the events, the summaries of the leader and every question), and one window for each agent (what it does with its tools,
 # what it says, its messages, its drafts and its result). The hub keeps the windows, routes what the user types, and serves the terminals
 # (cli_screen.py) on a socket of this computer only (127.0.0.1), which needs the token of the session.
-# Messages are JSON, one per line. A terminal first sends {"token", "type"}: attach (then input, kill or detach), status, capture or kill.
+# Messages are JSON, one per line. A terminal first sends {"token", "type"}: attach (then input, kill or detach), status, capture, input (one line
+# typed in a window, without attaching, for scripts) or kill.
 # The hub sends hello (everything a terminal shows), lines, panel, windows, question, state and bye.
 import hmac
 import json
@@ -120,7 +121,7 @@ class Hub:
         with self.lock:
             self.append(name, lines)
             if name and name != SWARM_WINDOW and name == self.leader():
-                self.append(SWARM_WINDOW, [f"[{name}] {lines[0]}", *lines[1:]])
+                self.append(SWARM_WINDOW, lines if lines[0].startswith(f"[{name}]") else [f"[{name}] {lines[0]}", *lines[1:]])
 
     # Only one question waits at a time (the console asks them one after the other). It is shown in its window and in window 0, and it is
     # answered from either of them.
@@ -289,7 +290,7 @@ class Hub:
 
     def describeState(self):
         swarm = self.swarm
-        return {"state": self.state, "mission": swarm.mission if swarm else "", "cost": self.describeCost(swarm) if swarm else "",
+        return {"state": self.state, "mission": swarm.mission if swarm else "", "missionId": swarm.id if swarm else None, "cost": self.describeCost(swarm) if swarm else "",
                 "agents": swarm.getAgents() if swarm else [], "waiting": self.question["window"] if self.question else None}
 
     # The session file and the terminals learn the new state, only when it changed.
@@ -416,6 +417,9 @@ class SessionHandler(socketserver.StreamRequestHandler):
             self.reply(hub.describeStatus())
         elif kind == "capture":
             self.reply({"type": "capture", "text": hub.capture(request.get("window"), int(request.get("lines") or CAPTURE_LINES))})
+        elif kind == "input":
+            hub.input(request.get("window"), request.get("text", ""))
+            self.reply({"type": "ok"})
         elif kind == "kill":
             self.reply({"type": "ok"})
             hub.kill()

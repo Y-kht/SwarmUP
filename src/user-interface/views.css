@@ -91,6 +91,24 @@
 .saved-card { display: flex; gap: 16px; align-items: flex-start; padding: 18px 20px; }
 .saved-card .saved-icon { width: 44px; height: 44px; border-radius: 13px; display: grid; place-items: center; background: var(--honey-soft); color: var(--honey-text); flex: none; }
 
+/* The missions open in tabs (missions.js), and the follow-up of a round. */
+.mission-tabs { display: flex; flex-direction: column; gap: 2px; max-height: 32vh; overflow-y: auto; }
+.mission-tab { display: flex; align-items: center; border-radius: var(--radius-sm); }
+.mission-tab:hover { background: var(--surface-3); }
+.mission-tab.active { background: var(--primary-soft); }
+.mission-tab-main { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; padding: 7px 10px; border: 0; background: none; color: var(--text-2); cursor: pointer; text-align: left; }
+.mission-tab.active .mission-tab-main { color: var(--primary-text); font-weight: 600; }
+.mission-tab-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.mission-tab-close { border: 0; background: none; color: var(--text-3); cursor: pointer; padding: 4px 8px; border-radius: var(--radius-sm); display: grid; place-items: center; opacity: 0; }
+.mission-tab:hover .mission-tab-close, .mission-tab-close:focus-visible { opacity: 1; }
+.mission-tab-close:hover { color: var(--text); background: var(--surface-2); }
+.mission-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--border-strong); }
+.mission-dot.running { background: var(--success); animation: pulse 1.8s infinite; }
+.mission-dot.waiting { background: var(--honey); animation: pulse 1.2s infinite; }
+.mission-dot.finished { background: var(--primary); }
+.followup-card { display: flex; flex-direction: column; gap: 10px; border-color: var(--primary); }
+.followup-card .textarea { min-height: 84px; }
+
 /* ---------- Agents ---------- */
 .agent-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 14px; }
 .agent-card { padding: 16px 16px 12px; display: flex; flex-direction: column; gap: 12px; position: relative; cursor: pointer; transition: box-shadow .18s, transform .18s, border-color .18s; }

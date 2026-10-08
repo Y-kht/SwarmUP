@@ -62,6 +62,8 @@ class HubTests(unittest.TestCase):
         self.assertEqual(list(hub.windows), [SWARM_WINDOW, "Writer", "Leader"])
         self.assertEqual(list(hub.windows["Writer"].lines), ["I read the notes."])
         self.assertEqual(list(hub.windows[SWARM_WINDOW].lines), ["[Leader] Summary:", "all good"])
+        hub.write("Leader", "[Leader] Summary of the plans:")
+        self.assertEqual(list(hub.windows[SWARM_WINDOW].lines)[-1], "[Leader] Summary of the plans:")
 
     def testAQuestionIsAnsweredFromItsWindowOrFromWindowZeroButNotFromAnother(self):
         hub = makeHub()
@@ -172,6 +174,12 @@ class SocketTests(unittest.TestCase):
         self.assertEqual(result["answer"], "2")
         self.assertEqual(request(self.info, {"type": "capture", "window": SWARM_WINDOW})["text"], "Welcome\n? Your choice?\n> 2")
         self.assertEqual(request(self.info, {"type": "status"})["state"], "building")
+
+    def testAScriptTypesALineWithoutAttaching(self):
+        result, thread = answerLater(self.hub, lambda: self.hub.waitForAnswer(SWARM_WINDOW, "Your choice?"))
+        self.assertEqual(request(self.info, {"type": "input", "window": SWARM_WINDOW, "text": "3"}), {"type": "ok"})
+        thread.join(5)
+        self.assertEqual(result["answer"], "3")
 
     def testATerminalWithoutTheTokenIsRefusedAndKillEndsTheSession(self):
         self.assertIsNone(request({**self.info, "token": "wrong"}, {"type": "status"}))
@@ -320,6 +328,8 @@ class EndToEndTests(unittest.TestCase):
         connection.send({"type": "detach"})
         connection.close()
         self.assertIn("> 1", self.command("show", "s1").stdout)
+        self.assertIn("Sent to session s1.", self.command("send", "s1", "2").stdout)
+        waitUntil(lambda: "> 2" in self.command("show", "s1").stdout, "the line sent by a script", seconds=20)
         self.assertIn("Session s1 is closed.", self.command("kill", "s1").stdout)
         self.assertFalse((self.home / "cli-sessions" / "s1.json").exists())
         waitUntil(lambda: not cli_sessions.pidAlive(info["pid"]) or os.name == "nt" or self.reap(info["pid"]), "the end of the daemon")

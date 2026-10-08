@@ -9,12 +9,13 @@ from harness_utils import STATE_LOCK, STATE_VERSION
 from mission_costs import MissionCosts
 from saved_swarms import saveSwarmState
 from swarm_review import SwarmReview
+from swarm_rounds import SwarmRounds
 from swarm_run import SwarmRun
 from swarm_team import SwarmTeam
 
 
 # What is saved of an agent of a swarm, apart from its loop and the lists.
-SAVED_FIELDS = ("role", "task", "boss", "model", "recipe", "status", "result", "error", "mode", "review", "draft", "problem", "revision", "started")
+SAVED_FIELDS = ("role", "task", "boss", "model", "recipe", "status", "result", "error", "mode", "review", "draft", "problem", "revision", "started", "sitsOut")
 
 
 # ==============
@@ -53,7 +54,7 @@ SAVED_FIELDS = ("role", "task", "boss", "model", "recipe", "status", "result", "
 # continues (continueWork, which tries again) or cancels. To cancel, the leader summarises every change that was made (summarizeChanges)
 # and the user confirms (stopWork) or goes on. startInBackground runs the swarm in its own thread, followed with isRunning, wait and outcome.
 # ==============
-class Swarm(SwarmTeam, SwarmReview, SwarmRun):
+class Swarm(SwarmTeam, SwarmReview, SwarmRun, SwarmRounds):
     def __init__(self, mission):
         self.mission = mission
         self.members = {}
@@ -88,6 +89,11 @@ class Swarm(SwarmTeam, SwarmReview, SwarmRun):
         # The memory of the session, shared by the agents (WorkSession in agent_storehouse.py), and the name of the run, where the results are saved.
         self.session = None
         self.runName = ""
+        # A mission has rounds: the first request of the user, then each follow-up. requests holds them all, {round, text, time}.
+        self.round = 1
+        self.requests = []
+        # What the leader gave each agent to do in this round, after the first ({agent: part}), None before it decided.
+        self.roundParts = None
 
     def getMember(self, name):
         if name not in self.members:
@@ -113,12 +119,13 @@ class Swarm(SwarmTeam, SwarmReview, SwarmRun):
         members = {}
         for name, member in self.members.items():
             start = member["startAt"]
-            members[name] = {**{field: member[field] for field in SAVED_FIELDS}, "waitsFor": list(member["waitsFor"]),
+            members[name] = {**{field: member.get(field) for field in SAVED_FIELDS}, "waitsFor": list(member["waitsFor"]),
                              "startAt": f"{start:%Y-%m-%d %H:%M}" if start else None, "state": member["agent"].getState()}
         return {"version": STATE_VERSION, "id": self.id, "mission": self.mission, "mode": self.mode, "leader": self.leader,
                 "state": "paused" if self.interruption else "running", "heartbeat": datetime.now().timestamp(), "pid": os.getpid(),
                 "savedAt": f"{datetime.now():%Y-%m-%d %H:%M:%S}", "summary": self.summary, "messages": list(self.messages), "members": members,
-                "removed": list(self.removed), "managed": self.manager is not None, "costs": self.costs.state(), "runName": self.runName}
+                "removed": list(self.removed), "managed": self.manager is not None, "costs": self.costs.state(), "runName": self.runName,
+                "round": self.round, "requests": list(self.requests), "roundParts": self.roundParts}
 
     # Writes the state to the disk. Whatever goes wrong, the swarm goes on, and the user is told once that the work cannot be continued after a stop.
     # The user is told from another thread, because speaking to the user can wait for a long time, and the locks of the swarm may be held here.
@@ -142,6 +149,16 @@ class Swarm(SwarmTeam, SwarmReview, SwarmRun):
             warning = f"Warning: the state of the swarm could not be saved ({failure}). If the program stops, its work cannot be continued."
             threading.Thread(target=self.getMember(self.leader)["agent"].notifyUser, args=(warning,), daemon=True).start()
 
+    # Writes in the memory of the mission (MissionMemory in mission_memory.py) while the swarm runs, for example
+    # record("addUserPrompt", round, text). The memory is only a record: a problem with it never stops the swarm.
+    def record(self, name, *details, **options):
+        if self.session is None:
+            return
+        try:
+            getattr(self.session.memory, name)(*details, **options)
+        except Exception:
+            traceback.print_exc()
+
     # Brings back a swarm found by findUnfinishedSwarms. makeAgent(name, saved) gives the loop of an agent, built again from saved["recipe"]
     # and saved["model"] (the passwords are asked again, because they are never saved). Then resume() goes on where the swarm stopped.
     @classmethod
@@ -151,6 +168,7 @@ class Swarm(SwarmTeam, SwarmReview, SwarmRun):
         swarm.summary, swarm.messages = saved.get("summary", ""), list(saved.get("messages", []))
         swarm.removed = list(saved.get("removed", []))
         swarm.runName = saved.get("runName", "")
+        swarm.round, swarm.requests, swarm.roundParts = saved.get("round", 1), list(saved.get("requests", [])), saved.get("roundParts")
         swarm.costs.restore(saved.get("costs") or {})
         for name, data in saved["members"].items():
             agent = makeAgent(name, data)

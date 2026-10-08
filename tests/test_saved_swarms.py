@@ -22,10 +22,19 @@ from base_loop import Loop
 from checking_loops import CoderLoop
 from harness_utils import ConnectionLost, STOPPED_MESSAGE
 from message_loops import EmailLoop, NewsLoop
+from mission_history import deleteMission, listMissions, loadMission
+from mission_memory import missionFolder, tempFolder
 from saved_swarms import findUnfinishedSwarms, saveSwarmState, swarmStatePath
 from swarm_harness import Swarm
 from test_harness_utils import DraftLoop, FakeAgent, LoopTestCase, TimedDraftLoop
 from writing_loops import AuthorLoop
+
+
+# What the history says of a mission: finished, stopped, interrupted... A swarm that ended stays saved, but it is not unfinished anymore.
+def savedState(swarmId):
+    state = json.loads(swarmStatePath(swarmId).read_text(encoding="utf-8"))["state"]
+    assert state in ("finished", "stopped") or swarmId in [saved["id"] for saved in findUnfinishedSwarms()], state
+    return state
 
 
 def waitUntil(condition, what, seconds=10):
@@ -122,7 +131,7 @@ class SavedSwarmCase(LoopTestCase):
 
 
 class SavedStateTests(SavedSwarmCase):
-    def testTheStateIsSavedWhileTheSwarmRunsAndDeletedWhenItEnds(self):
+    def testTheStateIsSavedWhileTheSwarmRunsAndKeptAsFinishedWhenItEnds(self):
         gate = threading.Event()
         swarm = self.swarmOf("Write the report", Leader=self.plainLoop("final"), Slow=self.plainLoop(gate=gate))
         swarm.startInBackground()
@@ -137,7 +146,7 @@ class SavedStateTests(SavedSwarmCase):
         self.assertTrue(swarm.isRunning())
         gate.set()
         self.assertEqual(swarm.wait(10), {"result": "final"})
-        self.assertFalse(swarmStatePath(swarm.id).exists())
+        self.assertEqual(savedState(swarm.id), "finished")
         self.assertFalse(swarm.isRunning())
 
     def testNothingIsWrittenBeforeTheSwarmRuns(self):
@@ -296,7 +305,7 @@ class ResumeTests(SavedSwarmCase):
         counts = Counter((message["sender"], message["receiver"], message["message"]) for message in restored.messages)
         self.assertEqual(max(counts.values()), 1)
         self.assertEqual(restored.getInfo("Fast")["result"], "fast result")
-        self.assertFalse(swarmStatePath(swarm.id).exists())
+        self.assertEqual(savedState(swarm.id), "finished")
 
     def testWhatIsDoneCanBeUsedByTheAgentsThatWereWaitingForIt(self):
         ran, gate = [], threading.Event()
@@ -504,7 +513,7 @@ class RememberedWorkTests(SavedSwarmCase):
         self.assertEqual(abandoned.members["Coder"]["agent"].describePending(), f"{target} holds a draft of the code that the user did not approve yet. Stopping puts the original back.")
         abandoned.abandon()
         self.assertEqual(target.read_text(encoding="utf-8"), "ORIGINAL\n")
-        self.assertFalse(swarmStatePath(swarm.id).exists())
+        self.assertEqual(savedState(swarm.id), "stopped")
         target.write_text("print('draft')", encoding="utf-8")
         human = Human(Do_you_approve="yes")
         resumed = Swarm.restore(self.leaveBehind(json.loads(json.dumps(saved)))[0],
@@ -576,7 +585,7 @@ class LostConnectionTests(SavedSwarmCase):
         self.assertEqual(swarm.getInfo("Writer")["result"], "A text about birds")
         self.assertEqual([kind for kind in swarm.events if kind in ("connectionLost", "resumed")], ["connectionLost", "resumed"])
         self.assertIsNone(swarm.getInterruption())
-        self.assertFalse(swarmStatePath(swarm.id).exists())
+        self.assertEqual(savedState(swarm.id), "finished")
 
     def testAgentsThatLoseTheConnectionTogetherShareOneQuestion(self):
         barrier = threading.Barrier(2)
@@ -650,7 +659,7 @@ class LostConnectionTests(SavedSwarmCase):
         self.assertEqual(swarm.getInfo("Writer")["error"], STOPPED_MESSAGE)
         self.assertEqual(swarm.getStatus("Writer"), "failed")
         self.assertEqual(swarm.getInfo("Mailer")["status"], "done")
-        self.assertFalse(swarmStatePath(swarm.id).exists())
+        self.assertEqual(savedState(swarm.id), "stopped")
         self.assertIn("stopped", swarm.events)
 
     def testCancelThenContinueGoesOnUntilTheEnd(self):
@@ -731,7 +740,7 @@ class LostConnectionTests(SavedSwarmCase):
         outcome = swarm.wait(20)
         self.assertEqual(outcome, {"result": None})
         self.assertEqual({swarm.getStatus(name) for name in ("Drafter", "Sleeper", "Follower")}, {"failed"})
-        self.assertFalse(swarmStatePath(swarm.id).exists())
+        self.assertEqual(savedState(swarm.id), "stopped")
 
     def testTheCoderIsPutBackWhenTheUserStopsAfterALostConnection(self):
         target = self.folder / "tool.py"
@@ -754,6 +763,143 @@ class LostConnectionTests(SavedSwarmCase):
         self.assertEqual(swarm.wait(10), {"result": None})
         self.assertEqual(target.read_text(encoding="utf-8"), "ORIGINAL\n")
         self.assertEqual(swarm.getInfo("Coder")["error"], STOPPED_MESSAGE)
+
+
+# ==============
+# The history of the missions, and the rounds of a mission (follow-ups), as in a chat.
+# ==============
+# A model that answers by what it is asked, and counts its prompts.
+class RoleModel:
+    def __init__(self, answer):
+        self.answer, self.prompts = answer, []
+
+    def input(self, prompt):
+        self.prompts.append(prompt)
+        return self.answer(prompt, len(self.prompts))
+
+
+# A conversation with a model that keeps what it was told (agent_conversation.py): it answers its drafts in order.
+class ChatModel:
+    def __init__(self, *drafts):
+        self.drafts, self.seen = list(drafts), []
+
+    def converse(self, system, messages, tools):
+        self.seen.append([dict(message) for message in messages])
+        return {"text": self.drafts.pop(0), "calls": []}
+
+
+class HistoryTests(SavedSwarmCase):
+    def testEveryMissionStaysInTheHistoryWithWhatCanBeDoneWithIt(self):
+        finished = self.swarmOf("Write a poem", Leader=self.plainLoop("a poem"))
+        finished.run()
+        stopped = self.swarmOf("Book a room", Leader=self.plainLoop("booked"))
+        stopped.abandon()
+        crashed = dict(finished.describeState(), id="crashed", mission="Count bees", state="running", heartbeat=datetime.now().timestamp() - 1000)
+        saveSwarmState("crashed", crashed)
+        running = dict(finished.describeState(), id="running", mission="Elsewhere", state="running", heartbeat=datetime.now().timestamp() + 60, pid=os.getpid() + 1)
+        saveSwarmState("running", running)
+        missions = {mission["id"]: mission for mission in listMissions()}
+        self.assertEqual([mission["id"] for mission in listMissions()], ["running", stopped.id, finished.id, "crashed"])
+        self.assertEqual({key: (mission["state"], mission["canFollowUp"], mission["canContinue"]) for key, mission in missions.items()},
+                         {finished.id: ("finished", True, False), stopped.id: ("stopped", True, False), "crashed": ("interrupted", False, True),
+                          "running": ("running", False, False)})
+        self.assertEqual([saved["id"] for saved in findUnfinishedSwarms()], ["running", "crashed"])
+        self.assertEqual(loadMission(finished.id)["mission"], "Write a poem")
+        with self.assertRaisesRegex(ValueError, "running in another session"):
+            loadMission("running")
+
+    def testDeletingAMissionDeletesItsMemoryItsTempFolderAndItsCommands(self):
+        swarm = self.swarmOf("Write a poem", Leader=self.plainLoop("a poem"))
+        swarm.run()
+        (tempFolder(swarm.id) / "draft.py").write_text("print(1)", encoding="utf-8")
+        self.assertTrue(missionFolder(swarm.id).is_dir())
+        with mock.patch("mission_history.stopProcesses") as stop:
+            deleteMission(swarm.id)
+        stop.assert_called_once_with(swarm.id, temp=tempFolder(swarm.id))
+        for path in (swarmStatePath(swarm.id), missionFolder(swarm.id), tempFolder(swarm.id)):
+            self.assertFalse(path.exists(), path)
+        with self.assertRaisesRegex(ValueError, "not in the history"):
+            deleteMission(swarm.id)
+        saveSwarmState("alive", dict(swarm.describeState(), id="alive", state="running", heartbeat=datetime.now().timestamp()))
+        with self.assertRaisesRegex(ValueError, "Stop it first"):
+            deleteMission("alive")
+
+
+class FollowUpTests(SavedSwarmCase):
+    def approving(self, swarm):
+        def decide(event):
+            if event["kind"] == "review" and event.get("review") == "ready":
+                threading.Thread(target=lambda: swarm.approveDraft(event["agent"]), daemon=True).start()
+        swarm.addListener(decide)
+
+    def build(self, leaderModel, writerModel, checker="Checked."):
+        swarm = Swarm("Write a text about bees")
+        for name, model in (("Leader", leaderModel), ("Writer", writerModel), ("Checker", RoleModel(lambda prompt, count: checker))):
+            loop = DraftLoop(model)
+            loop.notifyUser, loop.askUser = (lambda message: None), (lambda question: "yes")
+            swarm.addAgent(name, loop, f"the {name.lower()}", f"task of {name}", recipe={"name": name})
+        self.approving(swarm)
+        return swarm
+
+    @staticmethod
+    def leaderAnswer(prompt, count):
+        if "follows up with a new request" in prompt:
+            return '{"Writer": "Translate your text to French."}'
+        return "NOTHING" if "long-term memory" in prompt else f"Report {count}"
+
+    # The leader sends the follow-up to the agents it concerns. The others sit the round out and keep their result, and the history keeps both rounds.
+    def testTheLeaderRoutesTheFollowUpAndTheOthersSitItOut(self):
+        writer = ChatModel("Bees make honey.", "Les abeilles font du miel.")
+        swarm = self.build(RoleModel(self.leaderAnswer), writer)
+        swarm.run()
+        checks = swarm.getInfo("Checker")["result"]
+        with self.assertRaisesRegex(ValueError, "Write what the swarm must do now"):
+            swarm.followUp("  ")
+        swarm.followUp("Now in French.")
+        self.assertEqual((swarm.round, [item["text"] for item in swarm.requests]), (2, ["Write a text about bees", "Now in French."]))
+        swarm.run()
+        self.assertEqual(swarm.getInfo("Writer")["result"], "Les abeilles font du miel.")
+        self.assertEqual((swarm.getInfo("Checker")["result"], swarm.getInfo("Checker")["sitsOut"]), (checks, True))
+        self.assertEqual(swarm.roundParts, {"Writer": "Translate your text to French."})
+        # The writer still has its first round in its conversation, and reads its part of the follow-up.
+        last = writer.seen[-1]
+        self.assertIn("Bees make honey.", [message["content"] for message in last if message["role"] == "assistant"])
+        self.assertIn("Your part in this round: Translate your text to French.", last[-1]["content"])
+        self.assertEqual(savedState(swarm.id), "finished")
+        memory = missionFolder(swarm.id)
+        self.assertIn("## Round 2: Follow-up", (memory / "USER_PROMPTS.md").read_text(encoding="utf-8"))
+        outputs = (memory / "outputs" / "WRITER_OUTPUTS.md").read_text(encoding="utf-8")
+        self.assertIn("Round 1: the result of Writer", outputs)
+        self.assertIn("Round 2: the result of Writer", outputs)
+        self.assertTrue(swarm.runName.endswith("_now-in-french"))
+
+    # After a restart, the mission is brought back from the history and followed up: the agents still have their conversation.
+    def testAMissionOfTheHistoryIsFollowedUpAfterARestart(self):
+        swarm = self.build(RoleModel(self.leaderAnswer), ChatModel("Bees make honey."))
+        swarm.run()
+        writer = ChatModel("Les abeilles font du miel.")
+        models = {"Leader": RoleModel(self.leaderAnswer), "Writer": writer, "Checker": RoleModel(lambda prompt, count: "Checked.")}
+        def rebuild(name, data):
+            loop = DraftLoop(models[name])
+            loop.notifyUser, loop.askUser = (lambda message: None), (lambda question: "yes")
+            return loop
+        again = Swarm.restore(loadMission(swarm.id), rebuild)
+        self.approving(again)
+        again.followUp("Now in French.")
+        again.run()
+        self.assertEqual(again.getInfo("Writer")["result"], "Les abeilles font du miel.")
+        self.assertIn("Bees make honey.", [message["content"] for message in writer.seen[0] if message["role"] == "assistant"])
+        self.assertEqual(listMissions()[0]["round"], 2)
+
+    # When the leader cannot decide, every agent gets the whole request.
+    def testWithoutARouteEveryAgentWorks(self):
+        swarm = self.build(RoleModel(lambda prompt, count: "not json" if "follows up" in prompt else "NOTHING" if "long-term" in prompt else "Report"),
+                           ChatModel("one", "two"), checker="Checked.")
+        swarm.run()
+        swarm.followUp("Do it again.")
+        swarm.run()
+        self.assertEqual(swarm.roundParts, {"Writer": "Do it again.", "Checker": "Do it again."})
+        self.assertFalse(any(swarm.getInfo(name)["sitsOut"] for name in swarm.getAgents()))
 
 
 if __name__ == "__main__":
