@@ -47,7 +47,15 @@ def readNvidiaGpus():
             gpus.append({"name": ", ".join(name), "total": bytesToGb(float(total) * MEBIBYTE), "free": bytesToGb(float(free) * MEBIBYTE)})
         except ValueError:
             continue
-    return gpus
+    return visibleGpus(gpus)
+
+
+# The models only use the GPUs that CUDA_VISIBLE_DEVICES lets them see (their numbers, like 0,2), so the others are not counted.
+def visibleGpus(gpus):
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible is None or not all(part.strip().isdigit() for part in visible.split(",") if part.strip()):
+        return gpus
+    return [gpus[int(part)] for part in visible.split(",") if part.strip() and int(part) < len(gpus)]
 
 
 # The memory of AMD GPUs on Linux. The amdgpu driver writes it in files, so no tool is needed.

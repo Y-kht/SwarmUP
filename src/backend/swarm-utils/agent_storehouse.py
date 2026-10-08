@@ -5,9 +5,8 @@
 #    A path that leaves the folder is refused. The coding agents (Claude Code, Codex) have their own tools, so they do not use the blocks.
 # 2. The results. What an agent saves goes in swarmup-results/<run> inside its folder, one folder for each run of the swarm, named by its time
 #    and its mission. An agent without a folder saves in agent-files/results/<run>.
-# 3. The memory. Each swarm has a session folder in agent-files/sessions/<swarm id>: the notes every agent keeps (they are part of its next
-#    prompts, also after a restart), and the empty workspace of a coding agent without a folder. A session is removed SESSION_DAYS after its
-#    last change, unless its swarm can still be continued.
+# 3. The memory. Each swarm is a mission with a memory of its own, the long-term memory of the user and a temp folder (mission_memory.py):
+#    what an agent sees of them comes with its prompts (memory_cache.py), its notes included, also after a restart.
 import difflib
 import fnmatch
 import os
@@ -15,7 +14,6 @@ import re
 import shutil
 import subprocess
 import sys
-import threading
 import time
 import unicodedata
 import zipfile
@@ -26,14 +24,12 @@ from xml.etree import ElementTree
 
 import agent_prompts as prompts
 import harness_utils
-from saved_swarms import swarmStatePath
+from memory_cache import describeMemory
 
 
 RESULTS_FOLDER = "swarmup-results"
-SESSIONS_FOLDER = "sessions"
 LOOSE_RESULTS_FOLDER = "results"
 WORKSPACES_FOLDER = "agent-workspaces"
-SESSION_DAYS = 14
 # The folders that are not listed in the tree (they are big and seldom useful). They can still be listed, searched and read when asked.
 SKIPPED_FOLDERS = {"__pycache__", "node_modules", "venv", "env", "site-packages", "dist", "build", RESULTS_FOLDER}
 TREE_LIMIT = 200
@@ -45,7 +41,6 @@ FIND_LIMIT = 100
 SEARCH_LIMIT = 80
 SEARCH_FILE_BYTES = 2000000
 LINE_CHARS = 300
-NOTES_CHARS = 4000
 MAX_TOOL_ROUNDS = 8
 ICLOUD_WAIT_SECONDS = 20
 BINARY_PROBE = 8192
@@ -83,6 +78,18 @@ def isInside(folder, path, base=None):
     except (OSError, RuntimeError):
         return False
     return resolved == root or root in resolved.parents
+
+
+# The places of a mission (MissionMemory.roots: @temp, @memory, @long-term) are written as a prefix of a path. It gives (the place, "" for the
+# folder of the agent, its folder, and the path inside it).
+def splitPlace(places, text, root):
+    text = cleanRequest(text)
+    for place, folder in places.items():
+        if text == place or text.startswith(place + "/"):
+            return place, Path(folder), text[len(place):].lstrip("/")
+    if text.startswith("@"):
+        raise ValueError(f"{text.split('/')[0]} is not a place. The places: {', '.join(places) or 'none, outside of a mission'}.")
+    return "", Path(root), text
 
 
 # A file that iCloud moved to the cloud to free space is a hidden stub, .name.icloud, until it is opened.
@@ -318,8 +325,14 @@ def findRequests(answer):
     return requests
 
 
-def answerRequest(folder, kind, value, part):
+# places are those of the mission (MissionMemory.roots): a request can name them, like <swarmup_read>@memory/PROGRESS.md</swarmup_read>.
+def answerRequest(folder, kind, value, part, places=None):
     try:
+        place, folder, value = splitPlace(places or {}, value, folder or ".")
+        if not place and folder == Path("."):
+            raise ValueError("You have no folder of your own. Read the places of your mission instead: " + ", ".join(places or {}) + ".")
+        if place in ("@memory", "@long-term") and any(name.startswith(".") for name in Path(value).parts):
+            raise ValueError(f"{place}/{value} is kept by SwarmUP itself and cannot be reached.")
         if kind == "read":
             return readFile(folder, value, part)
         if kind == "list":
@@ -330,10 +343,10 @@ def answerRequest(folder, kind, value, part):
 
 
 # What SwarmUP answers to the requests of one round. All together they stay under ROUND_CHARS characters.
-def answerRequests(folder, requests):
+def answerRequests(folder, requests, places=None):
     replies, used = [], 0
     for kind, value, part in requests:
-        reply = answerRequest(folder, kind, value, part)
+        reply = answerRequest(folder, kind, value, part, places)
         if used + len(reply) > ROUND_CHARS:
             reply = reply[:max(ROUND_CHARS - used, 0)] + "\n[Cut here: too much was asked at once. Ask for the rest in your next answer.]"
         used += len(reply)
@@ -363,30 +376,32 @@ def describeWorkplace(loop, prompt, tools):
     if loop.folder and not hasattr(loop.agent, "attach"):
         parts.append(prompts.FOLDER_TOOLS_PROMPT.format(folder=loop.folder, tree=describeTree(loop.folder), rounds=MAX_TOOL_ROUNDS))
     if loop.session:
-        parts.append(prompts.NOTES_PROMPT.format(notes=loop.session.readNotes(loop.name) or "None yet."))
+        how = prompts.MEMORY_CODING_HOW if hasattr(loop.agent, "attach") else prompts.MEMORY_BLOCKS_HOW
+        parts += [describeMemory(loop.session.memory, loop.name, how=how), prompts.NOTES_PROMPT]
     return "\n\n".join([*parts, prompt])
 
 
 # Asks the model of the loop (ask gives its answer) and answers the requests of files it writes, for MAX_TOOL_ROUNDS rounds at most.
 # The user is told what the agent reads. The answer that is given back has no request and no note left in it.
 def consultFolder(loop, prompt, ask, tools):
-    folder = loop.folder if tools and not hasattr(loop.agent, "attach") else None
+    reaches = tools and not hasattr(loop.agent, "attach") and (loop.folder or loop.session)
+    places = loop.session.memory.roots() if loop.session else {}
     for number in range(MAX_TOOL_ROUNDS + 1):
         answer = takeNotes(ask(prompt), loop) if tools else ask(prompt)
-        requests = findRequests(answer) if folder else []
+        requests = findRequests(answer) if reaches else []
         if not requests:
             return answer
         if number == MAX_TOOL_ROUNDS:
             return REQUEST_PATTERN.sub("", answer).strip()
         loop.notifyUser(f"[{loop.name}] {describeRequests(requests)} in its folder.")
         last = number + 1 == MAX_TOOL_ROUNDS
-        prompt += "\n\n" + prompts.FOLDER_ANSWER_PROMPT.format(asked=answer.strip(), files=answerRequests(folder, requests),
+        prompt += "\n\n" + prompts.FOLDER_ANSWER_PROMPT.format(asked=answer.strip(), files=answerRequests(loop.folder, requests, places),
                                                               next=prompts.FOLDER_LAST_ROUND if last else prompts.FOLDER_NEXT_ROUND)
     return answer
 
 
 # ==============
-# Where the work is saved, and the memory of a swarm session.
+# Where the work is saved.
 # ==============
 # The name of one run of a swarm: its time, then the first words of its mission.
 def makeRunName(mission, moment=None):
@@ -396,68 +411,6 @@ def makeRunName(mission, moment=None):
 
 def resultsFolder(folder, runName):
     return Path(folder) / RESULTS_FOLDER / runName if folder else harness_utils.AGENT_FILES / LOOSE_RESULTS_FOLDER / runName
-
-
-def sessionsFolder():
-    return harness_utils.AGENT_FILES / SESSIONS_FOLDER
-
-
-def clearSession(sessionId):
-    shutil.rmtree(sessionsFolder() / sessionId, ignore_errors=True)
-
-
-def lastChange(folder):
-    try:
-        return max([folder.stat().st_mtime, *(path.stat().st_mtime for path in folder.rglob("*"))])
-    except OSError:
-        return time.time()
-
-
-# The sessions that did not change for SESSION_DAYS go, except the one kept and those of a swarm that can still be continued.
-def pruneSessions(keep=None):
-    if not sessionsFolder().is_dir():
-        return
-    limit = time.time() - SESSION_DAYS * 24 * 3600
-    for folder in sessionsFolder().iterdir():
-        if folder.is_dir() and folder.name != keep and not swarmStatePath(folder.name).exists() and lastChange(folder) < limit:
-            shutil.rmtree(folder, ignore_errors=True)
-
-
-# The memory of one swarm, shared by its agents: the session folder, and the name of the run that saves the results.
-class WorkSession:
-    def __init__(self, sessionId, runName):
-        self.id, self.runName = sessionId, runName
-        self.folder = sessionsFolder() / sessionId
-        self.lock = threading.Lock()
-        pruneSessions(keep=sessionId)
-        self.folder.mkdir(parents=True, exist_ok=True)
-        os.utime(self.folder)
-
-    def notesPath(self, agent):
-        return self.folder / "notes" / f"{safeName(agent)}.md"
-
-    def addNotes(self, agent, notes):
-        path = self.notesPath(agent)
-        with self.lock:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as file:
-                for note in notes:
-                    file.write(f"- [{datetime.now():%Y-%m-%d %H:%M}] " + note.replace("\n", "\n  ") + "\n")
-
-    # The latest notes only, so a long session does not fill the prompts.
-    def readNotes(self, agent):
-        path = self.notesPath(agent)
-        with self.lock:
-            text = path.read_text(encoding="utf-8") if path.exists() else ""
-        return text if len(text) <= NOTES_CHARS else "...\n" + text[-NOTES_CHARS:]
-
-    def workspace(self, agent):
-        folder = self.folder / "workspace" / safeName(agent)
-        folder.mkdir(parents=True, exist_ok=True)
-        return folder
-
-    def clear(self):
-        clearSession(self.id)
 
 
 # The folder where a coding agent works: the folder of its loop, or an empty one of its own (in the session of its swarm), so it never reads

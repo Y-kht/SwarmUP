@@ -1,12 +1,16 @@
 import re
 import sys
+import tempfile
 import threading
 import unittest
+from patching import everywhere
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 # The modules of SwarmUP are in the folders of src/backend. Their names have hyphens, so they are not packages: each folder goes on the path.
 sys.path[:0] = [str(folder) for folder in sorted((Path(__file__).resolve().parent.parent / "src" / "backend").iterdir()) if folder.is_dir() and not folder.name.startswith(("_", "."))]
+import agent_prompts as prompts
+import harness_utils
 from base_loop import Loop
 from models_library import getModelInfo
 from swarm_harness import Swarm
@@ -21,6 +25,8 @@ class Model:
         self.result, self.unloaded = result, False
 
     def input(self, prompt):
+        # The memory of the mission comes before the request, and the fake only reads the request.
+        prompt = prompt.split(prompts.NOTES_PROMPT)[-1]
         names = re.findall(r"^- ([A-Za-z][\w.-]*) \(", prompt, re.M)
         if "summary" in prompt.lower() and names:
             return "Where the team stands: " + ", ".join(names) + "."
@@ -216,6 +222,33 @@ class ModelChangeTests(LiveTeamTestCase):
         self.assertEqual((swarm.getInfo("B")["result"], swarm.getInfo("B")["model"]["name"]), ("new", "claude-haiku-4-5"))
         self.assertIn("You are B, the writer", self.news(swarm, "B"))
         waitUntil(lambda: oldModel.unloaded, "the old model of B to free its memory")
+
+
+class ReleaseTests(unittest.TestCase):
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        patcher = everywhere(harness_utils, "AGENT_FILES", Path(folder.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    # A worker that finished lets the memory of its local model go before the leader works, so the leader finds room on the GPUs. An API
+    # model, and the models of plan mode (they execute next), are kept.
+    def testAFinishedWorkerLetsItsLocalModelGo(self):
+        swarm = Swarm("Mission")
+        local, remote = Model("a"), Model("b")
+        local.local = True
+        seen = {}
+        class Leader(Loop):
+            def run(self):
+                seen["unloaded"] = (local.unloaded, remote.unloaded)
+                return "report"
+        for name, loop in (("Leader", Leader(Model())), ("Local", Loop(local)), ("Remote", Loop(remote))):
+            if name != "Leader":
+                loop.run = lambda: "done"
+            swarm.addAgent(name, loop, "role", "task")
+        swarm.run()
+        self.assertEqual(seen["unloaded"], (True, False))
 
 
 if __name__ == "__main__":

@@ -1,19 +1,18 @@
 // SwarmUP: the interface. It draws the state that the program (src/backend/interface/user_interface.py) gives, and sends it what the user does.
 // The state comes from /api/poll, which answers as soon as something changed. Every view is drawn again from the state and from ui
 // (what only the interface knows: the open window, what is typed...), so the interface never disagrees with the program.
-// The page is made of these scripts, loaded in this order by index.html: icons.js, page_tools.js, page_frame.js, step_agents.js, step_folders.js, step_models.js, step_teamwork.js, live_swarm.js, app.js.
-// This one has the swarms that were interrupted, the windows that open over the page, and the start.
+// The page is made of these scripts, loaded in this order by index.html: icons.js, page_tools.js, page_frame.js, step_agents.js, step_folders.js, step_models.js, step_teamwork.js, live_swarm.js,
+// missions.js, app.js. This one has the missions that are continued or followed up (their secrets are given again), the windows that open over the page, and the start.
 'use strict';
 
 // ==============
-// The swarms that were interrupted: continue (the secrets are given again) or cancel (after the summary of the leader).
+// The missions of the history: continue one that was interrupted, or follow up one whose round is over (the secrets are given again), or cancel
+// one that was interrupted (after the summary of the leader).
 // ==============
 async function openResume(id) {
   const data = await act('resumeForm', { id }, { busy: `resume-${id}` });
   if (!data) return;
-  const form = data.resume;
-  ui.resume = { form, values: Object.fromEntries(form.agents.map(agent => [agent.name, { accounts: [] }])), keys: {}, tokens: {}, errors: {}, error: '' };
-  if (form.codex) loadCodex();
+  setResume(data.resume);
   go('resume');
 }
 
@@ -27,7 +26,9 @@ function viewResume() {
     if (data) { ui.resume = null; ui.selected = null; store.feed = []; go('run'); } else render();
   };
   return {
-    header: header('Continue a swarm', shorten(form.mission, 120), 'Passwords, keys and tokens are never saved, so give them again. What is already done is not done again, and nothing approved is sent twice.'),
+    header: form.followUp ? header(`Open a mission again${form.round > 1 ? `, after ${plural(form.round, 'round')}` : ''}`, shorten(form.mission, 120),
+      'Passwords, keys and tokens are never saved, so give them again. Then give the swarm its next request: its agents remember what they did.') :
+      header('Continue a swarm', shorten(form.mission, 120), 'Passwords, keys and tokens are never saved, so give them again. What is already done is not done again, and nothing approved is sent twice.'),
     content: h('div', { class: 'stack loose', style: { maxWidth: '900px' } },
       Object.keys(form.providers).length ? h('div', { class: 'card pad enter' }, h('div', { class: 'row', style: { marginBottom: '12px' } }, icon('key'), h('h3', {}, 'API keys')),
         Object.entries(form.providers).map(([provider, key]) => h('div', { class: ['field', resume.errors[`key.${provider}`] && 'has-error'] }, h('label', { class: 'field-label' }, `${key.company} API key`,
@@ -53,7 +54,7 @@ function viewResume() {
           agent.accounts ? h('div', { class: 'field' }, h('label', { class: 'field-label' }, 'Accounts on publisher websites', h('span', { class: 'opt' }, 'optional')),
             accountsInput({ key: 'accounts' }, { values: resume.values[agent.name], touched: {}, errors: {} })) : null))),
       resume.error && !Object.keys(resume.errors).length ? callout('danger', 'alert', resume.error) : null),
-    footer: footer({ label: 'Not now', onClick: () => { ui.resume = null; go('home'); } }, { label: 'Continue the swarm', iconName: 'play', busy: ui.busy.resume, onClick: submit }),
+    footer: footer({ label: 'Not now', onClick: () => { ui.resume = null; go('home'); } }, { label: form.followUp ? 'Open the mission' : 'Continue the swarm', iconName: form.followUp ? 'message' : 'play', busy: ui.busy.resume, onClick: submit }),
     guide: [
       { q: 'Why again?', icon: 'lock', tone: 'tip', text: 'SwarmUP never writes a password, a key or a token to a file. They are only kept in memory while it runs, so they are asked again after a stop.' },
       { q: 'Nothing twice', text: 'An email or a message you approved is never sent twice. If the program stopped while sending one, you will be asked if it must be sent again.' },
@@ -88,7 +89,7 @@ function cancelModal(modal) {
   } else if (cancelling && job?.state === 'done') {
     body = h('div', { class: 'stack' }, h('h4', {}, `${modal.saved.leader} summarises what the swarm did`), h('div', { class: 'draft-box' }, cancelling.summary),
       callout('warning', 'alert', 'If you stop here, everything above stays as it is, but the agents that did not finish are cut in the middle of their task. What they changed in your files is put back.'));
-    foot = [h('div', { class: 'spacer' }), button('Continue it instead', { kind: 'ghost', iconName: 'play', onClick: () => { closeModal(); api('clearJob', { name: 'cancel' }); openResume(modal.saved.id); } }),
+    foot = [h('div', { class: 'spacer' }), button('Continue it instead', { kind: 'ghost', iconName: 'play', onClick: () => { closeModal(); api('clearJob', { name: 'cancel' }); openMission({ id: modal.saved.id }); } }),
       button('Stop it for good', { kind: 'danger', iconName: 'stop', busy: ui.busy.abandon, onClick: async () => {
         if (await act('abandon', { id: modal.saved.id }, { ok: 'The swarm is stopped.' })) closeModal();
       } })];
@@ -202,10 +203,10 @@ function renderModal() {
     const modal = ui.modal;
     const builders = {
       tasks: taskPickerModal, agent: agentFormModal, browse: browseModal, model: modelPickerModal, help: helpModal, stop: stopModal, cancel: cancelModal,
-      join: joinModal, removeAgent: removeAgentModal, settings: settingsModal,
-      quit: () => confirmModal({ title: 'Quit SwarmUP?', iconName: 'power', confirm: 'Quit', danger: true, text: store.state.run?.running ? 'The swarm is running. It is saved now, and you can continue it at the next start.' : 'Your team is kept only while SwarmUP runs: what you built here is lost when you quit, except a swarm that was interrupted.',
+      join: joinModal, removeAgent: removeAgentModal, settings: settingsModal, deleteMission: deleteMissionModal,
+      quit: () => confirmModal({ title: 'Quit SwarmUP?', iconName: 'power', confirm: 'Quit', danger: true, text: store.state.tabs.some(tab => ['running', 'waiting'].includes(tab.state)) ? 'Some missions are running. They are saved now, and you can continue them at the next start.' : 'Every mission that ran stays in the history. A team you built but did not run is lost when you quit.',
         run: async () => { const data = await act('quit', {}, { busy: 'confirm' }); if (data) document.body.replaceChildren(h('div', { class: 'splash' }, h('div', { class: 'splash-logo' }, logo()), h('div', { class: 'splash-text' }, data.message))); } }),
-      confirmNew: () => confirmModal({ title: 'Start a new swarm?', iconName: 'plus', confirm: 'Start a new swarm', danger: true, text: 'The mission, the agents and their models are cleared. The API keys you gave stay in memory.',
+      confirmNew: () => confirmModal({ title: 'Start a new swarm in this tab?', iconName: 'plus', confirm: 'Start a new swarm', danger: true, text: 'The mission, the agents and their models of this tab are cleared (a mission that ran stays in the history). To keep them, open a new mission in the sidebar instead. The API keys you gave stay in memory.',
         run: async () => { if (await act('newSwarm', {}, { busy: 'confirm' })) { closeModal(); ui.stack = []; ui.modal = null; Object.assign(ui, { missionDraft: null, folderDrafts: {}, waitsDraft: null, orderChoice: null, mode: null, selected: null }); ui.visited.clear(); store.feed = []; go('mission'); } } }),
     };
     content = builders[modal.type] ? builders[modal.type](modal) : null;
@@ -249,6 +250,7 @@ async function start() {
       await sleep(1000);
     }
   }
+  try { store.tab = sessionStorage.getItem('swarmup-tab'); } catch (error) { /* not available */ }
   pollLoop();
   while (!store.state) await sleep(30);
   let view = null;

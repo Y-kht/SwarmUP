@@ -290,10 +290,14 @@ class ApiModel:
 # report is a function that tells the user what takes time (the download and the loading of a big model take minutes).
 class LocalModel:
     loading = threading.Lock()
+    # A model on the GPUs of this computer: a swarm lets its memory go when its agent has finished (Swarm.release), and it loads again if needed.
+    local = True
 
-    def __init__(self, name, bits=16, token=None, report=None, maxNewTokens=LOCAL_MAX_TOKENS):
+    # vram is the memory the model is expected to need (getModelInfo), so it can be put on one GPU that has room for it.
+    def __init__(self, name, bits=16, token=None, report=None, maxNewTokens=LOCAL_MAX_TOKENS, vram=None):
         self.name = name
         self.bits = bits
+        self.vram = vram
         self.token = token
         self.report = report or (lambda message: None)
         self.maxNewTokens = maxNewTokens
@@ -308,7 +312,7 @@ class LocalModel:
         importLibrary("accelerate")
         if not torch.cuda.is_available():
             raise ModelError("PyTorch does not see any GPU, so the model would run on the processor and be extremely slow. Install the CUDA version of PyTorch.")
-        options = {"device_map": "auto", "token": self.token}
+        options = {"device_map": self.placement(torch), "token": self.token}
         if self.bits < 16:
             importLibrary("bitsandbytes")
             options["quantization_config"] = transformers.BitsAndBytesConfig(load_in_8bit=self.bits == 8, load_in_4bit=self.bits == 4,
@@ -325,7 +329,47 @@ class LocalModel:
                 raise ModelError(f"{self.name} needs a newer version of transformers. Update it with: pip install -U transformers") from None
             self.model = multimodal.from_pretrained(self.name, **options)
         self.torch = torch
+        self.checkPlacement()
+        self.checkSpread()
         self.report(f"{self.name} is ready.")
+
+    # A model is put whole on the GPU with the most free memory when it fits there: it runs faster than spread over several GPUs, and it does
+    # not depend on the GPUs passing data to each other. Otherwise the loader spreads it.
+    def placement(self, torch):
+        if not self.vram or torch.cuda.device_count() < 2:
+            return "auto"
+        free, index = max((torch.cuda.mem_get_info(index)[0] / 1000000000, index) for index in range(torch.cuda.device_count()))
+        return {"": index} if free >= self.vram else "auto"
+
+    # On some computers the GPUs cannot pass data to each other (a problem of the driver, often with the IOMMU): a model spread over them then
+    # computes only zeros. One short pass finds it before the model writes nonsense or breaks the GPU.
+    def checkSpread(self):
+        places = {str(place) for place in (getattr(self.model, "hf_device_map", None) or {}).values()}
+        if len(places) < 2:
+            return
+        inputs = self.tokenizer("Hello", return_tensors="pt").to(self.model.device)
+        with self.torch.no_grad():
+            logits = self.model(**inputs).logits.float()
+        if bool(self.torch.isfinite(logits).all()) and float(logits.abs().max()) > 0:
+            return
+        self.model = self.tokenizer = None
+        gc.collect()
+        self.torch.cuda.empty_cache()
+        raise ModelError(f"{self.name} had to be spread over several GPUs, and the GPUs of this computer do not pass data to each other correctly (a "
+                         "problem of the driver, often of the IOMMU): it would only write nonsense. Choose a model that fits in one GPU, free one GPU for it, "
+                         "or use a compressed model (4 or 8 bits).")
+
+    # When other jobs fill the GPUs, the loader puts the part that does not fit on the processor (or the disk) without saying it. Such a model
+    # is extremely slow, and its answers can break the GPU (an error of CUDA that only a restart clears), so it is refused at once.
+    def checkPlacement(self):
+        places = {str(place) for place in (getattr(self.model, "hf_device_map", None) or {}).values()}
+        if places & {"cpu", "disk", "meta"}:
+            self.model = self.tokenizer = None
+            gc.collect()
+            self.torch.cuda.empty_cache()
+            raise ModelError(f"{self.name} does not fit in the memory of the GPUs that is free now: a part of it would run on the processor, which is "
+                             "too slow and unstable. Other jobs may be using the GPUs. Wait until they free some memory, or choose a smaller model "
+                             "(or a compressed one, in 4 or 8 bits).")
 
     def answer(self, prompt):
         with self.lock:
@@ -375,17 +419,23 @@ class LocalModel:
             gated = f" It is a gated model: accept its license on https://huggingface.co/{self.name} and give a Hugging Face token (HF_TOKEN)." if isGated(self.name) else ""
             raise ModelError(f"{self.name} could not be downloaded or opened ({str(error).splitlines()[0] if str(error) else type(error).__name__}).{gated}") from error
         except RuntimeError as error:
+            if "device-side assert" in str(error) or "cuda error" in str(error).lower():
+                raise ModelError(f"{self.name} broke on the GPU ({str(error).splitlines()[0]}). The GPUs of this program cannot be used again before it "
+                                 "restarts: close it, and start it again to continue the swarm.") from error
             if "out of memory" not in str(error).lower():
                 raise
             raise ModelError(f"The GPUs ran out of memory with {self.name}. Other jobs may be using them. Free some memory or choose a smaller model.") from error
 
-    # Frees the memory of the GPUs.
+    # Frees the memory of the GPUs. After an error of CUDA the GPU cannot be cleared anymore, and that must not stop the program.
     def unload(self):
         with self.lock:
             self.model = self.tokenizer = None
             gc.collect()
             if self.torch is not None:
-                self.torch.cuda.empty_cache()
+                try:
+                    self.torch.cuda.empty_cache()
+                except RuntimeError:
+                    pass
 
 
 # The client of a model chosen with getModelInfo (models_library.py). apiKeys is {provider: key}, and the environment variable of the provider is the other source.
@@ -394,7 +444,7 @@ def createModel(info, apiKeys=None, token=None, report=None):
     if info.get("cli") == "codex":
         return CodexModel(info["name"], report)
     if info["local"]:
-        return LocalModel(info["name"], info["bits"], token, report)
+        return LocalModel(info["name"], info["bits"], token, report, vram=info.get("vram"))
     key = (apiKeys or {}).get(info["provider"]) or getApiKey(info["provider"])
     if not key:
         raise ModelError(f"There is no API key for {API_KEYS[info['provider']]['company']}. Set {API_KEYS[info['provider']]['variable']} or give the key.")

@@ -49,10 +49,26 @@ CLAUDE_CODE_CREDENTIALS = ("ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "C
 CLAUDE_CODE_HOME = "claude-code-home"
 REFUSED_STATUSES = (401, 403)
 # What Claude Code wants to do with each tool, in words, and the field of its input that says what exactly.
+CLAUDE_CODE_WRITERS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
 CLAUDE_CODE_ACTIONS = {"Bash": ("run a command", "command"), "Write": ("create or replace a file", "file_path"), "Edit": ("change a file", "file_path"),
                        "MultiEdit": ("change a file", "file_path"), "NotebookEdit": ("change a notebook", "notebook_path"),
                        "Read": ("read a file outside its folder", "file_path"), "Glob": ("look for files outside its folder", "path"),
                        "Grep": ("search in files outside its folder", "path"), "WebFetch": ("open a web page", "url"), "WebSearch": ("search the web", "query")}
+
+
+# What the rules of the mission say of a path a coding agent names (MissionMemory.ruleFor): "free" in its temp folder and for what it may do in
+# the memory, "ask" anywhere else, or why it is refused. write is True for a change.
+def placeRule(loop, path, write):
+    session = getattr(loop, "session", None) if loop is not None else None
+    if session is None or not path:
+        return "ask"
+    return session.memory.ruleFor(loop.name, path, write)
+
+
+# The places of the mission a coding agent may reach besides its folder.
+def missionFolders(loop):
+    session = getattr(loop, "session", None) if loop is not None else None
+    return [str(folder) for folder in session.memory.roots().values()] if session else []
 
 
 def describeClaudeCodeRequest(tool, data, folder):
@@ -99,7 +115,7 @@ class ClaudeCodeModel:
     def options(self, sdk, folder):
         environment = {**{name: "" for name in CLAUDE_CODE_CREDENTIALS}, "ANTHROPIC_API_KEY": self.apiKey,
                        "CLAUDE_CONFIG_DIR": str(harness_utils.AGENT_FILES / CLAUDE_CODE_HOME)}
-        return sdk.ClaudeAgentOptions(cwd=str(folder), permission_mode="default", tools=list(CLAUDE_CODE_TOOLS), allowed_tools=list(self.runRules),
+        return sdk.ClaudeAgentOptions(cwd=str(folder), add_dirs=missionFolders(self.loop), permission_mode="default", tools=list(CLAUDE_CODE_TOOLS), allowed_tools=list(self.runRules),
                                       setting_sources=[], can_use_tool=self.decide, env=environment, model=None if self.name == DEFAULT_CLI_MODEL else self.name,
                                       system_prompt={"type": "preset", "preset": "claude_code", "append": CODING_AGENT_RULES},
                                       extra_args={"no-session-persistence": None})
@@ -112,6 +128,12 @@ class ClaudeCodeModel:
             chosen = {question: values if len(values) != 1 else values[0] for question, values in answers.items()}
             return types.PermissionResultAllow(updated_input={"questions": data.get("questions") or [], "answers": chosen})
         # Claude Code asks again for some commands its rules cover (those that write with >): the exact action the user allowed is not asked again.
+        field = CLAUDE_CODE_ACTIONS.get(tool, ("", None))[1]
+        rule = placeRule(self.loop, data.get(field) if field and tool not in ("Bash", "WebFetch", "WebSearch") else None, tool in CLAUDE_CODE_WRITERS)
+        if rule == "free":
+            return types.PermissionResultAllow(updated_input=data)
+        if rule != "ask":
+            return types.PermissionResultDeny(message=rule)
         exact = (tool, json.dumps(data, sort_keys=True))
         if exact in self.runExact:
             return types.PermissionResultAllow(updated_input=data)

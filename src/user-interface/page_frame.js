@@ -120,6 +120,7 @@ function renderSidebar() {
   return h('div', { class: 'stack tight', style: { flex: '1', minHeight: '0' } },
     h('div', { class: 'brand' }, logo(), h('div', {}, h('div', { class: 'brand-name' }, 'Swarm', h('span', {}, 'UP')), h('div', { class: 'brand-sub' }, 'Your team of AI agents'))),
     h('button', { class: ['nav-item', ui.view === 'home' && 'active'], onClick: () => go('home') }, h('span', { class: 'nav-step' }, icon('home', 'sm')), 'Home'),
+    missionTabs(),
     h('div', { class: 'nav-title' }, 'Build your swarm'),
     STEPS.map((step, index) => {
       const info = steps[step.view];
@@ -153,7 +154,7 @@ function setTheme(theme) {
 
 
 // ==============
-// Home: what SwarmUP is, and the swarms that were interrupted.
+// Home: what SwarmUP is, and the history of the missions (missions.js).
 // ==============
 function heroArt() {
   const holder = h('div', { class: 'hero-art' });
@@ -182,9 +183,7 @@ function viewHome() {
             button(hasWork ? 'Start a new swarm' : 'Start building', { kind: hasWork ? 'ghost' : 'primary', size: 'lg', iconName: hasWork ? 'plus' : null, after: hasWork ? null : 'arrowRight',
               onClick: () => hasWork ? openModal({ type: 'confirmNew' }) : go('mission') }),
           button('How it works', { kind: 'ghost', size: 'lg', iconName: 'help', onClick: () => openModal({ type: 'help' }) }))),
-      state.unfinished.length ? h('section', { class: 'stack enter-2' },
-        h('div', { class: 'section-title' }, h('h2', {}, 'Swarms waiting for you'), badge(String(state.unfinished.length), 'honey')),
-        state.unfinished.map(savedCard)) : null,
+      historySection(),
       h('section', { class: 'stack enter-3' }, h('div', { class: 'section-title' }, h('h2', {}, 'How it works')),
         h('div', { class: 'how' }, [
           ['Say the mission', 'One or two sentences about what the swarm must achieve. Every agent reads it.'],
@@ -203,22 +202,6 @@ function viewHome() {
     ],
   };
 }
-
-function savedCard(saved) {
-  return h('div', { class: 'card saved-card' }, h('span', { class: 'saved-icon' }, icon('hourglass', 'lg')),
-    h('div', { class: 'grow stack tight' },
-      h('h3', {}, saved.mission),
-      h('div', { class: 'small muted' }, `${saved.reason} on ${saved.savedAt}. Your work is saved. ${saved.mode === 'plan' ? 'It was planning.' : 'It was executing.'}`),
-      h('div', { class: 'row wrap', style: { marginTop: '6px' } }, saved.members.map(member => h('span', { class: 'badge outline' }, h('span', { style: { color: taskStyle(member.task).color, display: 'inline-flex' } }, icon(taskStyle(member.task).icon)), member.name,
-        h('span', { class: 'faint' }, `· ${member.status}`)))),
-      saved.running ? callout('warning', 'info', 'This swarm seems to be working in another window of SwarmUP, so it is left alone. If that window was closed a few seconds ago, try again in half a minute.') : null,
-      !saved.canResume ? callout('warning', 'alert', 'This swarm was made by another program, so it cannot be continued here. You can still cancel it.') : null),
-    h('div', { class: 'stack tight' },
-      button('Continue', { kind: 'primary', iconName: 'play', disabled: saved.running || !saved.canResume, busy: ui.busy[`resume-${saved.id}`], onClick: () => openResume(saved.id) }),
-      button('Cancel it', { kind: 'danger-ghost', iconName: 'x', disabled: saved.running, onClick: () => openCancel(saved) }),
-      button('', { kind: 'ghost', size: 'sm', iconName: 'refresh', title: 'Check again', onClick: () => act('refreshUnfinished') })));
-}
-
 
 // ==============
 // Step 1: the mission, and who builds the swarm: the user agent by agent, or the leader (it proposes the agents, and the user approves).

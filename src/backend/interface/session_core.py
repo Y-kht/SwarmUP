@@ -41,9 +41,14 @@ FREE_ACTIONS = ("checkEmail", "checkMessenger", "findChats", "searchPublishers",
 # because the Swarm calls the listener of the session with its lock held.
 # ==============
 class Session(SessionSteps, SessionModels, SessionRuns, SessionSaved):
-    def __init__(self):
+    # A window with several missions (Desk in session_desk.py) gives every tab the same keys and tokens, and onTouch, called after each change.
+    def __init__(self, keys=None, tokens=None, onTouch=None):
         self.token = secrets.token_urlsafe(24)
+        self.onTouch = onTouch
+        self.tab = None
         self.lock = threading.RLock()
+        # The agents of this mission take turns to speak to the user, without waiting for the missions of the other tabs (Loop.userLock).
+        self.userLock = threading.RLock()
         self.acting = threading.Lock()
         self.changed = threading.Condition(self.lock)
         self.version = 0
@@ -53,8 +58,8 @@ class Session(SessionSteps, SessionModels, SessionRuns, SessionSaved):
         self.questionNumber = 0
         self.context = {}
         self.jobs = {}
-        self.keys = {}
-        self.tokens = {}
+        self.keys = {} if keys is None else keys
+        self.tokens = {} if tokens is None else tokens
         self.agentNumber = 0
         self.unfinished = []
         self.cancelling = None
@@ -68,7 +73,7 @@ class Session(SessionSteps, SessionModels, SessionRuns, SessionSaved):
             "browse", "pickPath", "setFolder", "openFolder", "modelCatalog", "lookupModel", "price", "chooseModel", "testModel", "checkPackages", "setOrder", "planOrder",
             "setMode", "start", "execute", "answer", "approve", "reject", "correct", "message", "startNow", "prepareStop", "stop", "clearJob", "newSwarm",
             "resumeForm", "resume", "prepareCancel", "abandon", "refreshUnfinished", "openLink", "codexAccount", "codexSignIn", "codexCancel", "joinLive",
-            "removeLive", "setBuildMode", "buildWithLeader", "setBudget", "saveSettings", "quit", "addAgents", "setSwarmFolder")}
+            "removeLive", "setBuildMode", "buildWithLeader", "setBudget", "saveSettings", "quit", "addAgents", "setSwarmFolder", "followUp")}
 
     def reset(self):
         self.mission = ""
@@ -86,6 +91,8 @@ class Session(SessionSteps, SessionModels, SessionRuns, SessionSaved):
         with self.changed:
             self.version += 1
             self.changed.notify_all()
+        if self.onTouch:
+            self.onTouch()
 
     def addFeed(self, speaker, text, tone="info", kind="note", receiver=None):
         with self.lock:
@@ -128,7 +135,7 @@ class Session(SessionSteps, SessionModels, SessionRuns, SessionSaved):
         return question["answer"]
 
     def connect(self, loop, name):
-        loop.name = name
+        loop.name, loop.userLock = name, self.userLock
         loop.notifyUser = lambda message: self.notify(name, message)
         loop.askUser = lambda question: self.ask(name, question)
         loop.askSecret = lambda question: self.ask(name, question, secret=True)
@@ -312,13 +319,16 @@ class Session(SessionSteps, SessionModels, SessionRuns, SessionSaved):
             state = "stopped"
         elif outcome.get("result") is not None:
             state = "succeeded"
+        elif self.runInfo.get("reopened") and not outcome:
+            state = "reopened"
         else:
             state = "unfinished"
         return {"mission": swarm.mission, "mode": swarm.getMode(), "leader": swarm.getLeader(), "agents": agents, "stages": stages, "running": running, "state": state,
                 "error": describeError(outcome["error"]) if "error" in outcome and not isinstance(outcome["error"], USER_ERRORS) else str(outcome.get("error", "")),
                 "summary": swarm.getSummary(), "interruption": swarm.getInterruption(), "connections": swarm.getConnections(),
                 "messages": swarm.getMessages()[-80:], "ready": swarm.getReadyAgents(), "resumed": self.runInfo.get("resume", False), **self.runInfo,
-                "removed": list(swarm.removed), "canJoin": not running or self.canJoin(swarm),
+                "removed": list(swarm.removed), "canJoin": not running or self.canJoin(swarm), "round": swarm.round, "requests": swarm.requests[-10:],
+                "missionId": swarm.id, "canFollowUp": not running and not self.isBusy(),
                 "vram": swarm.getVramStatus() if swarm.getNeededVram() else None}
 
     def describeGpus(self):
@@ -343,13 +353,13 @@ class Session(SessionSteps, SessionModels, SessionRuns, SessionSaved):
                 "codexLogin": codexLogin, "swarmFolder": next(iter(folders)) if len(folders) == 1 else None, "mixedFolders": len(folders) > 1}
 
     # Waits until something changed after the version the browser has, then gives the state and the new lines of the feed.
-    def poll(self, version, feedAfter):
+    def poll(self, version, feedAfter, tab=None):
         with self.changed:
             self.changed.wait_for(lambda: self.version != version or self.closing, timeout=POLL_SECONDS)
             feed = [item for item in self.feed if item["id"] > feedAfter]
         return {"state": self.describe(), "feed": feed}
 
-    def act(self, name, payload):
+    def act(self, name, payload, tab=None):
         if name not in self.actions:
             raise ValueError(f"Unknown action: {name}.")
         if name in FREE_ACTIONS:

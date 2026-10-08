@@ -36,6 +36,9 @@ def clearSwarmState(swarmId):
     swarmStatePath(swarmId).unlink(missing_ok=True)
 
 
+UNFINISHED_STATES = ("running", "paused", "interrupted")
+
+
 # The swarms that did not end, newest first: their saved states, with running: True if another program is working on one right now.
 # A file that cannot be read is left alone. The swarm of this very program is not listed, because it is not interrupted.
 def findUnfinishedSwarms():
@@ -43,7 +46,7 @@ def findUnfinishedSwarms():
     for path in (AGENT_FILES / RUNS_FOLDER).glob("swarm_*.json"):
         try:
             state = json.loads(path.read_text(encoding="utf-8"))
-            if state["version"] != STATE_VERSION or not state["members"] or not isinstance(state["members"], dict):
+            if state["version"] != STATE_VERSION or not state["members"] or not isinstance(state["members"], dict) or state["state"] not in UNFINISHED_STATES:
                 continue
             alive = state["state"] in ("running", "paused") and datetime.now().timestamp() - state["heartbeat"] < STALE_SECONDS
             if alive and state["pid"] == os.getpid():

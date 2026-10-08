@@ -4,9 +4,11 @@ import traceback
 from datetime import datetime
 from functools import partial
 
-from agent_storehouse import WorkSession, clearSession, makeRunName
+from agent_storehouse import makeRunName
+from background_processes import stopProcesses
 from harness_utils import STATE_LOCK, STOPPED_MESSAGE, SwarmStopped
-from saved_swarms import clearSwarmState, saveSwarmState
+from mission_memory import WorkSession
+from saved_swarms import saveSwarmState
 
 
 HEARTBEAT_SECONDS = 5
@@ -17,16 +19,16 @@ STOP_TIMEOUT = 10
 # How a swarm (Swarm in swarm_harness.py) runs: the groups of agents that work at the same time, the leader last, and what is saved
 # while it runs.
 class SwarmRun:
-    # Ends for good a swarm that is not running (one found on the disk): what the agents that did not finish changed is undone,
-    # and the saved state is deleted.
+    # Ends a swarm that is not running (one found on the disk): what the agents that did not finish changed is undone. The mission stays in the
+    # history, stopped, with its memory, until the user deletes it (deleteMission in mission_history.py).
     def abandon(self):
         if self.isRunning():
             raise ValueError("The swarm is running. Stop it first.")
         for member in self.members.values():
             if member["status"] != "done":
                 member["agent"].rollback()
-        clearSwarmState(self.id)
-        clearSession(self.id)
+        with STATE_LOCK:
+            saveSwarmState(self.id, {**self.describeState(), "state": "stopped"})
         self.emit("stopped")
 
     def isRunning(self):
@@ -156,7 +158,29 @@ class SwarmRun:
                 member["agent"].rollback()
             except Exception:
                 traceback.print_exc()
+        self.recordOutcome(name, member)
         self.setStatus(name, "done" if member["result"] is not None else "failed")
+
+    # The memory of the mission keeps every approved plan and result, the leader's included, and why an agent did not finish.
+    def recordOutcome(self, name, member):
+        if member["result"] is None:
+            self.record("addProgress", self.round, f"{name} did not finish", member["error"])
+        elif member["mode"] == "plan":
+            self.record("addPlan", self.round, name, member["result"])
+        else:
+            self.record("addOutput", self.round, name, member["result"])
+            if name == self.leader:
+                self.record("addProgress", self.round, "The final report of the leader", member["result"])
+
+    # A worker that finished in execute mode needs its model no more in this run: a model on the GPUs lets its memory go for the agents that
+    # still work (the leader works last). It loads again if a later round needs it.
+    def release(self, member):
+        model = member["agent"].agent
+        if member["mode"] == "execute" and getattr(model, "local", False) is True and hasattr(model, "unload"):
+            try:
+                model.unload()
+            except Exception:
+                traceback.print_exc()
 
     # A result is delivered once: after a resume, the agent already has the results it received before the swarm stopped.
     def deliverResult(self, sender, receiver):
@@ -189,38 +213,50 @@ class SwarmRun:
             if not member.get("removed"):
                 outcome = member["result"] if member["status"] == "done" else f"FAILED. {member['error']}"
                 self.communicate(name, self.leader, f"{member['role']}: {outcome}")
+                self.release(member)
         finally:
             if name in self.finished:
                 self.finished[name].set()
 
-    # Everything of the last run is cleared, except the plans approved in plan mode, which the agents follow when they execute, and the notes of
-    # the session. A resumed run keeps it all: what is done stays done, and the agents that did not finish remember what they did.
+    # Everything of the last run is cleared, except the plans approved in plan mode, which the agents follow when they execute, and the memory
+    # of the mission. A resumed run keeps it all: what is done stays done, and the agents that did not finish remember what they did. A round
+    # after the first (a follow-up, swarm_rounds.py) keeps the conversations and the messages too, so the agents know what they did before.
     # Each new run saves its results in a folder of its own, and a resumed run in the same one.
     def prepareRun(self, resume=False):
         self.stopped, self.interruption, self.saveFailed = False, None, False
+        following = not resume and self.round > 1
         if not (resume and self.runName):
-            self.runName = makeRunName(self.mission)
-        self.session = WorkSession(self.id, self.runName)
+            self.runName = makeRunName(self.currentRequest() if following else self.mission)
+        self.session = WorkSession(self.id, self.runName, self.round, self.leader)
+        self.session.memory.onLongTermChange = self.tellLongTermChange
+        self.record("setMission", self.mission, self.round)
+        if not any(request["round"] == self.round for request in self.requests):
+            self.requests.append({"round": self.round, "text": self.mission, "time": f"{datetime.now():%Y-%m-%d %H:%M:%S}"})
+            self.record("addUserPrompt", self.round, self.mission, kind="The mission")
         if not resume:
-            self.messages, self.summary = [], ""
+            self.messages, self.summary = (self.messages if following else []), ""
+        previous = {name: member["result"] for name, member in self.members.items()}
         for name, member in self.members.items():
             if resume:
                 self.settle(member)
             else:
                 member.update(status="waiting", result=None, error="", mode=self.mode, review="", draft="", problem="", decision=None, revision=0,
-                              startAt=None, started=False, resumeStart=None)
+                              startAt=None, started=False, resumeStart=None, sitsOut=False)
             member["wake"].clear()
             agent = member["agent"]
             if not resume:
-                agent.inbox, agent.userMessages, agent.progress, agent.actions = [], [], {}, []
-                agent.conversation, agent.activity = None, []
+                agent.progress, agent.actions, agent.activity = {}, [], []
+                if not following:
+                    agent.inbox, agent.userMessages, agent.conversation, agent.roundRequest = [], [], None, ""
                 if self.mode == "plan":
                     agent.approvedPlan = ""
             self.connectAgent(name, member, resume)
+        if following:
+            self.startRound(previous)
         self.active = True
         self.startHeartbeat()
         self.emit("run", mode=self.mode)
-        if not resume:
+        if not resume and not following:
             for name in self.members:
                 if name != self.leader:
                     self.communicate(self.leader, name, self.describe(name))
@@ -248,10 +284,11 @@ class SwarmRun:
         while not stop.wait(HEARTBEAT_SECONDS):
             self.checkpoint()
 
-    # The run is over. A swarm that ended (or that the user stopped) has nothing left to continue, so its saved state is deleted.
-    # One that was cut short by an error keeps it, marked as interrupted, so the next start finds it at once.
+    # The run is over. Its state stays saved, in the history of the missions: finished (the user can follow up), stopped by the user, or, when
+    # it was cut short by an error, interrupted, so the next start finds it at once and offers to continue it.
     def closeRun(self, ended):
         self.heartbeat.set()
+        stopProcesses(self.id)
         try:
             with self.changed:
                 state = self.describeState()
@@ -260,10 +297,8 @@ class SwarmRun:
         with STATE_LOCK:
             self.active = False
             try:
-                if ended or self.stopped:
-                    clearSwarmState(self.id)
-                elif state:
-                    saveSwarmState(self.id, {**state, "state": "interrupted"})
+                if state:
+                    saveSwarmState(self.id, {**state, "state": "stopped" if self.stopped else "finished" if ended else "interrupted"})
             except OSError:
                 traceback.print_exc()
 
@@ -311,6 +346,8 @@ class SwarmRun:
         if self.stopped:
             return None
         self.runStage([self.leader], self.runLeader)
+        if self.members[self.leader]["result"] is not None and not self.stopped:
+            self.updateLongTermMemory()
         return self.members[self.leader]["result"]
 
     # With resume=True the swarm goes on where it was interrupted (see resume) instead of starting again.

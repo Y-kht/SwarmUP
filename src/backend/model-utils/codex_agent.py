@@ -9,7 +9,7 @@ import subprocess
 import threading
 from pathlib import Path
 
-from coding_agents import CODING_AGENT_RULES, agentWorkspace, askPermission, askQuestions, isInside
+from coding_agents import CODING_AGENT_RULES, agentWorkspace, askPermission, askQuestions, isInside, placeRule
 from harness_utils import isOnline
 from internet_cache import remember
 from model_support import ModelConnectionError, ModelError, recordCall
@@ -338,6 +338,13 @@ class CodexModel:
             if "fileChange" in self.runKinds:
                 return {"decision": "accept"}
             files = (self.turn or {}).get("files", {}).get(params.get("itemId")) or []
+            rules = [placeRule(self.loop, path, True) for path in files]
+            if files and not params.get("grantRoot") and all(rule == "free" for rule in rules):
+                return {"decision": "accept"}
+            refused = next((rule for rule in rules if rule not in ("free", "ask")), None)
+            if refused:
+                self.loop.notifyUser(f"[{self.loop.name}] {refused}")
+                return {"decision": "decline"}
             detail = ", ".join(files) or params.get("reason") or "files of its folder"
             action = f"write anywhere in {params['grantRoot']}" if params.get("grantRoot") else "change files"
             decision = askPermission(self.loop, {"action": action, "detail": detail, "folder": str(folder), "reason": params.get("reason") or ""})

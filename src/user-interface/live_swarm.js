@@ -8,7 +8,7 @@ function runTitle(run) {
   const titles = {
     running: run.interruption ? ['Paused: the connection was lost', 'warning', 'wifiOff'] : (run.ready.length || store.state.questions.length) ? ['Waits for you', 'attention', 'bell'] : ['Running', 'primary', 'activity'],
     succeeded: [run.mode === 'plan' ? 'Plans approved' : 'Finished', 'success', 'checkCircle'], unfinished: ['Ended without a result', 'warning', 'alert'],
-    stopped: ['Stopped', 'warning', 'stop'], error: ['Could not start', 'danger', 'xCircle'],
+    stopped: ['Stopped', 'warning', 'stop'], error: ['Could not start', 'danger', 'xCircle'], reopened: ['Open again: give it a new request', 'success', 'message'],
   };
   return titles[run.state] || titles.running;
 }
@@ -22,7 +22,7 @@ function viewRun() {
   const selected = agents.find(agent => agent.name === selectedName);
   const nodes = agents.map(agent => ({ ...agent, role: agent.role, waitsFor: agent.isLeader ? [] : agent.waitsFor }));
   return {
-    header: h('div', { class: 'grow' }, h('div', { class: 'eyebrow' }, run.resumed ? 'Continued swarm' : run.mode === 'plan' ? 'Plan mode' : 'Execute mode'),
+    header: h('div', { class: 'grow' }, h('div', { class: 'eyebrow' }, [run.round > 1 ? `Round ${run.round}` : null, run.resumed ? 'Continued swarm' : run.mode === 'plan' ? 'Plan mode' : 'Execute mode'].filter(Boolean).join(' · ')),
       h('div', { class: 'row wrap' }, h('h1', { style: { fontSize: '22px' } }, shorten(run.mission, 110)), statusPill({ label, tone, iconName, live: run.running && tone === 'primary' }),
         h('span', { class: 'badge outline timer', dataset: { start: run.startedAt || '', end: run.finishedAt || '' } }, icon('clock'), elapsed(parseTime(run.startedAt), parseTime(run.finishedAt))))),
     flush: true,
@@ -37,7 +37,8 @@ function viewRun() {
         run.interruption ? h('div', { class: 'banner warning' }, h('span', { class: 'banner-icon' }, icon('wifiOff', 'lg')),
           h('div', { class: 'grow' }, h('h3', {}, 'The swarm lost its connection and is paused'), h('div', { class: 'small' }, 'Everything done so far is saved. Answer the leader on the right: try again, or cancel.'),
             h('ul', { class: 'small', style: { margin: '6px 0 0', paddingLeft: '18px' } }, Object.entries(run.interruption).map(([name, reason]) => h('li', {}, h('b', {}, name), `: ${reason}`))))) : null,
-        !run.running ? resultsCard(run) : null,
+        followUpCard(run),
+        !run.running && run.state !== 'reopened' ? resultsCard(run) : null,
         joiningCard(),
         costCard(),
         h('div', { class: 'card' }, h('div', { class: 'card-head' }, icon('activity'), h('h3', { class: 'grow' }, 'The swarm'), graphLegend()),

@@ -1,6 +1,7 @@
 import threading
 from datetime import datetime
 
+from harness_utils import USER_NAME
 from interface_views import FormError, hasCredentials
 from leader_catalog import LeaderCatalog
 from leader_manager import LeaderManager
@@ -308,6 +309,19 @@ class SessionRuns:
                 self.questions.pop(question["id"])
                 self.release(question, "", shown=False)
             self.jobs.pop("changes", None)
+
+    # The round is over: the user follows up, and the same swarm works on the new request (swarm_rounds.py).
+    def followUp(self, payload):
+        if self.swarm is None or self.isBusy():
+            raise ValueError("There is no finished round to follow up. Wait until the swarm finishes its round.")
+        request = str(payload.get("request") or "").strip()
+        if not request:
+            raise FormError({"request": "Write what the swarm must do now."})
+        if payload.get("mode"):
+            self.setMode(payload)
+        self.swarm.followUp(request, self.mode)
+        self.addFeed(USER_NAME, f"Round {self.swarm.round}: {request}", "info", "answer")
+        self.launch(self.swarm)
 
     def newSwarm(self, payload):
         self.checkIdle()

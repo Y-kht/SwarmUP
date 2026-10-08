@@ -7,7 +7,11 @@
 #   list                      the sessions that run, with their state and their mission
 #   status [session] [--json] where a session stands, without attaching
 #   show session [window]     the latest lines of a window, without attaching
+#   send session text         type a line in a window of a session (window 0 by default), without attaching, for scripts
 #   kill [session] [--all]    close a session (a swarm that runs is saved, and can be continued at the next start)
+#   history [--json]          every mission of the history: running, interrupted, finished (it can be followed up) or stopped
+#   open mission              a new session that continues the mission, or follows it up with a new request
+#   delete mission... [--yes] delete missions of the history, with their memory and their temp folder
 #   run                       the program in this terminal only, without a session (it stops with the terminal)
 # The screen of a session (cli_screen.py) has a window for the swarm and one for each agent (Ctrl-b then ? for the keys).
 #
@@ -47,9 +51,10 @@ from swarm_harness import Swarm
 from cli_console import Console, askUntilValid, askYesNo, chooseFrom, heading, shorten
 from cli_models import chooseModel, labelLocal
 from cli_program import addLive, buildAgent, buildWithLeader, changeModel, chooseBuilder, chooseMode, chooseOrder, runSwarm, startSwarm, unloadModels
-from cli_resume import offerUnfinished
+from cli_resume import followUps, offerUnfinished, openMission
 from cli_steps import askAgentCount, askBudget, askFolder, askMission, chooseAgent, chooseFolders, chooseTask, describeAgent, fillTask
 from cli_view import TreeView, formatEvent, openAgent, renderTree, runCommand
+from mission_history import deleteMission, describeMission, listMissions
 from model_support import ModelError
 from messengers import MessagingError
 from models_library import MODELS_API, MODELS_LOCAL
@@ -59,8 +64,12 @@ from tasks_library import TASKS
 KEEP_ALIVE_SECONDS = 3600
 
 
-def runProgram(console):
+def runProgram(console, missionId=None):
     heading(console, "SwarmUP: build and run a swarm of agents")
+    if missionId:
+        openMission(console, missionId)
+        console.say("\nBye.")
+        return
     if offerUnfinished(console):
         console.say("\nBye.")
         return
@@ -110,6 +119,7 @@ def runProgram(console):
             if "error" in outcome:
                 console.say("Change a model or free some GPU memory, then start again.")
                 continue
+            followUps(console, swarm, models)
             break
     unloadModels(models)
     console.say("\nBye.")
@@ -118,11 +128,11 @@ def runProgram(console):
 # ==============
 # The daemon of a session. It runs the program with the console of the hub, and stays after the program ended, until the user closes it.
 # ==============
-def serve(sessionId):
+def serve(sessionId, missionId=None):
     hub = Hub(sessionId, secrets.token_urlsafe(24))
     server = startServer(hub)
     info = {"id": sessionId, "pid": os.getpid(), "port": server.server_address[1], "token": hub.token, "started": f"{datetime.now():%Y-%m-%d %H:%M:%S}",
-            "folder": os.getcwd(), "log": str(logPath(sessionId))}
+            "folder": os.getcwd(), "log": str(logPath(sessionId)), "opened": missionId}
     writeSession({**info, **hub.describeState()})
     hub.onChange = lambda summary: writeSession({**info, **summary})
     hub.onEnd = lambda: removeSession(sessionId)
@@ -131,7 +141,7 @@ def serve(sessionId):
         signal.signal(signal.SIGHUP, signal.SIG_IGN)
     keepFresh()
     try:
-        runProgram(HubConsole(hub))
+        runProgram(HubConsole(hub), missionId)
     except Exception as error:
         import traceback
         traceback.print_exc()
@@ -172,6 +182,48 @@ def windowName(session, text):
     return names[int(text)] if int(text) < len(names) else text
 
 
+# The mission the user means: its number in the history (1 is the latest), its id, or the start of its id.
+def findMission(text, missions):
+    text = text.strip()
+    if text.isdigit() and 1 <= int(text) <= len(missions):
+        return missions[int(text) - 1]
+    found = [mission for mission in missions if mission["id"].startswith(text)]
+    if len(found) == 1:
+        return found[0]
+    raise ValueError(f"There is no mission {text} in the history. See them with: swarmup_cli.py history")
+
+
+def showHistory(asJson):
+    missions, sessions = listMissions(), listSessions()
+    if asJson:
+        print(json.dumps(missions, ensure_ascii=False, indent=2))
+        return
+    if not missions:
+        print("The history is empty. Start a mission with: swarmup_cli.py new")
+        return
+    for number, mission in enumerate(missions, 1):
+        where = next((f", in session {session['id']}" for session in sessions if mission["id"] in (session.get("missionId"), session.get("opened"))), "")
+        print(f"{number:>3}. {mission['id']}  {describeMission(mission)}{where}\n     {shorten(mission['mission'], 90)}"
+              + (f"\n     latest request: {shorten(mission['latest'], 80)}" if mission["round"] > 1 else ""))
+    print("\nContinue or follow up on one with: swarmup_cli.py open <number>. Delete one with: swarmup_cli.py delete <number>")
+
+
+def deleteMissions(texts, confirmed):
+    missions, sessions = listMissions(), listSessions()
+    chosen = [findMission(text, missions) for text in texts]
+    for mission in chosen:
+        if any(mission["id"] in (session.get("missionId"), session.get("opened")) for session in sessions):
+            raise ValueError(f"The mission {mission['id']} is open in a session. Close that session first (swarmup_cli.py kill).")
+    for mission in chosen:
+        if not confirmed:
+            answer = input(f"Delete the mission \"{shorten(mission['mission'], 60)}\" ({mission['id']}) with its memory and its temp folder? (y/N) ")
+            if answer.strip().lower() not in ("y", "yes"):
+                print("Kept.")
+                continue
+        deleteMission(mission["id"])
+        print(f"Deleted the mission {mission['id']}, its memory and its temp folder. What its agents saved in your folders stays.")
+
+
 def runInTerminal():
     console = Console()
     keepFresh()
@@ -202,12 +254,26 @@ def makeParser():
     show.add_argument("session")
     show.add_argument("window", nargs="?", default=SWARM_WINDOW, help="swarm (the default), the name of an agent, or a window number")
     show.add_argument("--lines", type=int, default=200)
+    send = commands.add_parser("send", help="type a line in a window of a session, without attaching (for scripts)")
+    send.add_argument("session")
+    send.add_argument("text", nargs="+", help="what to type: an answer, a command, or a message")
+    send.add_argument("--window", default=SWARM_WINDOW, help="swarm (the default), the name of an agent, or a window number")
     kill = commands.add_parser("kill", help="close a session (a swarm that runs is saved, and can be continued at the next start)")
     kill.add_argument("session", nargs="?")
     kill.add_argument("--all", action="store_true", help="close every session")
     commands.add_parser("run", help="run SwarmUP in this terminal only, without a session: it stops when the terminal closes")
+    history = commands.add_parser("history", help="every mission of the history, with its state")
+    history.add_argument("--json", action="store_true", help="as JSON, for scripts")
+    opening = commands.add_parser("open", help="a new session that continues a mission of the history, or follows it up with a new request")
+    opening.add_argument("mission", help="its number in the history (1 is the latest), or its id")
+    opening.add_argument("--detached", action="store_true", help="start the session without attaching to it")
+    screenOptions(opening)
+    deleting = commands.add_parser("delete", help="delete missions of the history, with their memory and their temp folder")
+    deleting.add_argument("missions", nargs="+", help="their numbers in the history, or their ids")
+    deleting.add_argument("--yes", action="store_true", help="do not ask for a confirmation")
     serving = commands.add_parser("serve")
     serving.add_argument("--session", required=True)
+    serving.add_argument("--mission")
     return parser
 
 
@@ -218,7 +284,7 @@ def main(arguments=None):
     command = options.command or "new"
     try:
         if command == "serve":
-            serve(options.session)
+            serve(options.session, options.mission)
         elif command == "run":
             runInTerminal()
         elif command == "new":
@@ -226,6 +292,16 @@ def main(arguments=None):
             print(f"Session {info['id']} started. It goes on when this terminal is closed; close it with: swarmup_cli.py kill {info['id']}")
             if not getattr(options, "detached", False):
                 print(attach(info, getattr(options, "plain", False), getattr(options, "prefix", "C-b")))
+        elif command == "history":
+            showHistory(options.json)
+        elif command == "open":
+            mission = findMission(options.mission, listMissions())
+            info = startDaemon(newSessionId(), mission["id"])
+            print(f"Session {info['id']} opened the mission {mission['id']}. Close it with: swarmup_cli.py kill {info['id']}")
+            if not options.detached:
+                print(attach(info, options.plain, options.prefix))
+        elif command == "delete":
+            deleteMissions(options.missions, options.yes)
         elif command == "attach":
             print(attach(findSession(options.session, listSessions()), options.plain, options.prefix))
         elif command in ("list", "ls"):
@@ -237,6 +313,10 @@ def main(arguments=None):
             session = findSession(options.session, listSessions())
             text = request(session, {"type": "capture", "window": windowName(session, options.window), "lines": options.lines}).get("text")
             print(text if text is not None else f"Session {session['id']} has no window {options.window}.")
+        elif command == "send":
+            session = findSession(options.session, listSessions())
+            request(session, {"type": "input", "window": windowName(session, options.window), "text": " ".join(options.text)})
+            print(f"Sent to session {session['id']}.")
         elif command == "kill":
             sessions = listSessions()
             for session in (sessions if options.all else [findSession(options.session, sessions)]):

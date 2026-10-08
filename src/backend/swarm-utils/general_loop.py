@@ -24,6 +24,10 @@ class GeneralLoop(Loop):
         self.prompt = str(prompt or "").strip()
         self.checks = 0
 
+    # The instructions, with the part of the new request of the user in a round after the first.
+    def instructions(self):
+        return f"{self.prompt}\n\nIn this round, the user also asks: {self.roundRequest}" if self.roundRequest else self.prompt
+
     def describeTask(self):
         ended = not self.ruleNames or self.prompt.endswith((".", "!", "?"))
         return (self.prompt if ended else f"{self.prompt}.") + self.describeRules()
@@ -39,14 +43,16 @@ class GeneralLoop(Loop):
         if self.checks >= CHECK_ROUNDS:
             return ""
         self.checks += 1
-        verdict = self.askAgent(prompts.GENERAL_CHECK_PROMPT.format(prompt=self.prompt, rules=self.rules or "None.", draft=draft), own=False, tools=True).strip()
+        verdict = self.askAgent(prompts.GENERAL_CHECK_PROMPT.format(prompt=self.instructions(), rules=self.rules or "None.", draft=draft), own=False, tools=True).strip()
         return "" if verdict.upper().startswith("GOOD") else verdict
 
     def run(self):
         if not self.prompt:
             raise ValueError("This agent has no instructions. Write what it must do.")
         self.checks = 0
-        result = self.reviewLoop(prompts.GENERAL_TASK_PROMPT.format(prompt=self.prompt), self.checkResult, key="result")
+        task = prompts.FOLLOW_UP_TASK_PROMPT.format(request=self.team.currentRequest(), part=self.roundRequest, prompt=self.prompt) if self.roundRequest and self.team else \
+            prompts.GENERAL_TASK_PROMPT.format(prompt=self.instructions())
+        result = self.reviewLoop(task, self.checkResult, key="result")
         if result is None:
             if self.rollback():
                 self.notifyUser("The result was not approved, so every file the agent changed is back to how it was.")

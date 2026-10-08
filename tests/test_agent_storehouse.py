@@ -14,8 +14,9 @@ sys.path[:0] = [str(folder) for folder in sorted((Path(__file__).resolve().paren
 import agent_prompts as prompts
 import agent_storehouse
 import harness_utils
-from agent_storehouse import (WorkSession, agentWorkspace, describeTree, findFiles, findRequests, folderProblem, makeRunName, pruneSessions, readFile, resultsFolder,
-                              searchFiles)
+import mission_memory
+from agent_storehouse import agentWorkspace, describeTree, findFiles, findRequests, folderProblem, makeRunName, readFile, resultsFolder, searchFiles
+from mission_memory import WorkSession, pruneSessions
 from base_loop import Loop
 from saved_swarms import saveSwarmState
 from swarm_harness import Swarm
@@ -227,7 +228,7 @@ class LoopTests(StorehouseTestCase):
         loop = self.script(Loop(agent))
         loop.name, loop.session = "Writer", WorkSession("swarm1", "run")
         self.assertEqual(loop.askAgent("Task"), "Draft one")
-        self.assertIn("None yet.", agent.prompts[0])
+        self.assertNotIn("The user prefers short texts.", agent.prompts[0])
         self.assertEqual(loop.askAgent("Task again"), "Draft two")
         self.assertIn("The user prefers short texts.", agent.prompts[1])
         self.assertIn("The user prefers short texts.", WorkSession("swarm1", "run").readNotes("Writer"))
@@ -246,23 +247,26 @@ class StoreTests(StorehouseTestCase):
         loop.setFolder(None)
         self.assertEqual(loop.saveResult("text", "Hi").read_text(encoding="utf-8"), "Hi")
 
-    def testOldSessionsGoUnlessTheirSwarmCanStillBeContinued(self):
-        old = time.time() - (agent_storehouse.SESSION_DAYS + 1) * 24 * 3600
+    # A mission stays as long as its saved state (the history). What is left of one without a saved state goes after SESSION_DAYS.
+    def testWhatIsLeftOfAMissionWithoutItsSavedStateGoes(self):
+        old = time.time() - (mission_memory.SESSION_DAYS + 1) * 24 * 3600
         for name in ("old", "continued", "recent"):
             WorkSession(name, "run").addNotes("Writer", ["note"])
         saveSwarmState("continued", {"id": "continued"})
         for name in ("old", "continued"):
-            for path in [agent_storehouse.sessionsFolder() / name, *(agent_storehouse.sessionsFolder() / name).rglob("*")]:
-                os.utime(path, (old, old))
+            for folder in (mission_memory.missionFolder(name), mission_memory.tempFolder(name)):
+                for path in [folder, *folder.rglob("*")]:
+                    os.utime(path, (old, old))
         pruneSessions()
-        self.assertEqual(sorted(path.name for path in agent_storehouse.sessionsFolder().iterdir()), ["continued", "recent"])
+        for folder in (mission_memory.missionFolder("x").parent, mission_memory.tempFolder("x").parent):
+            self.assertEqual(sorted(path.name for path in folder.iterdir()), ["continued", "recent"])
 
     def testACodingAgentWithoutAFolderWorksInItsSession(self):
         loop = Loop(FakeAgent())
         loop.name = "Coder"
         self.assertEqual(agentWorkspace(loop), self.files / "agent-files" / "agent-workspaces" / "Coder")
         loop.session = WorkSession("swarm1", "run")
-        self.assertEqual(agentWorkspace(loop), self.files / "agent-files" / "sessions" / "swarm1" / "workspace" / "Coder")
+        self.assertEqual(agentWorkspace(loop), self.files / "agent-files" / "mission-specific-memory" / "swarm1" / ".swarmup" / "workspace" / "Coder")
         loop.setFolder(self.work)
         self.assertEqual(agentWorkspace(loop), self.work)
 
@@ -275,7 +279,7 @@ class StoreTests(StorehouseTestCase):
         self.assertTrue(swarm.runName.endswith("_bees-mission"))
         self.assertEqual((self.work / "swarmup-results" / swarm.runName / "Leader_note.md").read_text(encoding="utf-8"), "saved")
         self.assertIsNone(loop.session)
-        self.assertTrue((agent_storehouse.sessionsFolder() / swarm.id).is_dir())
+        self.assertTrue(mission_memory.missionFolder(swarm.id).is_dir())
         state = {**swarm.describeState(), "runName": "kept"}
         again = Swarm.restore(state, lambda name, data: SavingLoop(FakeAgent()))
         self.assertEqual(again.runName, "kept")
@@ -284,7 +288,7 @@ class StoreTests(StorehouseTestCase):
         again.run()
         self.assertNotEqual(again.runName, "kept")
         again.abandon()
-        self.assertFalse((agent_storehouse.sessionsFolder() / swarm.id).exists())
+        self.assertTrue(mission_memory.missionFolder(swarm.id).is_dir())
 
 
 if __name__ == "__main__":

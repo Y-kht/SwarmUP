@@ -18,12 +18,13 @@ const EXAMPLES = [
 ];
 const LONG_TEXT = ['request', 'task', 'topics', 'style'];
 const NODE = { width: 206, height: 118, gapX: 76, gapY: 20, pad: 16, user: 120 };
-const store = { catalog: null, state: null, feed: [], feedAfter: 0, version: -1, online: true, jobs: {} };
+// tab is the mission this page shows (several can be open, see missions.js), and pollAbort stops the poll of the tab it leaves.
+const store = { catalog: null, state: null, feed: [], feedAfter: 0, version: -1, online: true, jobs: {}, tab: null, pollAbort: null };
 const ui = {
   view: 'home', modal: null, stack: [], selected: null, busy: {}, errors: {}, expanded: {}, visited: new Set(), feedFilter: 'all',
   missionDraft: null, folderDrafts: {}, waitsDraft: null, orderChoice: null, mode: null, resume: null, particles: [], seenFeed: 0,
   composer: {}, corrections: {}, messages: {}, renderedOnce: false, animate: true, forms: {}, codex: { loading: false, data: null }, budgetDraft: null, costsOpen: false,
-  promptDrafts: {}, ruleDrafts: {}, specialisedOpen: false, swarmFolderDraft: null, ownFolders: null,
+  promptDrafts: {}, ruleDrafts: {}, specialisedOpen: false, swarmFolderDraft: null, ownFolders: null, followUp: null, afterSwitch: false,
 };
 let pointerDown = false, renderPending = false;
 
@@ -232,10 +233,14 @@ class ApiError extends Error {
   }
 }
 
+function apiHeaders(extra = {}) {
+  return { ...extra, 'X-SwarmUP-Token': TOKEN, ...(store.tab ? { 'X-SwarmUP-Tab': store.tab } : {}) };
+}
+
 async function api(action, payload = {}) {
   let response;
   try {
-    response = await fetch(`/api/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-SwarmUP-Token': TOKEN }, body: JSON.stringify(payload) });
+    response = await fetch(`/api/${action}`, { method: 'POST', headers: apiHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(payload) });
   } catch (error) {
     throw new ApiError('SwarmUP does not answer. Is the program still running?');
   }
@@ -271,16 +276,21 @@ async function act(action, payload = {}, options = {}) {
   }
 }
 
+// A poll waits for news of its tab. When the user goes to another tab, the poll is stopped and starts again for the new one.
 async function pollLoop() {
   while (true) {
+    const controller = store.pollAbort = new AbortController();
+    const tab = store.tab;
     try {
-      const response = await fetch(`/api/poll?version=${store.version}&feed=${store.feedAfter}`, { headers: { 'X-SwarmUP-Token': TOKEN } });
+      const response = await fetch(`/api/poll?version=${store.version}&feed=${store.feedAfter}`, { headers: apiHeaders(), signal: controller.signal });
       if (!response.ok) throw new Error('poll failed');
       const data = await response.json();
       setOnline(true);
+      if (tab !== store.tab) continue;
       addFeed(data.feed);
       applyState(data.state);
     } catch (error) {
+      if (controller.signal.aborted) continue;
       setOnline(false);
       await sleep(1500);
     }
@@ -306,7 +316,11 @@ function addFeed(items) {
 
 // A new state: the jobs that ended are announced, and the page is drawn again.
 function applyState(state) {
-  if (store.state && state.version < store.state.version) return;
+  // The state of another tab (an answer that arrives after the user left it) is not drawn. A tab that was closed elsewhere gives way to the one shown.
+  if (store.tab && state.tab !== store.tab && (state.tabs || []).some(tab => tab.tab === store.tab)) return;
+  if (store.tab !== state.tab) { store.tab = state.tab; store.feed = []; store.feedAfter = 0; }
+  if (store.state && store.state.tab === state.tab && state.version < store.state.version) return;
+  if (ui.afterSwitch) { ui.afterSwitch = false; ui.view = state.run ? 'run' : state.mission ? 'mission' : 'home'; }
   const before = store.jobs;
   const signingIn = store.state?.codexLogin?.state === 'waiting';
   store.state = state;

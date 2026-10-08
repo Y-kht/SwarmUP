@@ -13,6 +13,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 # The modules of SwarmUP are in the folders of src/backend. Their names have hyphens, so they are not packages: each folder goes on the path.
 sys.path[:0] = [str(folder) for folder in sorted((Path(__file__).resolve().parent.parent / "src" / "backend").iterdir()) if folder.is_dir() and not folder.name.startswith(("_", "."))]
+import agent_prompts as prompts
 import coding_agents
 import harness_utils
 import interface_views
@@ -22,6 +23,7 @@ import model_clients
 import model_support
 import saved_swarms
 import session_core
+import session_desk
 import session_models
 import user_interface as gui
 import web_server
@@ -58,6 +60,8 @@ class Model:
     def input(self, prompt):
         self.prompts.append(prompt)
         self.usage["calls"] += 1
+        # The memory of the mission comes before the request, and the fake only reads the request.
+        prompt = prompt.split(prompts.NOTES_PROMPT)[-1]
         names = re.findall(r"^- ([A-Za-z][\w.-]*) \(", prompt, re.M)
         if "summary" in prompt.lower() and names:
             return "Where the team stands: " + ", ".join(names) + "."
@@ -446,7 +450,7 @@ class RunTests(SessionTestCase):
         later.act("answer", {"id": question["id"], "answer": "yes"})
         waitUntil(lambda: not later.swarm.isRunning() and later.runInfo.get("finishedAt"), "the end of the continued run")
         self.assertEqual(later.describe()["run"]["state"], "succeeded")
-        self.assertEqual(list((self.folder / saved_swarms.RUNS_FOLDER).glob("swarm_*.json")), [])
+        self.assertEqual(saved_swarms.findUnfinishedSwarms(), [])
 
 
 # A pretend coding agent: before its plan it asks for a permission and asks a question, through the same helpers as Claude Code and Codex.
@@ -805,6 +809,85 @@ class WindowTests(unittest.TestCase):
     def testWithoutPywebviewTheWindowOfABrowserIsLookedFor(self):
         with everywhere(interface_views.shutil, "which", side_effect=lambda name: "/usr/bin/chromium" if name == "chromium" else None):
             self.assertEqual(gui.findAppBrowser(), "/usr/bin/chromium")
+
+
+# The desk of the window: several missions at once, each in a tab, with the history of the missions.
+class DeskTests(SessionTestCase):
+    def setUp(self):
+        super().setUp()
+        self.desk = session_desk.Desk()
+        self.addCleanup(lambda: [settle(session) for session in list(self.desk.tabs.values())])
+
+    def actIn(self, tab, action, **payload):
+        return self.desk.act(action, payload, tab)
+
+    def build(self, tab, mission):
+        self.actIn(tab, "setMission", mission=mission)
+        agent = self.actIn(tab, "saveAgent", task="author", values={"subject": "bees", "length": "200"}, name="")["agentId"]
+        self.actIn(tab, "chooseModel", agentId=agent, name="claude-sonnet-5-5", local=False, apiKey="sk-test")
+
+    def answer(self, tab):
+        session = self.desk.session(tab)
+        waitUntil(lambda: any(question["kind"] == "review" for question in session.questions.values()), f"the question of {tab}")
+        question = next(question for question in session.questions.values() if question["kind"] == "review")
+        self.actIn(tab, "answer", id=question["id"], answer="yes")
+
+    def finish(self, tab):
+        session = self.desk.session(tab)
+        self.answer(tab)
+        waitUntil(lambda: session.swarm and not session.swarm.isRunning() and session.runInfo.get("finishedAt"), f"the end of {tab}")
+
+    def testTwoMissionsRunAtTheSameTimeInTheirTabs(self):
+        first = self.desk.describe()["tab"]
+        second = self.desk.act("newTab", {})["tab"]
+        self.build(first, "Write about bees.")
+        self.build(second, "Write about honey.")
+        self.assertEqual(self.desk.keys, {"claude": "sk-test"})
+        self.actIn(first, "start", mode="execute")
+        self.actIn(second, "start", mode="execute")
+        for tab in (first, second):
+            session = self.desk.session(tab)
+            waitUntil(lambda: any(question["kind"] == "review" for question in session.questions.values()), "both questions")
+        state = self.desk.describe(first)
+        self.assertEqual((state["tab"], state["mission"]), (first, "Write about bees."))
+        self.assertEqual({tab["title"]: tab["state"] for tab in state["tabs"]}, {"Write about bees.": "waiting", "Write about honey.": "waiting"})
+        with self.assertRaisesRegex(ValueError, "Stop it first"):
+            self.desk.act("closeTab", {"tab": second})
+        self.finish(first)
+        self.finish(second)
+        history = self.desk.describe(first)["history"]
+        self.assertEqual(sorted((mission["mission"], mission["state"]) for mission in history), [("Write about bees.", "finished"), ("Write about honey.", "finished")])
+        self.assertEqual({tab["state"] for tab in self.desk.describe()["tabs"]}, {"finished"})
+
+    # A round that is over is followed up in its tab. Later, the mission is opened again from the history in a new tab, and deleted.
+    def testAMissionIsFollowedUpReopenedAndDeleted(self):
+        tab = self.desk.describe()["tab"]
+        self.build(tab, "Write about bees.")
+        self.actIn(tab, "start", mode="execute")
+        self.finish(tab)
+        self.assertTrue(self.desk.describe(tab)["run"]["canFollowUp"])
+        with self.assertRaises(interface_views.FormError):
+            self.actIn(tab, "followUp", request=" ")
+        self.actIn(tab, "followUp", request="Now about wasps.", mode="execute")
+        self.finish(tab)
+        run = self.desk.describe(tab)["run"]
+        self.assertEqual((run["round"], run["requests"][-1]["text"]), (2, "Now about wasps."))
+        missionId = run["missionId"]
+        self.desk.act("closeTab", {"tab": tab})
+        opened = self.desk.act("openMission", {"id": missionId})
+        self.assertTrue(opened["resume"]["followUp"])
+        again = opened["tab"]
+        self.assertEqual(self.desk.act("openMission", {"id": missionId})["tab"], again)
+        self.actIn(again, "resume", id=missionId, keys={"claude": "sk-test"})
+        state = self.desk.describe(again)
+        self.assertEqual((state["run"]["state"], state["run"]["round"]), ("reopened", 2))
+        self.assertTrue(any("Round 2: Now about wasps." in item["text"] for item in self.desk.session(again).feed))
+        self.actIn(again, "followUp", request="And about ants.", mode="execute")
+        self.finish(again)
+        self.assertEqual(self.desk.describe(again)["run"]["round"], 3)
+        self.desk.act("deleteMission", {"id": missionId})
+        self.assertEqual(self.desk.describe()["history"], [])
+        self.assertNotIn(again, self.desk.tabs)
 
 
 if __name__ == "__main__":

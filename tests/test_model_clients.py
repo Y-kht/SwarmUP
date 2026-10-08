@@ -346,10 +346,29 @@ class Batch(dict):
         return self
 
 
+class Finite:
+    def __init__(self, value):
+        self.value = value
+
+    def all(self):
+        return self.value
+
+
+class Maximum:
+    def __init__(self, value):
+        self.value = value
+
+    def max(self):
+        return self.value
+
+    def __float__(self):
+        return float(self.value)
+
+
 # Pretend torch, transformers, accelerate and bitsandbytes, so the logic of LocalModel is tested without a GPU or a download.
 # The names of their functions (is_available, from_pretrained, apply_chat_template...) are the ones of the real libraries.
 class FakeLibraries:
-    def __init__(self, cuda=True, answer="<think>hmm</think> The answer.", causalFails=False):
+    def __init__(self, cuda=True, answer="<think>hmm</think> The answer.", causalFails=False, placement=None, free=(20e9,), logits=1.0):
         self.calls = {"loaded": [], "template": [], "generate": [], "tokenizers": [], "cache": 0}
         calls = self.calls
         class Cuda:
@@ -360,6 +379,14 @@ class FakeLibraries:
             @staticmethod
             def empty_cache():
                 calls["cache"] += 1
+
+            @staticmethod
+            def device_count():
+                return len(free)
+
+            @staticmethod
+            def mem_get_info(index):
+                return free[index], 25e9
         class NoGrad:
             def __enter__(self):
                 return self
@@ -372,6 +399,9 @@ class FakeLibraries:
                 calls["tokenizers"].append((name, token))
                 return cls()
 
+            def __call__(self, text, return_tensors=None):
+                return Batch(input_ids=Ids(range(2)))
+
             def apply_chat_template(self, messages, **options):
                 calls["template"].append((messages, options))
                 return Batch(input_ids=Ids(range(5)))
@@ -379,8 +409,18 @@ class FakeLibraries:
             def decode(self, ids, skip_special_tokens):
                 calls["decoded"] = (list(ids), skip_special_tokens)
                 return answer
+        class Logits:
+            def float(self):
+                return self
+        class Forward:
+            logits = Logits()
         class Model:
             device = "cuda:0"
+            hf_device_map = placement or {"": 0}
+
+            def __call__(self, **inputs):
+                calls["checked"] = calls.get("checked", 0) + 1
+                return Forward()
 
             def generate(self, **inputs):
                 calls["generate"].append(inputs)
@@ -397,7 +437,9 @@ class FakeLibraries:
         class Config:
             def __init__(self, **options):
                 self.options = options
-        self.torch = type("torch", (), {"cuda": Cuda, "no_grad": staticmethod(NoGrad), "bfloat16": "bf16"})
+        self.torch = type("torch", (), {"cuda": Cuda, "no_grad": staticmethod(NoGrad), "bfloat16": "bf16", "isfinite": staticmethod(lambda value: Finite(logits == logits)),
+                                        })
+        Logits.abs = lambda self: Maximum(abs(logits))
         self.transformers = type("transformers", (), {"AutoTokenizer": Tokenizer, "AutoModelForCausalLM": loader("causal"),
                                                       "AutoModelForImageTextToText": loader("image"), "BitsAndBytesConfig": Config})
 
@@ -410,6 +452,49 @@ class LocalModelTests(unittest.TestCase):
         patcher = everywhere(model_clients, "isOnline", lambda: True)
         patcher.start()
         self.addCleanup(patcher.stop)
+
+    # Other jobs filled the GPUs, and the loader put a part of the model on the processor: it is refused, and its memory freed.
+    def testAModelThatWouldRunPartlyOnTheProcessorIsRefused(self):
+        libraries = FakeLibraries(placement={"model.layers.0": 0, "model.layers.1": "cpu"})
+        model = LocalModel("Qwen/Qwen3-8B")
+        with libraries.patch(), self.assertRaisesRegex(ModelError, "does not fit in the memory of the GPUs that is free now"):
+            model.input("x")
+        self.assertIsNone(model.model)
+        self.assertEqual(libraries.calls["cache"], 1)
+
+    # A model that fits in the GPU with the most free memory is put whole there, instead of being spread over the GPUs.
+    def testAModelGoesWholeOnTheGpuThatHasRoomForIt(self):
+        libraries = FakeLibraries(free=(5e9, 21e9, 12e9))
+        with libraries.patch():
+            LocalModel("Qwen/Qwen3-8B", vram=19.7).input("x")
+            LocalModel("Qwen/Qwen3-32B", vram=80.0).input("x")
+        self.assertEqual([options["device_map"] for kind, name, options in libraries.calls["loaded"]], [{"": 1}, "auto"])
+        self.assertNotIn("checked", libraries.calls)
+
+    # Spread over GPUs that do not pass data to each other, a model computes only zeros: it is refused at once.
+    def testAModelSpreadOverGpusThatComputeZerosIsRefused(self):
+        libraries = FakeLibraries(placement={"model.layers.0": 0, "model.layers.1": 1}, logits=0.0)
+        model = LocalModel("Qwen/Qwen3-8B")
+        with libraries.patch(), self.assertRaisesRegex(ModelError, "do not pass data to each other correctly"):
+            model.input("x")
+        self.assertIsNone(model.model)
+        good = FakeLibraries(placement={"model.layers.0": 0, "model.layers.1": 1})
+        with good.patch():
+            self.assertEqual(LocalModel("Qwen/Qwen3-8B").input("x"), "The answer.")
+        self.assertEqual(good.calls["checked"], 1)
+
+    # An error of CUDA breaks the GPU until the program restarts: the user is told so, and unloading the model afterwards does not fail.
+    def testABrokenGpuIsToldAndUnloadingStillWorks(self):
+        libraries = FakeLibraries()
+        model = LocalModel("Qwen/Qwen3-8B")
+        with libraries.patch():
+            model.input("x")
+            with everywhere(model.model, "generate", side_effect=RuntimeError("CUDA error: device-side assert triggered")):
+                with self.assertRaisesRegex(ModelError, "cannot be used again before it restarts"):
+                    model.input("x")
+            with everywhere(libraries.torch.cuda, "empty_cache", side_effect=RuntimeError("CUDA error: device-side assert triggered")):
+                model.unload()
+        self.assertIsNone(model.model)
 
     def testADownloadThatFailsBecauseTheInternetIsGoneIsALostConnection(self):
         libraries = FakeLibraries()
