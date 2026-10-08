@@ -36,6 +36,7 @@ Some tools, such as email, can also need credentials. You give your own credenti
     - The clients of the models (`model_clients.py`), with their shared parts in `model_support.py`.
     - The coding agents: `coding_agents.py` for Claude Code and `codex_agent.py` for Codex.
   - `src/backend/task-utils/`: the tasks and their questions (`tasks_library.py`), and the lists that you select from (`sources_library.py`).
+  - `src/backend/cli-tool/`: the command line. `swarmup_cli.py` has the commands and the program. The questions are in `cli_console.py`, `cli_steps.py` (tasks and folders), `cli_models.py` and `cli_program.py` (the swarm and its run), and `cli_resume.py` continues an interrupted swarm. `cli_view.py` shows the swarm and runs the commands of the user. A session is made of `cli_sessions.py` (start, list and close), `cli_hub.py` (the daemon: its windows and its connections) and `cli_screen.py` (the windows in the terminal).
   - `src/user-interface/`: the pages of the interface (HTML, CSS, JavaScript and SVG icons). `index.html` loads the scripts in sequence, from `page_tools.js` to `app.js`. It loads the styles from `style.css` and `views.css`.
   - The names of the folders in `src/backend/` have hyphens, so these folders are not Python packages. Thus, the programs and the tests add each folder to the Python path.
 - **`tests/`**: One test file for each part. `patching.py` has `everywhere`. For a test, this function replaces a function in all the modules that come from the same original file.
@@ -212,21 +213,46 @@ If the leader built the swarm, its proposals show in the conversation, with thei
 - The interface accepts connections only from your own computer (127.0.0.1), and only the window that it opened can use it. SwarmUP never sends passwords, keys or tokens back to the window, and never writes them to a file.
 - When you close the window, the program stops. If a swarm runs, SwarmUP saves it first, so you can continue it at the next start.
 
-## Try it in the command line
+## Use the command line
+
+SwarmUP also works in a terminal, as the window does. A swarm runs in a **session**: a program in the background that goes on when you close the terminal. You come back to it from any terminal, and you close it when you want.
 
 ```bash
-python tests/full_command_line_user_test.py
+python src/backend/cli-tool/swarmup_cli.py            # start a session and attach to it (the same as: new)
+python src/backend/cli-tool/swarmup_cli.py list       # the sessions that run, and if one waits for you
+python src/backend/cli-tool/swarmup_cli.py attach s1  # come back to session s1 (without a name: the latest session)
+python src/backend/cli-tool/swarmup_cli.py kill s1    # close session s1 (--all closes them all)
 ```
 
-`python tests/full_command_line_user_test.py` lets you build and run a swarm. You answer questions that guide you:
+| Command | What it does |
+|---|---|
+| `new [--detached]` | Starts a session and attaches to it. With `--detached`, it only starts it. |
+| `attach [session]` | Attaches to a session: `s1`, `1`, or the latest one. |
+| `list` (or `ls`) | Lists the sessions, with their state (building, running, waiting for you, finished), their agents and their mission. |
+| `status [session] [--json]` | Shows where a session stands (the tree, the cost, the question that waits), without attaching. |
+| `show session [window] [--lines N]` | Shows the latest lines of a window, without attaching. |
+| `kill [session] [--all]` | Closes a session. A swarm that runs is saved, and the next start offers to continue it. |
+| `run` | Runs SwarmUP in this terminal only, without a session. It stops when the terminal closes. |
+
+`new` and `attach` accept `--plain` (lines instead of windows) and `--prefix C-a` (another prefix key, for example inside tmux).
+
+**The windows.** A session works like tmux. Window 0 is the swarm: its tree at the top, everything that happens below, and every question for you. Each agent has its own window: its state at the top, then what it does with its tools, what it says, its messages, its draft when it waits for you, and its result. The status bar at the bottom lists the windows: `*` is the window on the screen, `!` a window whose question waits for you, `+` a window with something new, and `-` an agent that left. It also shows the cost and the state of the swarm.
+
+- Press the prefix (`Ctrl-b`), then `0` to `9` (a window), `n` or `p` (the next or the previous window), `w` (choose from a list), `'` (a window by its name), `d` (detach: the session goes on), `x` (close the session) or `?` (help).
+- `PgUp` and `PgDn` scroll, `Up` and `Down` bring back what you typed, and `Esc` clears the line. You can also type `:w 2`, `:next`, `:prev`, `:detach`, `:kill` or `:help`.
+- In window 0 you answer the questions and type the commands of the swarm (`help` lists them). In the window of an agent, what you type is about that agent: `approve`, `reject`, `correct <what to change>`, `start`, `remove <why>`, or any other text, which is sent to it as a message. A question is answered in its window or in window 0.
+- `stop` stops the swarm for good: the leader first lists what the swarm already did, and you confirm. `quit` (or `kill`) closes the session and saves the swarm, so you can continue it later.
+- A session stays open after its swarm is finished, so you can read the results. Close it with `Ctrl-b x` or `kill`.
+- Each session has its files in `agent-files/cli-sessions/`: the address of the session (only you can read it) and its log. A session only accepts connections from your computer, with its own key. The folder `agent-files` can be moved with the `SWARMUP_HOME` environment variable.
+- The windows need curses. It is part of Python on Linux and macOS. On Windows, install it with `pip install windows-curses`, or use `--plain`.
+
+The questions of a session guide you as the window does:
 
 - who builds the swarm: you, or the leader, whose proposal you approve,
 - how many agents the swarm has,
-- the task of each agent (email, writing, coding, math checking, literature review, news briefing...) and what it needs to work,
+- the task of each agent (email, writing, coding, math checking, literature review, news briefing, any work in a folder...) and what it needs to work,
 - the folder of each agent,
 - the model of each agent: a local model on your GPUs (with the VRAM that it needs and a check of your GPUs), a paid model through an API (with the prices), or a coding agent (Claude Code or Codex, which ask you before they act).
-
-Then the program shows the tree of the swarm live, while the agents plan or execute. At any time, you can approve or correct each agent, or send it a message. You can also add an agent (`add`) or remove one (`remove <agent> <why>`). Type `help` to see all the commands.
 
 - SwarmUP does nothing before you approve it. It sends emails, books events and writes files only after you approve the exact result.
 - If the connection stops, the swarm pauses and asks you to type `continue` or `cancel`. If the program or the computer stops, start the program again. It lets you continue the swarm that was interrupted, or cancel it after a summary of what it did.

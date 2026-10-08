@@ -14,7 +14,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 # The modules of SwarmUP are in the folders of src/backend. Their names have hyphens, so they are not packages: each folder goes on the path.
 sys.path[:0] = [str(folder) for folder in sorted((Path(__file__).resolve().parent.parent / "src" / "backend").iterdir()) if folder.is_dir() and not folder.name.startswith(("_", "."))]
-import full_command_line_user_test as cli
+import swarmup_cli as cli
 import harness_utils
 from base_loop import Loop
 from harness_utils import ConnectionLost
@@ -424,6 +424,19 @@ class CommandTests(SwarmTestCase):
         self.assertIn("Write the name of an agent after msg.", self.run_(swarm, "msg Nobody hello"))
         self.assertIn("Write what you want to say after msg Writer.", self.run_(swarm, "msg Writer"))
         self.assertIn("Write what you want to say after correct Writer.", self.run_(swarm, "correct Writer"))
+
+    def testStopEndsTheSwarmOnlyAfterTheLeaderSaidWhatItDid(self):
+        swarm = self.makeSwarm()
+        for answer, stops in (("no", False), ("yes", True)):
+            script, done = Script([answer]), threading.Event()
+            with mock.patch.object(swarm, "summarizeChanges", return_value="Nothing was sent yet."), mock.patch.object(swarm, "stopWork") as stopWork:
+                console = script.console()
+                console.say = lambda text="", window=None, said=script.said: said.append(text) or (done.set() if text.startswith("The swarm") else None)
+                cli.runCommand(console, swarm, "stop")
+                self.assertTrue(done.wait(5))
+            self.assertIn("Nothing was sent yet.", script.text())
+            self.assertEqual(stopWork.called, stops)
+            self.assertIn("The swarm is stopped." if stops else "The swarm goes on.", script.text())
 
     def testQuitLeavesTheProgram(self):
         swarm = self.makeSwarm()

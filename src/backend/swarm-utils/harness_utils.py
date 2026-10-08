@@ -1,6 +1,7 @@
 import html
 import http.client
 import json
+import os
 import re
 import smtplib
 import socket
@@ -20,9 +21,10 @@ from pathlib import Path
 # This module has the tools every part needs. The loops are in base_loop.py, message_loops.py, writing_loops.py and checking_loops.py,
 # the swarm in swarm_harness.py, and the information of the internet, the costs, the GPUs and the messaging apps in their own modules.
 
-# The folder of the project, three folders above this file (src/backend/swarm-utils).
+# The folder of the project, three folders above this file (src/backend/swarm-utils). The files of the agents are in agent-files, or in the
+# folder of the SWARMUP_HOME environment variable (for a packaged command, or a test).
 PROJECT_FOLDER = Path(__file__).resolve().parents[3]
-AGENT_FILES = PROJECT_FOLDER / "agent-files"
+AGENT_FILES = Path(os.environ["SWARMUP_HOME"]).expanduser() if os.environ.get("SWARMUP_HOME") else PROJECT_FOLDER / "agent-files"
 AGENT_RULES = PROJECT_FOLDER / "agent-rules"
 MAX_CONTEXT_ITEMS = 5
 

@@ -10,6 +10,7 @@ FAMILIES = {
     "harness_utils": ["harness_utils", "message_loops", "writing_loops", "checking_loops", "base_loop", "swarm_review", "internet_cache", "gpu_check", "messengers", "saved_swarms", "swarm_run", "swarm_harness", "mission_costs", "user_settings", "swarm_team"],
     "leader_utils": ["leader_utils", "leader_manager", "leader_parser", "leader_catalog", "leader_checks"],
     "user_interface": ["user_interface", "web_server", "session_core", "interface_views", "session_models", "session_saved", "session_steps", "session_runs"],
+    "swarmup_cli": ["swarmup_cli", "cli_console", "cli_view", "cli_steps", "cli_models", "cli_program", "cli_resume", "cli_hub", "cli_screen", "cli_sessions"],
 }
 MISSING = object()
 

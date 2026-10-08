@@ -1,7 +1,7 @@
 # The graphical interface of SwarmUP. Run it with: python src/backend/interface/user_interface.py
 # It is a small web server that only listens to this computer (127.0.0.1) and opens the interface in the web browser, so it works the same
 # on Windows, macOS and Linux, with nothing to install. The pages are in the folder user-interface (index.html, style.css, icons.js, app.js).
-# The interface follows the steps of tests/full_command_line_user_test.py with clicks, from the same functions of tasks_library.py,
+# The interface follows the steps of the command line (src/backend/cli-tool/swarmup_cli.py) with clicks, from the same functions of tasks_library.py,
 # models_library.py and the modules of swarm-utils: the mission, the task of each agent, its folder, its model, who waits for whom, and the run of
 # the swarm, which is followed live. The user can also let the leader build the swarm (leader_utils.py): the user chooses the model of the
 # leader and the folder of the mission, the leader proposes the agents, and the user approves. The agents speak to the user through the
