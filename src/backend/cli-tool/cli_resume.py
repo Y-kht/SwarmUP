@@ -3,7 +3,7 @@
 # right after the round, or later from the history (swarmup_cli.py open).
 from base_loop import Loop
 from cli_console import askUntilValid, chooseFrom, heading, shorten
-from cli_models import prepareApi, prepareLocal, signInCodex
+from cli_models import UserLeader, prepareApi, prepareLocal, signInCodex
 from cli_program import ConsoleMaker, addLive, chooseMode, connect, startSwarm, unloadModels
 from cli_steps import askAccounts, askField
 from cli_view import renderTree, watchCosts
@@ -26,7 +26,9 @@ def describeInterrupted(saved):
 
 
 # The model of an agent of a swarm that is brought back. The API keys and the Hugging Face tokens are never saved, so they are asked again.
-def rebuildModel(console, info, keys, tokens):
+def rebuildModel(console, info, keys, tokens, name="Leader"):
+    if info.get("user"):
+        return UserLeader(console, name)
     if info.get("cli") == "codex":
         if not signInCodex(console):
             raise ModelError("Codex is not signed in, so this agent cannot continue.")
@@ -46,7 +48,7 @@ def rebuildAgent(console, name, data, keys, tokens, models, specs=None):
         secrets[field["key"]] = askField(console, field, recipe["answers"])
     if task == "literature":
         secrets["accounts"] = askAccounts(console)
-    models[name] = rebuildModel(console, data["model"], keys, tokens) if data["model"] else None
+    models[name] = rebuildModel(console, data["model"], keys, tokens, name) if data["model"] else None
     answers = restoreAnswers(task, recipe["answers"], secrets)
     loop = buildLoop(task, models[name], answers)
     connect(loop, console)
@@ -139,7 +141,7 @@ def openMission(console, missionId):
 
 # The leader writes the summary with its model if that can be made again (an API key is asked for it, and can be skipped).
 def makeLeaderModel(console, info, keys, tokens):
-    if not info:
+    if not info or info.get("user"):
         return None
     if info.get("cli") == "codex":
         try:

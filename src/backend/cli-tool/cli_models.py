@@ -15,6 +15,26 @@ from models_library import API_KEYS, DEFAULT_CLI_MODEL, MODELS_API, MODELS_CLI, 
 from tasks_library import getTask, parseAnswer, parseChoices
 
 
+# The user can lead the swarm instead of a model: a person at the terminal, or an AI agent that drives this command line (swarmup_cli.py send).
+# What the swarm asks the model of the leader (its own task, which agents a follow-up concerns, what to keep in the long-term memory) is asked to
+# the user in the window of the leader, and the answer is the answer of the leader. The leader does not check or approve its own drafts.
+USER_LEADER = {"name": "you", "local": False, "provider": None, "billions": None, "bits": None, "vram": 0.0, "cli": None, "user": True}
+
+
+class UserLeader:
+    isUser = True
+
+    def __init__(self, console, name):
+        self.console, self.name, self.usage = console, name, {"calls": 0, "input": 0, "output": 0}
+
+    # One line answers; \n in it starts a new line, so a long answer (a report, JSON, memory blocks) fits in one line.
+    def input(self, prompt):
+        self.usage["calls"] += 1
+        self.console.say(f"\n=== You lead the swarm. SwarmUP asks you what it would ask the model of the leader: ===\n{prompt}\n"
+                         "=== Answer in one line (write \\n for a new line). ===", window=self.name)
+        return self.console.ask("Your answer, as the leader:", window=self.name).replace("\\n", "\n")
+
+
 SHOW_ALL, MANUAL, BACK = "Show all the models of the library", "Type the name of another model myself", "Go back"
 
 
@@ -185,16 +205,21 @@ def chooseApiModel(console, swarm, task, replacing=None):
         return getModelInfo(recommended[labels.index(picked)])
 
 
-def chooseKind(console, swarm, number, replacing=None):
+def chooseKind(console, swarm, number, replacing=None, leader=False):
     status = checkVram(swarm.getNeededVram(replacing), readGpus())
     local = f"Local: runs on your GPUs ({status['total']} GB of VRAM, {status['free']} GB free now). Free to use and private, but the model must fit in the VRAM." if status["gpus"] \
         else "Local: runs on your GPUs. No supported GPU was found on this computer, so it is not possible."
     api = "API: runs on the servers of a company (OpenAI, Anthropic, Google, DeepSeek). You pay for every use, and you need an API key."
     cli = ("Coding agent: Claude Code (with your Anthropic API key) or Codex (with your ChatGPT plan), on this computer. It can also read files and run "
            "commands, each time with your approval.")
+    options = ["Local (on my GPUs)", "API (paid)", "Coding agent (Claude Code or Codex)"] + (["Me: I lead the swarm myself"] if leader else [])
+    you = ("\n  Me: you lead the swarm yourself, instead of a model. What the swarm asks its leader is asked to you here (useful when an AI agent drives this "
+           "command line).") if leader else ""
     while True:
-        console.say(f"\nWhere must the model of agent {number} run?\n  {local}\n  {api}\n  {cli}")
-        kind = chooseFrom(console, "", ["Local (on my GPUs)", "API (paid)", "Coding agent (Claude Code or Codex)"], hint="Your choice (1, 2 or 3):")
+        console.say(f"\nWhere must the model of agent {number} run?\n  {local}\n  {api}\n  {cli}{you}")
+        kind = chooseFrom(console, "", options, hint=f"Your choice (1 to {len(options)}):")
+        if kind.startswith("Me:"):
+            return "user"
         if not kind.startswith("Local") or status["gpus"]:
             return "local" if kind.startswith("Local") else "api" if kind.startswith("API") else "cli"
         console.say(status["message"] or "No supported GPU was found, so local models cannot run. Choose API models.")
@@ -314,7 +339,10 @@ def chooseModel(console, swarm, spec, number, total, keys, tokens, replacing=Non
     if status["needed"]:
         console.say(f"VRAM of the swarm so far: {status['needed']} GB of {status['total']} GB ({status['free']} GB free now).")
     while True:
-        kind = chooseKind(console, swarm, number, replacing)
+        kind = chooseKind(console, swarm, number, replacing, leader=number == 1 and task != "leader")
+        if kind == "user":
+            console.say("\nYou lead the swarm: the questions of the leader come to you, in its window. The agents still ask you to approve their work.")
+            return dict(USER_LEADER), UserLeader(console, spec["name"])
         info = chooseLocalModel(console, swarm, task, replacing) if kind == "local" else chooseApiModel(console, swarm, task, replacing) if kind == "api" else \
             chooseCodingAgent(console, swarm, replacing)
         if info is None:

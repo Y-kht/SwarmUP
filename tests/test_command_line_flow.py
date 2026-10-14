@@ -1007,7 +1007,8 @@ class ApiModelTests(ModelFlowCase):
         info, model = self.choose(script)
         self.assertEqual(info["name"], "google/gemma-4-E4B-it")
         self.assertEqual(script.said.count("\nWhere must the model of agent 1 run?\n  Local: runs on your GPUs (51.6 GB of VRAM, 51.1 GB free now). Free to use and private, but the model must fit in the VRAM.\n  API: runs on the servers of a company (OpenAI, Anthropic, Google, DeepSeek). You pay for every use, and you need an API key.\n  Coding agent: Claude Code (with your Anthropic API key) or Codex (with your ChatGPT plan), on this computer. It can also read files and run "
-                                           "commands, each time with your approval."), 2)
+                                           "commands, each time with your approval.\n  Me: you lead the swarm yourself, instead of a model. What the swarm asks its leader is asked "
+                                           "to you here (useful when an AI agent drives this command line)."), 2)
 
     def testTheLeaderIsToldItsModelMattersMoreAndOtherAgentsAreNot(self):
         script = Script(["2", "1", "n", "n"], ["sk"])
@@ -1082,6 +1083,28 @@ class ProgramCase(GpuTestCase):
 
 
 class EndToEndTests(ProgramCase):
+    # The user (a person, or an AI agent that drives the command line) leads the swarm: the leader asks the user instead of a model, and does
+    # not check, summarise or approve for the user.
+    def testTheUserLeadsTheSwarm(self):
+        script = self.program(["2", "Write a text with a leader",
+                               "Collect the text of Writer and give the final report.", "", "n", "Boss",
+                               "tasks", "4", "the sky", "100", "", "",
+                               "",
+                               "4",
+                               "2", "1", "n", "n",
+                               "2", "1",
+                               "yes", "Final report: the text is ready.\\nNothing else to do."])
+        text = script.text()
+        self.assertIn("Me: I lead the swarm myself", text)
+        self.assertIn("Boss [agent] you lead it", text)
+        self.assertIn("SwarmUP asks you what it would ask the model of the leader", text)
+        self.assertIn("Writer: writer: A short text.", text.split("SwarmUP asks you")[1])
+        self.assertIn("- Boss: done. result: Final report: the text is ready. Nothing else to do.", text)
+        self.assertNotIn("Summary of:", text)
+        self.assertEqual(len(self.models), 1)
+        self.assertFalse(any("Check" in prompt or "summary" in prompt.lower() for prompt in self.models[0].prompts))
+        self.assertEqual(json.loads(next(self.folder.rglob("swarm_*.json")).read_text(encoding="utf-8"))["members"]["Boss"]["model"]["user"], True)
+
     def testTwoWritersPlanTheirWorkAndThenExecuteIt(self):
         script = self.program(["2", "Write two short texts",
                                "tasks", "4", "the sea", "", "", "",

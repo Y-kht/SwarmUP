@@ -149,6 +149,11 @@ class Swarm(SwarmTeam, SwarmReview, SwarmRun, SwarmRounds):
             warning = f"Warning: the state of the swarm could not be saved ({failure}). If the program stops, its work cannot be continued."
             threading.Thread(target=self.getMember(self.leader)["agent"].notifyUser, args=(warning,), daemon=True).start()
 
+    # The user leads the swarm instead of a model (UserLeader in cli_models.py): the leader is not asked to summarise for the user, or to send the
+    # corrections of the user on, since it is the user.
+    def leaderIsUser(self):
+        return bool(self.leader) and getattr(self.getMember(self.leader)["agent"].agent, "isUser", False)
+
     # Writes in the memory of the mission (MissionMemory in mission_memory.py) while the swarm runs, for example
     # record("addUserPrompt", round, text). The memory is only a record: a problem with it never stops the swarm.
     def record(self, name, *details, **options):

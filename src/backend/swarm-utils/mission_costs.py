@@ -36,7 +36,7 @@ def isDeepseekPeak(moment):
 # reference is the price of 1 million tokens, the higher of reading and writing, in US dollars (None if unknown). client tells how Codex
 # is signed in: with a ChatGPT plan, or with an API key, which OpenAI bills per use.
 def priceOfModel(info, client=None):
-    if info["local"]:
+    if info["local"] or info.get("user"):
         return {"kind": "free", "reference": 0.0}
     provider, name = info["provider"], info["name"]
     if info.get("cli") == "codex":

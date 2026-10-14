@@ -158,7 +158,7 @@ class SwarmReview:
         started = [name for name, member in self.members.items() if member["status"] != "waiting"]
         template = prompts.PLAN_SUMMARY_PROMPT if leader["mode"] == "plan" else prompts.EXECUTION_SUMMARY_PROMPT
         summary = None
-        if len(self.members) > 1:
+        if len(self.members) > 1 and not self.leaderIsUser():
             try:
                 prompt = template.format(mission=self.mission, agents=progress, request=request or "nothing")
                 summary = leader["agent"].reviewLoop(prompt, lambda draft: self.checkSummary(draft, started), ask=False, own=False)
@@ -184,6 +184,8 @@ class SwarmReview:
 
     # The leader decides which agents the correction concerns. If it cannot, all of them get it, and each applies what concerns it.
     def routeCorrection(self, names, comment):
+        if self.leaderIsUser():
+            return {name: comment for name in names}
         prompt = prompts.CORRECTION_ROUTE_PROMPT.format(mission=self.mission, correction=comment, agents=self.describeDrafts(names),
                                                         example=prompts.CORRECTION_ROUTE_EXAMPLE)
         try:
@@ -313,6 +315,8 @@ class SwarmReview:
     # connection is the very reason it is needed), the facts are given as they are.
     def summarizeChanges(self):
         facts = self.describeChanges()
+        if self.leaderIsUser():
+            return f"What the swarm did so far:\n{facts}"
         try:
             summary = self.getMember(self.leader)["agent"].reviewLoop(prompts.CANCEL_SUMMARY_PROMPT.format(mission=self.mission, agents=facts),
                                                                       lambda draft: self.checkSummary(draft, list(self.members)), ask=False, own=False)

@@ -296,6 +296,7 @@ The questions of a session guide you as the window does:
 - what each agent must do, in your own words, and the rules that it follows (type `tasks` instead for a specialised task: email, calendar, news, papers, documents, proofs, code, files),
 - the folder of the swarm (and, if you want, a folder of its own for some agents),
 - the model of each agent: a local model on your GPUs (with the VRAM that it needs and a check of your GPUs), a paid model through an API (with the prices), or a coding agent (Claude Code or Codex, which ask you before they act).
+- **You can lead the swarm yourself:** for the first agent, choose "Me" instead of a model. What the swarm asks its leader (its own task, which agents a follow-up concerns, what to keep in the long-term memory) is then asked to you in the window of the leader, and your answer is the answer of the leader. The leader does not summarise for you or check its own work. This is useful when the user of the command line is itself an AI agent, which answers with `send` (one line; write `\n` for a new line). Such a mission is continued from the command line only.
 
 - SwarmUP does nothing before you approve it. It sends emails, books events and writes files only after you approve the exact result.
 - If the connection stops, the swarm pauses and asks you to type `continue` or `cancel`. If the program or the computer stops, start the program again. It lets you continue the swarm that was interrupted, or cancel it after a summary of what it did.

@@ -344,6 +344,12 @@ class Loop:
     def reviewLoop(self, task, verify, ask=True, own=True, key=None):
         if key and self.resumed and key in self.progress:
             return self.progress[key]
+        # The user who leads the swarm (UserLeader) writes the draft: nobody checks or approves it but the user, who just wrote it.
+        if ask and getattr(self.agent, "isUser", False):
+            draft = self.askAgent(task, own)
+            if key:
+                self.remember(key, draft)
+            return draft
         draft, feedback = "", ""
         for attempt in range(1, self.numberOfLoops + 1):
             prompt = task

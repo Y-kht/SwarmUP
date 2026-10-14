@@ -32,6 +32,8 @@ When the leader asks a question, type yes, no, the name of an agent to look at i
 def describeModel(info):
     if not info:
         return "no model"
+    if info.get("user"):
+        return "you lead it"
     if info.get("cli"):
         return f"{MODELS_CLI[info['cli']]['label']}, {'its default model' if info['name'] == DEFAULT_CLI_MODEL else info['name']}"
     return f"{info['name']}, local, {info['vram']} GB" if info["local"] else f"{info['name']}, API"

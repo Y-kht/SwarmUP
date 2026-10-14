@@ -370,7 +370,7 @@ def takeNotes(answer, loop):
 # What an agent knows of its work place, before its task: the files of its folder and what it may ask of them (not for a coding agent, which
 # has its own tools), and the notes it kept in this session. tools is False for the calls that only check a draft.
 def describeWorkplace(loop, prompt, tools):
-    if not tools:
+    if not tools or getattr(loop.agent, "isUser", False):
         return prompt
     parts = []
     if loop.folder and not hasattr(loop.agent, "attach"):
@@ -384,7 +384,7 @@ def describeWorkplace(loop, prompt, tools):
 # Asks the model of the loop (ask gives its answer) and answers the requests of files it writes, for MAX_TOOL_ROUNDS rounds at most.
 # The user is told what the agent reads. The answer that is given back has no request and no note left in it.
 def consultFolder(loop, prompt, ask, tools):
-    reaches = tools and not hasattr(loop.agent, "attach") and (loop.folder or loop.session)
+    reaches = tools and not hasattr(loop.agent, "attach") and not getattr(loop.agent, "isUser", False) and (loop.folder or loop.session)
     places = loop.session.memory.roots() if loop.session else {}
     for number in range(MAX_TOOL_ROUNDS + 1):
         answer = takeNotes(ask(prompt), loop) if tools else ask(prompt)

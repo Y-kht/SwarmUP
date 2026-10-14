@@ -46,6 +46,8 @@ class SessionSaved:
         saved = self.findSaved(payload.get("id"))
         if not all(member.get("recipe") for member in saved["members"].values()):
             raise ValueError("This swarm was made by another program, so it cannot be continued here.")
+        if any((member.get("model") or {}).get("user") for member in saved["members"].values()):
+            raise ValueError("You lead this swarm yourself, from the command line: continue it there (swarmup_cli.py open).")
         agents, providers, gated, codex = [], {}, [], False
         following = self.isFollowUp(saved)
         for name, member in saved["members"].items():
