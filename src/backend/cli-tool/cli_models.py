@@ -9,6 +9,7 @@ from codex_agent import CodexLogin, checkCodex, listCodexModels, readCodexAccoun
 from gpu_check import checkVram, readGpus
 from internet_cache import describeCached, getModelCost
 from mission_costs import formatDollars
+from model_adapters import describeCommands, readCommand
 from model_clients import createModel
 from model_support import ModelError, findMissingPackages, getApiKey, getHubFolder, isDownloaded, lookupHuggingFace
 from models_library import API_KEYS, DEFAULT_CLI_MODEL, MODELS_API, MODELS_CLI, MODELS_LOCAL, RECOMMENDED_API, RECOMMENDED_LOCAL, getModelInfo, getProvider, isGated
@@ -21,18 +22,28 @@ from tasks_library import getTask, parseAnswer, parseChoices
 USER_LEADER = {"name": "you", "local": False, "provider": None, "billions": None, "bits": None, "vram": 0.0, "cli": None, "user": True}
 
 
+# The user is an adapter of its own (model_adapters.py): it sees only what is new in the conversation, and calls the tools of the leader with
+# commands, like a model calls them (ADP-07).
 class UserLeader:
-    isUser = True
+    approvesItself = True
 
     def __init__(self, console, name):
         self.console, self.name, self.usage = console, name, {"calls": 0, "input": 0, "output": 0}
 
-    # One line answers; \n in it starts a new line, so a long answer (a report, JSON, memory blocks) fits in one line.
-    def input(self, prompt):
+    # One line answers; \n in it starts a new line, so a long answer (a report, JSON) fits in one line. A line that starts with / calls a tool.
+    def converse(self, system, messages, tools, onText=None):
         self.usage["calls"] += 1
-        self.console.say(f"\n=== You lead the swarm. SwarmUP asks you what it would ask the model of the leader: ===\n{prompt}\n"
-                         "=== Answer in one line (write \\n for a new line). ===", window=self.name)
-        return self.console.ask("Your answer, as the leader:", window=self.name).replace("\\n", "\n")
+        last = max((number for number, message in enumerate(messages) if message["role"] == "assistant"), default=-1)
+        new = [message for message in messages[last + 1:]]
+        shown = [system] if last < 0 and system else []
+        shown += [message["content"] if message["role"] == "user" else f"[Result of {message['name']}]\n{message['content']}" for message in new]
+        if tools and last < 0:
+            shown.append("Your tools, as commands (write /name key=value, or /name {JSON}):\n" + describeCommands(tools))
+        self.console.say("\n=== You lead the swarm. SwarmUP asks you what it would ask the model of the leader: ===\n" + "\n\n".join(shown) +
+                         "\n=== Answer in one line (write \\n for a new line), or call a tool. ===", window=self.name)
+        reply = self.console.ask("Your answer, as the leader:", window=self.name).replace("\\n", "\n")
+        calls = readCommand(reply) if tools else None
+        return {"text": "" if calls else reply, "calls": calls or [], "raw": None, "cut": False}
 
 
 SHOW_ALL, MANUAL, BACK = "Show all the models of the library", "Type the name of another model myself", "Go back"

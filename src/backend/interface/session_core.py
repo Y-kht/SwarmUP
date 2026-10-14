@@ -14,6 +14,7 @@ from mission_costs import MissionCosts
 from model_clients import createModel
 from model_support import getApiKey
 from models_library import API_KEYS
+from session_mcp import SessionMcp
 from session_models import SessionModels
 from session_runs import SessionRuns
 from session_saved import SessionSaved
@@ -30,7 +31,7 @@ CONTEXT_LIMIT = 6
 # or answer the swarm, so they never wait behind a slow one.
 FREE_ACTIONS = ("checkEmail", "checkMessenger", "findChats", "searchPublishers", "browse", "pickPath", "lookupModel", "price", "testModel", "modelCatalog", "answer",
                 "approve", "reject", "correct", "message", "startNow", "openLink", "openFolder", "refreshUnfinished", "quit", "taskForm",
-                "codexAccount")
+                "codexAccount", "calls", "mcpServers", "mcpInspect")
 
 
 # ==============
@@ -40,7 +41,7 @@ FREE_ACTIONS = ("checkEmail", "checkMessenger", "findChats", "searchPublishers",
 # Rule for the locks: the lock of the session is never held while calling a method of the Swarm that takes its own lock,
 # because the Swarm calls the listener of the session with its lock held.
 # ==============
-class Session(SessionSteps, SessionModels, SessionRuns, SessionSaved):
+class Session(SessionSteps, SessionModels, SessionRuns, SessionSaved, SessionMcp):
     # A window with several missions (Desk in session_desk.py) gives every tab the same keys and tokens, and onTouch, called after each change.
     def __init__(self, keys=None, tokens=None, onTouch=None):
         self.token = secrets.token_urlsafe(24)
@@ -73,7 +74,8 @@ class Session(SessionSteps, SessionModels, SessionRuns, SessionSaved):
             "browse", "pickPath", "setFolder", "openFolder", "modelCatalog", "lookupModel", "price", "chooseModel", "testModel", "checkPackages", "setOrder", "planOrder",
             "setMode", "start", "execute", "answer", "approve", "reject", "correct", "message", "startNow", "prepareStop", "stop", "clearJob", "newSwarm",
             "resumeForm", "resume", "prepareCancel", "abandon", "refreshUnfinished", "openLink", "codexAccount", "codexSignIn", "codexCancel", "joinLive",
-            "removeLive", "setBuildMode", "buildWithLeader", "setBudget", "saveSettings", "quit", "addAgents", "setSwarmFolder", "followUp")}
+            "removeLive", "setBuildMode", "buildWithLeader", "setBudget", "saveSettings", "quit", "addAgents", "setSwarmFolder", "followUp", "calls", "mcpServers",
+            "mcpAdd", "mcpInspect", "mcpApprove", "mcpRemove")}
 
     def reset(self):
         self.mission = ""
@@ -299,10 +301,12 @@ class Session(SessionSteps, SessionModels, SessionRuns, SessionSaved):
         if not swarm or not self.runInfo:
             return None
         agents = []
+        counts = swarm.gateway.records.countsOf() if swarm.gateway is not None else {}
         for name in swarm.getAgents():
             info, member = swarm.getInfo(name), swarm.getMember(name)
             client = member["agent"].agent
             agents.append({**info, "model": describeModel(info["model"]), "task": (member.get("recipe") or {}).get("task"), "description": info["task"],
+                           "calls": counts.get(name),
                            "usage": {key: client.usage.get(key, 0) for key in ("calls", "input", "output")} if hasattr(client, "usage") else None,
                            "removable": name != swarm.getLeader()})
         try:

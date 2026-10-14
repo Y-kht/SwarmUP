@@ -42,7 +42,7 @@ def listMissions():
         found.append({"id": state["id"], "mission": state["mission"], "state": shown, "here": alive and state.get("pid") == os.getpid(),
                       "round": state.get("round", 1), "latest": requests[-1]["text"], "savedAt": state.get("savedAt", ""), "heartbeat": state.get("heartbeat", 0),
                       "leader": state["leader"], "agents": list(state["members"]), "mode": state.get("mode", "execute"),
-                      "canContinue": state["state"] in UNFINISHED_STATES and not alive, "canFollowUp": state["state"] in ("finished", "stopped") and not alive,
+                      "canContinue": state["state"] in UNFINISHED_STATES and not alive, "canFollowUp": state["state"] in ("finished", "failed", "stopped") and not alive,
                       "canResume": all(member.get("recipe") for member in state["members"].values())})
     return sorted(found, key=lambda mission: mission["heartbeat"], reverse=True)
 
@@ -71,6 +71,7 @@ def deleteMission(missionId):
 
 def describeMission(mission):
     states = {"running": "running now", "paused": "paused", "interrupted": "interrupted, can be continued", "finished": "finished, can be followed up",
+              "failed": "failed: the leader did not finish, can be followed up",
               "stopped": "stopped"}
     rounds = f", round {mission['round']}" if mission["round"] > 1 else ""
     return f"{states.get(mission['state'], mission['state'])}{rounds}, {len(mission['agents'])} {'agent' if len(mission['agents']) == 1 else 'agents'}, {mission['savedAt']}"

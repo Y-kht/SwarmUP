@@ -1,14 +1,11 @@
-# Reading what the leader writes: the blocks of its proposals, even when they are not written as asked, and the sentences
-# that suggest a change (see leader_utils.py).
+# Reading the blocks a leader writes for a change of its swarm, even when they are not written as asked: the adapter of a model that writes
+# its calls as text (model_messages.py) reads them as calls of the leader tools (server_leader.py).
 import ast
 import json
 import re
 
 from harness_utils import stripFences
-from models_library import MODELS_API, MODELS_LOCAL
 
-
-MAX_SUGGESTIONS = 3
 
 JSON_LIMIT = 60000
 
@@ -344,59 +341,33 @@ def isNoChange(text):
 
 
 # ==============
-# Sentences that suggest a change without a block.
+# The calls of tools a model writes as blocks (docs/MCP_DESIGN_BOOKLET.md, ADP-04). A model that cannot call tools natively, or a small one,
+# often writes the change of the swarm as a block instead of a call: the adapter of the model reads it here as the call of the leader tool it
+# means, with its arguments, and a block that cannot be read is a call with its problem. Nothing outside the adapters reads such blocks.
 # ==============
-PROPOSAL_PATTERN = re.compile(
-    r"\b(?:i(?: would|'d)? (?:propose|suggest|recommend|advise)|(?:we|you) (?:should|could|might want to|may want to|need to|must|ought to)|let'?s|let us|"
-    r"i(?: will|'ll| want to| plan to| intend to| am going to|'m going to| would like to|'d like to| can)|it (?:would|might|could) (?:be (?:better|wise|good|useful|best)|help)|"
-    r"(?:should|could|can|must|may|might) (?:now |then )?be (?:removed|deleted|dropped|retired|added|replaced|switched|changed|upgraded|downgraded|let go)|"
-    r"(?:is|are|seems|looks) (?:now )?(?:no longer|not) (?:needed|necessary|required|useful)|(?:is|are) (?:now )?redundant|"
-    r"(?:consider|recommend|suggest|propose)(?:s|ed|ing)? (?:adding|removing|deleting|dropping|replacing|switching|changing|upgrading|downgrading|retiring)|"
-    r"would benefit from|needs? (?:an?|another|one more) (?:new |extra |additional |second )?(?:agent|helper)|"
-    r"i(?: have| just)? (?:added|removed|deleted|dropped|replaced|switched|changed|retired))\b", re.I)
-NEGATION_PATTERN = re.compile(r"\b(?:not|no need|never|don'?t|doesn'?t|shouldn'?t|won'?t|wouldn'?t|cannot|can'?t|no reason|without|instead of|rather than|nor)\b", re.I)
-REMOVE_VERBS = r"(?:remov|delet|drop|retir|dismiss|unload|discard|eliminat|kick(?:ing|ed)? out|tak(?:e|ing) out|let(?:ting)? go of|get(?:ting)? rid of|shut(?:ting)? down)\w*"
-MODEL_VERBS = r"(?:switch|chang|replac|swap|mov|upgrad|downgrad|us|giv|assign|run)\w*"
-ADD_VERBS = r"(?:add|adding|create|creating|bring(?:ing)? in|recruit\w*|hire|hiring|introduc\w*|spawn\w*|include|including|set(?:ting)? up|onboard\w*)"
-AGENT_NOUNS = (r"(?:agents?|helpers?|assistants?|specialists?|workers?|writers?|translators?|editors?|reviewers?|checkers?|fact-?checkers?|coders?|programmers?|developers?|"
-               r"formatters?|planners?|briefers?|emailers?|mailers?|researchers?|summari[sz]ers?|analysts?|testers?|proofreaders?)")
-SENTENCE_PATTERN = re.compile(r"(?<=[.!?])\s+|\n+")
+BLOCK_TOOLS = {"build": "leader__propose_swarm", "add": "leader__add_agent", "remove": "leader__remove_agent", "model": "leader__change_model"}
+AGENT_KEYS = ("name", "task", "model", "bits", "waits_for", "settings", "why", "role")
 
 
-# Whether a negation comes in the few words before position (like "do not remove", "no need to add").
-def negatedBefore(sentence, position):
-    return bool(NEGATION_PATTERN.search(" ".join(sentence[:position].split()[-4:])))
+def cleanAgent(data):
+    keys = normalizeKeys(data)[0] if isinstance(data, dict) else {}
+    agent = {key: keys[key] for key in AGENT_KEYS if key in keys and keys[key] is not None}
+    if str(agent.get("bits", "")).strip().isdigit():
+        agent["bits"] = int(str(agent["bits"]).strip())
+    if isinstance(agent.get("waits_for"), str):
+        agent["waits_for"] = [name.strip() for name in agent["waits_for"].split(",") if name.strip()]
+    return agent
 
 
-def findSuggestions(text, names, leader=None):
-    text = str(text or "")
-    if not text.strip() or isNoChange(text) or loadJson(stripFences(text)) is not None:
-        return []
-    others = [name for name in names if name != leader]
-    known = [model.lower() for models in MODELS_API.values() for model in models] + [name.lower() for family in MODELS_LOCAL.values() for name in family] + ["claude-code", "codex"]
-    found = []
-    for sentence in (part.strip() for part in SENTENCE_PATTERN.split(text)):
-        if len(sentence) < 8 or not PROPOSAL_PATTERN.search(sentence):
-            continue
-        low = sentence.lower()
-        suggestion = None
-        for name in others:
-            word = re.escape(name)
-            removing = re.search(rf"\b{REMOVE_VERBS}\b(?:\W+\w+){{0,4}}?\W+{word}\b(?!['’]s)", sentence, re.I)
-            state = re.search(rf"\b{word}\b(?:\W+\w+){{0,3}}?\W+(?:is|are|seems|looks)\W+(?:now\W+)?(?:(?:no longer|not)\W+(?:needed|necessary|required|useful)|redundant)|"
-                              rf"\b{word}\b\W+(?:can|could|should|may)\W+(?:now\W+)?(?:go|leave|be (?:removed|deleted|dropped|retired|let go))\b", sentence, re.I)
-            if (removing and not negatedBefore(sentence, removing.start())) or (state and not negatedBefore(sentence, state.start())):
-                suggestion = {"action": "remove", "agent": name, "sentence": sentence}
-                break
-            changing = re.search(rf"\b{MODEL_VERBS}\b", sentence, re.I)
-            if re.search(rf"\b{word}\b", sentence, re.I) and changing and not negatedBefore(sentence, changing.start()) and \
-                    (re.search(r"\bmodels?\b", low) or any(model in low for model in known)):
-                suggestion = {"action": "model", "agent": name, "sentence": sentence}
-                break
-        adding = re.search(rf"\b{ADD_VERBS}\b(?:\W+\w+){{0,4}}?\W+{AGENT_NOUNS}\b(?!['’]s)", sentence, re.I) or \
-            re.search(rf"\b(?:would benefit from|needs?|is missing|lacks|could use|requires)\W+(?:an?|another|one more|a new|an extra|a second)\W+(?:[\w-]+\W+){{0,2}}?{AGENT_NOUNS}\b", sentence, re.I)
-        if suggestion is None and adding and not negatedBefore(sentence, adding.start()):
-            suggestion = {"action": "add", "agent": None, "sentence": sentence}
-        if suggestion and all(item["sentence"] != sentence for item in found):
-            found.append(suggestion)
-    return found[:MAX_SUGGESTIONS]
+def readBlockCalls(text, newId):
+    found = parseOutput(text)
+    calls = []
+    for block in found["blocks"]:
+        data = block["data"]
+        arguments = {"agents": [cleanAgent(agent) for agent in data.get("agents") or []]} if block["action"] == "build" else cleanAgent(data)
+        # The words around a swarm are the reason the leader gives for it.
+        if block["action"] == "build" and found["text"].strip():
+            arguments["why"] = found["text"].strip()
+        calls.append({"id": newId(), "name": BLOCK_TOOLS[block["action"]], "arguments": arguments})
+    calls += [{"id": newId(), "name": BLOCK_TOOLS[problem["action"]], "arguments": {}, "problem": problem["error"]} for problem in found["problems"]]
+    return calls, found["text"]

@@ -16,7 +16,8 @@ import agent_prompts as prompts
 import harness_utils
 from agent_conversation import Conversation
 from mission_memory import WorkSession
-from agent_tools import Toolbox, undoChanges
+from agent_tools import undoChanges
+from mcp_gateway import Gateway, builtinServers
 from base_loop import Loop
 from checking_loops import WorkerLoop
 from harness_utils import SwarmStopped
@@ -27,6 +28,31 @@ from writing_loops import AuthorLoop
 
 def call(name, number=1, **arguments):
     return {"id": f"call{number}", "name": name, "arguments": arguments}
+
+
+# The full name of a tool of SwarmUP (its server, then its name), as the model sees it.
+SERVERS = {tool.name: spec.name for spec in builtinServers() for tool in spec.tools}
+
+
+def full(name):
+    return f"{SERVERS[name]}__{name}" if name in SERVERS else name
+
+
+def act(name, number=1, **arguments):
+    return call(full(name), number, **arguments)
+
+
+# The tools of an agent, reached through its link to a gateway, as the agent reaches them.
+class Box:
+    def __init__(self, loop):
+        self.loop, self.gateway = loop, Gateway("m1")
+        self.link = self.gateway.link(loop)
+
+    def run(self, name, arguments):
+        return self.link.call(full(name), arguments)
+
+    def available(self):
+        return [tool["name"].split("__")[-1] for tool in self.link.tools()]
 
 
 def say(text):
@@ -45,7 +71,7 @@ class FakeChat:
         self.loop = loop
 
     def converse(self, system, messages, tools):
-        self.seen.append({"system": system, "messages": copy.deepcopy(messages), "tools": [tool["name"] for tool in tools]})
+        self.seen.append({"system": system, "messages": copy.deepcopy(messages), "tools": [tool["name"].split("__")[-1] for tool in tools]})
         reply = self.replies.pop(0)
         return reply(self.loop) if callable(reply) else reply
 
@@ -90,18 +116,18 @@ class ConversationTestCase(unittest.TestCase):
 
 class ToolboxTests(ConversationTestCase):
     def testFilesAreReadWithTheNumbersOfTheirLines(self):
-        box = Toolbox(self.chatLoop([]))
+        box = Box(self.chatLoop([]))
         self.assertEqual(box.run("read_file", {"path": "notes/ideas.md"}), ("notes/ideas.md (3 lines):\n     1\tBees\n     2\tHoney is sweet\n     3\tWax", False))
         text, error = box.run("read_file", {"path": "notes/ideas.md", "start_line": 2, "line_count": 1})
         self.assertIn("     2\tHoney is sweet\n[Lines 2 to 2 of 3. Read on with start_line=3.]", text)
         self.assertEqual(box.run("read_file", {"path": "../secret"})[1], True)
-        self.assertEqual(box.run("read_file", {})[0], "Not done: read_file needs path.")
+        self.assertEqual(box.run("read_file", {})[0], "Not done: files__read_file needs path.")
         self.assertEqual(box.run("read_file", {"path": 3})[0], "Not done: path must be a string.")
-        self.assertIn("There is no tool fly here.", box.run("fly", {})[0])
+        self.assertIn("there is no tool fly for you now", box.run("fly", {})[0])
 
     def testEveryChangeAsksTheUserAndCanBePutBack(self):
         loop = self.chatLoop([])
-        box = Toolbox(loop)
+        box = Box(loop)
         self.assertEqual(box.run("edit_file", {"path": "notes/ideas.md", "old_text": "Wax", "new_text": "Pollen"}), ("Done: change notes/ideas.md (3 lines).", False))
         self.assertEqual(self.asked[-1]["action"], "change a file")
         self.assertIn("-Wax\n+Pollen", self.asked[-1]["detail"])
@@ -120,16 +146,16 @@ class ToolboxTests(ConversationTestCase):
 
     def testARefusalAndAPermissionUntilTheNextRun(self):
         loop = self.chatLoop([], decision="deny")
-        self.assertEqual(Toolbox(loop).run("write_file", {"path": "a.txt", "content": "x"}), ("Not done: The user refused. not now Go on without it.", True))
+        self.assertEqual(Box(loop).run("write_file", {"path": "a.txt", "content": "x"}), ("Not done: The user refused to let you create a file. They said: not now Go on without it, or ask your leader with team__send_message.", True))
         self.assertFalse((self.work / "a.txt").exists())
         loop = self.chatLoop([], decision="run")
-        box = Toolbox(loop)
+        box = Box(loop)
         box.run("write_file", {"path": "a.txt", "content": "x"})
         box.run("write_file", {"path": "b.txt", "content": "y"})
         self.assertEqual(len(self.asked), 2)
 
     def testAnEditMustFindItsTextOnce(self):
-        box = Toolbox(self.chatLoop([]))
+        box = Box(self.chatLoop([]))
         (self.work / "twice.txt").write_text("a a")
         self.assertIn("is not in twice.txt", box.run("edit_file", {"path": "twice.txt", "old_text": "b", "new_text": "c"})[0])
         self.assertIn("is 2 times in twice.txt", box.run("edit_file", {"path": "twice.txt", "old_text": "a", "new_text": "c"})[0])
@@ -139,7 +165,7 @@ class ToolboxTests(ConversationTestCase):
 
     def testACommandRunsInTheFolderOnceTheUserAllowsIt(self):
         loop = self.chatLoop([])
-        text, error = Toolbox(loop).run("run_command", {"command": f'"{sys.executable}" -c "import os; print(os.getcwd())"'})
+        text, error = Box(loop).run("run_command", {"command": f'"{sys.executable}" -c "import os; print(os.getcwd())"'})
         self.assertEqual((text, error), (f"Exit code 0.\n{self.work}", False))
         self.assertEqual(self.asked[-1]["action"], "run a command")
         self.assertIn("Ran in", loop.actions[-1]["text"])
@@ -147,41 +173,41 @@ class ToolboxTests(ConversationTestCase):
     def testPlanModeAndAgentsWithoutAFolder(self):
         loop = self.chatLoop([])
         loop.planning = True
-        self.assertNotIn("write_file", Toolbox(loop).available())
-        self.assertIn("read_file", Toolbox(loop).available())
-        self.assertNotIn("send_message", Toolbox(loop).available())
+        self.assertNotIn("write_file", Box(loop).available())
+        self.assertIn("read_file", Box(loop).available())
+        self.assertNotIn("send_message", Box(loop).available())
         loop = self.chatLoop([], folder=False)
         loop.name = "Scratch"
-        self.assertEqual(Toolbox(loop).run("write_file", {"path": "draft.txt", "content": "x"})[1], False)
+        self.assertEqual(Box(loop).run("write_file", {"path": "draft.txt", "content": "x"})[1], False)
         self.assertEqual(self.asked, [])
         self.assertTrue((self.files / "agent-files" / "agent-workspaces" / "Scratch" / "draft.txt").exists())
 
     def testTheUserCanBeAsked(self):
-        self.assertEqual(Toolbox(self.chatLoop([])).run("ask_user", {"question": "Which color?", "options": ["Blue", "Red"]}), ("The user answered: Blue", False))
+        self.assertEqual(Box(self.chatLoop([])).run("ask_user", {"question": "Which color?", "options": ["Blue", "Red"]}), ("The user answered: Blue", False))
         self.assertEqual(self.asked[-1][0]["options"], [{"label": "Blue"}, {"label": "Red"}])
 
 
 class ConversationTests(ConversationTestCase):
     def testTheModelReadsItsFilesThenAnswersAndKeepsTheConversation(self):
         loop = self.quiet(AuthorLoop(None, "bees", 50), answers=["shorter", "yes"])
-        loop.agent = FakeChat([use(call("read_file", path="notes/ideas.md")), say("A long text about honey"), say("Honey.")], loop)
+        loop.agent = FakeChat([use(act("read_file", path="notes/ideas.md")), say("A long text about honey"), say("Honey.")], loop)
         loop.setFolder(self.work)
         self.assertEqual(loop.run(), "Honey.")
         first, second, third = loop.agent.seen
         self.assertIn("- notes/ideas.md (24 bytes)", first["system"])
         self.assertIn("THE RULES OF YOUR TASK", first["system"])
         self.assertIn("write_file", first["tools"])
-        self.assertEqual(second["messages"][-1], {"role": "tool", "id": "call1", "name": "read_file", "content": "notes/ideas.md (3 lines):\n     1\tBees\n     2\tHoney is sweet\n     3\tWax", "error": False})
+        self.assertEqual(second["messages"][-1], {"role": "tool", "id": "call1", "name": "files__read_file", "content": "notes/ideas.md (3 lines):\n     1\tBees\n     2\tHoney is sweet\n     3\tWax", "error": False})
         self.assertEqual(third["messages"][-1], {"role": "user", "content": prompts.CONVERSATION_REVISION_PROMPT.format(feedback="shorter")})
         self.assertEqual(len(third["messages"]), 5)
         self.assertEqual(third["system"], first["system"])
-        self.assertIn('[AuthorLoop] read_file("path": "notes/ideas.md")', loop.said)
+        self.assertIn('[AuthorLoop] files__read_file("path": "notes/ideas.md")', loop.said)
 
     def testMessagesArriveBetweenTwoStepsOfTheWork(self):
         def working(loop):
             loop.receive("Writer", "Use the word nectar.")
             loop.receiveFromUser("Be brief.")
-            return use(call("list_files"))
+            return use(act("list_files"))
         loop = self.chatLoop([working, say("Done")])
         loop.receive("Leader", "Welcome.")
         self.assertEqual(loop.askAgent("Work."), "Done")
@@ -190,55 +216,70 @@ class ConversationTests(ConversationTestCase):
         self.assertEqual(second["messages"][-1], {"role": "user", "content": "[Message from Writer] Use the word nectar.\n[Message from the user] Be brief."})
 
     def testACutCallIsNotRunAndTheLastStepIsSaid(self):
-        loop = self.chatLoop([{"text": "", "calls": [call("write_file", path="a.txt", content="x")], "cut": True}, say("Smaller")])
+        loop = self.chatLoop([{"text": "", "calls": [act("write_file", path="a.txt", content="x")], "cut": True}, say("Smaller")])
         self.assertEqual(loop.askAgent("Work."), "Smaller")
         self.assertEqual(loop.agent.seen[1]["messages"][-1]["content"], f"Not done: {prompts.CUT_CALL}")
         self.assertFalse((self.work / "a.txt").exists())
-        loop = self.chatLoop([use(call("list_files"))] * 3)
+        loop = self.chatLoop([use(act("list_files"))] * 3)
         with mock.patch.object(agent_conversation, "MAX_STEPS", 3):
             self.assertEqual(loop.askAgent("Work."), "")
         self.assertEqual(loop.agent.seen[2]["messages"][-1]["content"], prompts.LAST_STEP)
 
+    def testTheTextOfAModelThatWritesIsGivenToTheLoopWhileItWrites(self):
+        class Writing(FakeChat):
+            streams = True
+
+            def converse(self, system, messages, tools, onText=None):
+                for piece in ("Bees ", "make ", "honey."):
+                    onText(piece)
+                return super().converse(system, messages, tools)
+        loop = self.chatLoop([])
+        loop.agent = Writing([say("Bees make honey.")], loop)
+        seen = []
+        loop.onText = lambda text, done: seen.append((text, done))
+        self.assertEqual(loop.askAgent("Work."), "Bees make honey.")
+        self.assertEqual(seen[0], ("Bees ", False))
+        self.assertEqual(seen[-1], ("Bees make honey.", True))
+
     def testAStoppedSwarmStopsTheConversation(self):
-        loop = self.chatLoop([use(call("list_files"))])
+        loop = self.chatLoop([use(act("list_files"))])
         loop.team = types.SimpleNamespace(shouldStop=lambda name: True)
         with self.assertRaises(SwarmStopped):
             loop.askAgent("Work.")
 
     def testTheLeaderThatBuildsOnlyLooksAndChecksGoWithoutTools(self):
-        loop = self.chatLoop([say("A swarm")])
-        loop.agent.input = lambda prompt: "OK"
+        loop = self.chatLoop([say("A swarm"), say("OK")])
         self.assertEqual(loop.askAgent("Build.", own=False, tools=True), "A swarm")
         self.assertIn(prompts.LOOK_ONLY_PROMPT, loop.agent.seen[0]["system"])
         self.assertNotIn("write_file", loop.agent.seen[0]["tools"])
+        self.assertIn("read_file", loop.agent.seen[0]["tools"])
         self.assertIsNone(loop.conversation)
-        self.assertEqual(loop.checkRules("draft") if loop.rules else loop.askAgent("Check", tools=False), "OK")
+        self.assertEqual(loop.askAgent("Check", tools=False), "OK")
+        self.assertEqual((loop.agent.seen[1]["system"], loop.agent.seen[1]["tools"]), ("", []))
 
     def testAConversationGoesOnAfterTheProgramStopped(self):
-        loop = self.chatLoop([use(call("list_files"), call("find_files", 2, pattern="*.md"))])
+        loop = self.chatLoop([use(act("list_files"), act("find_files", 2, pattern="*.md"))])
         loop.name, loop.session = "Writer", WorkSession("swarm1", "run")
         conversation = Conversation(loop)
         conversation.system = "system"
-        conversation.messages = [{"role": "user", "content": "Work."}, {"role": "assistant", "content": "", "calls": [call("list_files")], "raw": None}]
+        conversation.messages = [{"role": "user", "content": "Work."}, {"role": "assistant", "content": "", "calls": [act("list_files")], "raw": None}]
         conversation.save()
         loop.resumed = True
         loaded = Conversation.load(loop)
-        self.assertEqual(loaded.messages[-1], {"role": "tool", "id": "call1", "name": "list_files", "content": "Not done: the program stopped before it ran.", "error": True})
+        self.assertEqual(loaded.messages[-1], {"role": "tool", "id": "call1", "name": "files__list_files", "content": "Not done: the program stopped before it ran.", "error": True})
 
     def testALongConversationDropsOldResultsExceptForClaude(self):
         loop = self.chatLoop([])
         conversation = Conversation(loop)
-        conversation.messages = [{"role": "tool", "id": str(number), "name": "read_file", "content": "x" * 100} for number in range(20)]
+        conversation.messages = [{"role": "tool", "id": str(number), "name": "files__read_file", "content": "x" * 100} for number in range(20)]
         with mock.patch.object(agent_conversation, "CONTEXT_CHARS", 1000):
-            loop.agent.appendOnly = True
-            conversation.shorten()
+            conversation.shorten(types.SimpleNamespace(canShorten=False))
             self.assertEqual(conversation.messages[0]["content"], "x" * 100)
-            loop.agent.appendOnly = False
-            conversation.shorten()
+            conversation.shorten(types.SimpleNamespace(canShorten=True))
         self.assertEqual([message["content"] == prompts.OLD_RESULT for message in conversation.messages], [True] * 8 + [False] * 12)
 
     def testTheWorkerDoesTheWorkAndItIsPutBackIfNotApproved(self):
-        replies = [use(call("write_file", path="sorted/bees.md", content="Bees")), say("I created sorted/bees.md.")]
+        replies = [use(act("write_file", path="sorted/bees.md", content="Bees")), say("I created sorted/bees.md.")]
         loop = self.chatLoop(replies, kind=lambda agent: WorkerLoop(agent, "sort my notes"))
         self.assertEqual(loop.run(), "I created sorted/bees.md.")
         self.assertTrue((self.work / "sorted" / "bees.md").exists())
@@ -255,26 +296,26 @@ class SwarmTests(ConversationTestCase):
         swarm = Swarm("Bees")
         events = []
         swarm.addListener(events.append)
-        leader = self.chatLoop([use(call("read_result", agent="writer")), say("Report")])
-        writer = self.chatLoop([use(call("send_message", to="leader", text="The text is short.")), say("A text")])
-        checker = self.chatLoop([use(call("team_status"), call("send_message", 2, to="Nobody", text="hi")), say("Checked")])
+        leader = self.chatLoop([use(act("read_result", agent="writer")), say("Report")])
+        writer = self.chatLoop([use(act("send_message", to="leader", text="The text is short.")), say("A text")])
+        checker = self.chatLoop([use(act("read_team"), act("send_message", 2, to="Nobody", text="hi")), say("Checked")])
         swarm.addAgent("Leader", leader, "boss", "lead")
         swarm.addAgent("Writer", writer, "writer", "write")
         swarm.addAgent("Checker", checker, "checker", "check", waitsFor=["Writer"])
         self.assertEqual(swarm.run(), "Report")
-        self.assertIn({"role": "tool", "id": "call1", "name": "read_result", "content": "The result of Writer:\nA text", "error": False}, leader.agent.seen[1]["messages"])
+        self.assertIn({"role": "tool", "id": "call1", "name": "team__read_result", "content": "The result of Writer:\nA text", "error": False}, leader.agent.seen[1]["messages"])
         self.assertIn("[Message from Writer] The text is short.", leader.agent.seen[0]["messages"][0]["content"])
         status = checker.agent.seen[1]["messages"][-2]["content"]
-        self.assertIn("- Writer: the writer, done. Task: write Its result is ready (read_result).", status)
+        self.assertIn("- Writer: the writer, done. Task: write Its result is ready (team__read_result).", status)
         self.assertIn("There is no agent called Nobody.", checker.agent.seen[1]["messages"][-1]["content"])
         self.assertIn({"kind": "message", "sender": "Writer", "receiver": "Leader", "direct": True}, [{key: event.get(key) for key in ("kind", "sender", "receiver", "direct")} for event in events])
         self.assertTrue(any(event["kind"] == "activity" and event["agent"] == "Checker" for event in events))
-        self.assertEqual(swarm.getInfo("Writer")["activity"][0]["text"], 'send_message("to": "leader", "text": "The text is short.")')
+        self.assertEqual(swarm.getInfo("Writer")["activity"][0]["text"], 'team__send_message("to": "leader", "text": "The text is short.")')
 
     def testWhatAnAgentThatDidNotFinishChangedIsPutBack(self):
         swarm = Swarm("Bees")
         leader = self.chatLoop([say("Report")])
-        worker = self.chatLoop([use(call("write_file", path="half.txt", content="half")), say("")], kind=lambda agent: WorkerLoop(agent, "half"))
+        worker = self.chatLoop([use(act("write_file", path="half.txt", content="half")), say("")], kind=lambda agent: WorkerLoop(agent, "half"))
         worker.askUser = lambda question: "no"
         swarm.addAgent("Leader", leader, "boss", "lead")
         swarm.addAgent("Worker", worker, "worker", "work")
@@ -345,7 +386,30 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(asked[1]["tools"], [{"name": "read_file", "description": "Read", "input_schema": {"type": "object"}, "eager_input_streaming": True}])
         self.assertEqual((asked[1]["cache_control"], asked[1]["system"][0]["cache_control"]), ({"type": "ephemeral"}, {"type": "ephemeral"}))
         self.assertEqual(model.usage["calls"], 1)
-        self.assertTrue(model.appendOnly)
+        self.assertFalse(model.canShorten)
+
+    def testClaudeGivesItsTextWhileItWritesAndAStopEndsIt(self):
+        message = types.SimpleNamespace(content=[FakeBlock(type="text", text="Hello bees")], stop_reason="end_turn", stop_details=None,
+                                        usage=types.SimpleNamespace(input_tokens=1, output_tokens=1, cache_read_input_tokens=0, cache_creation_input_tokens=0))
+        model = ApiModel("claude", "claude-opus-5-5", "key")
+
+        class Stream:
+            def __enter__(self):
+                return types.SimpleNamespace(text_stream=iter(["Hello ", "bees"]), get_final_message=lambda: message)
+
+            def __exit__(self, *problem):
+                return False
+        model.client = types.SimpleNamespace(messages=types.SimpleNamespace(stream=lambda **options: Stream()))
+        model.connect = lambda: types.SimpleNamespace(APIError=RuntimeError)
+        pieces = []
+        self.assertEqual(model.converse("System", [{"role": "user", "content": "Hi"}], [], onText=pieces.append)["text"], "Hello bees")
+        self.assertEqual(pieces, ["Hello ", "bees"])
+        self.assertTrue(model.streams)
+        model.connect = lambda: types.SimpleNamespace(APIError=RuntimeError)
+        stream = model.client.messages.stream
+        model.client.messages.stream = lambda **options: (model.cancel(), stream(**options))[1]
+        with self.assertRaisesRegex(Exception, "was stopped while it wrote"):
+            model.converse("System", [{"role": "user", "content": "Hi"}], [], onText=pieces.append)
 
     def testOpenAiCallsAreReadAndGivenBackAsTheyCame(self):
         item = FakeBlock(id="c1", type="function", function=types.SimpleNamespace(name="read_file", arguments='{"path": "a"}'), extra_content={"google": {"thought_signature": "x"}})
@@ -362,7 +426,7 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(reply["raw"]["openai"]["tool_calls"][0]["extra_content"], {"google": {"thought_signature": "x"}})
         self.assertEqual(reply["raw"]["openai"]["reasoning_content"], "thinking")
         self.assertEqual(asked[0]["tools"][0], {"type": "function", "function": {"name": "read_file", "description": "Read", "parameters": {"type": "object"}}})
-        self.assertFalse(model.appendOnly)
+        self.assertTrue(model.canShorten)
 
     def testALocalModelUsesTheToolsOfItsTemplateOrWritesThem(self):
         class Inputs(dict):

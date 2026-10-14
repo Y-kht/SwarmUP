@@ -31,7 +31,9 @@ FLUSH_SECONDS = 0.5
 AGENT_WORDS = ("approve", "reject", "start")
 AGENT_TEXT_WORDS = ("correct", "remove", "msg")
 SWARM_WORDS = ("help", "?", "tree", "log", "cost", "add", "stop", "kill", "quit")
-AGENT_EVENTS = ("activity", "status", "review", "scheduled", "model", "connectionLost", "joined", "removed")
+AGENT_EVENTS = ("activity", "status", "review", "scheduled", "model", "connectionLost", "joined", "removed", "call")
+# The end of the text an agent writes now, shown on the panel of its window while it writes.
+LIVE_SHOWN = 300
 
 
 class Window:
@@ -262,6 +264,11 @@ class Hub:
             lines.append(f"Waits for: {', '.join(info['waitingOn'])}")
         if spent:
             lines.append(f"Spent: {formatDollars(spent['cost'])} in {spent['calls']} calls")
+        tools = swarm.gateway.records.countsOf().get(name) if getattr(swarm, "gateway", None) is not None else None
+        if tools:
+            lines.append(f"Tools: {tools['calls']} calls, {tools['errors']} errors, {tools['refused']} refused")
+        if info.get("live"):
+            lines.append("Writing now: " + " ".join(info["live"][-LIVE_SHOWN:].split()))
         return "\n".join(lines)
 
     def describeCost(self, swarm):

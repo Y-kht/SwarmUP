@@ -521,9 +521,9 @@ class RememberedWorkTests(SavedSwarmCase):
         resumed.members["Leader"]["agent"].agent = FakeAgent(["Summary of Coder"])
         resumed.members["Coder"]["agent"].askUser = lambda question: "yes"
         self.assertEqual(resumed.resume(), "final")
-        prompt = resumed.members["Coder"]["agent"].agent.prompts[0]
-        self.assertIn("ORIGINAL", prompt)
-        self.assertNotIn("print('draft')", prompt)
+        current = resumed.members["Coder"]["agent"].agent.prompts[0].split("Current content of the file:")[-1]
+        self.assertIn("ORIGINAL", current)
+        self.assertNotIn("print('draft')", current)
         self.assertEqual(target.read_text(encoding="utf-8"), "print('final')")
 
     def testTheOriginalCodeIsInTheSavedStateBeforeTheFileIsFirstOverwritten(self):

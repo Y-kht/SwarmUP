@@ -1,4 +1,4 @@
-# Copying and pasting, for every agent (the tools copy_path, copy_text, paste_text and list_clips of agent_tools.py).
+# Copying and pasting, for every agent (the tools of the transfer server, server_transfer.py).
 # 1. Files and folders are copied exactly (their bytes, their dates, the links as links), also from one place to another: from the folder of the
 #    agent to its temp folder to work on a copy or keep a backup, into the memory of the mission, and back. A copy is written under another name
 #    first and then renamed, so a copy that fails half way never leaves half a file, and a target that exists is only replaced when asked (in the
@@ -64,12 +64,12 @@ def copyExactly(source, target):
 # The text of a file with its exact line ends. A Word or PDF document gives its text.
 def exactText(path, name):
     if path.is_dir():
-        raise ValueError(f"{name} is a folder: copy it with copy_path.")
+        raise ValueError(f"{name} is a folder: copy it with transfer__copy_path.")
     if path.suffix.lower() in (".docx", ".pdf"):
         return extractText(path)
     data = path.read_bytes()
     if b"\0" in data[:8192]:
-        raise ValueError(f"{name} is a binary file: copy it whole with copy_path.")
+        raise ValueError(f"{name} is a binary file: copy it whole with transfer__copy_path.")
     return data.decode("utf-8", errors="replace")
 
 
@@ -105,8 +105,9 @@ class TransferTools:
         if exists and destination.path.is_dir() != origin.path.is_dir():
             raise ValueError(f"{destination.name} is a {'folder' if destination.path.is_dir() else 'file'} and {origin.name} is not: they cannot replace each other.")
         size = describeSize(*measure(origin.path))
-        self.allowChange([destination], "copy", f"{origin.name} -> {destination.name} ({size})" + (", in place of what is there" if exists else ""), reason)
-        copyExactly(origin.path, destination.path)
+        with self.claim(destination):
+            self.allowChange([destination], "copy", f"{origin.name} -> {destination.name} ({size})" + (", in place of what is there" if exists else ""), reason)
+            copyExactly(origin.path, destination.path)
         self.settleMemory(destination)
         self.noteUse(origin, "read")
         self.logChange(destination, f"Copied {origin.path} to {destination.path}.")
@@ -138,17 +139,17 @@ class TransferTools:
         clips = self.readClips()
         clips[name] = {"text": block, "source": source, "time": f"{datetime.now():%Y-%m-%d %H:%M:%S}"}
         writeJson(self.clipsPath(), clips)
-        return f"Copied {source} into the clipboard {name} ({len(block.splitlines())} lines, {len(block)} characters). Paste it with paste_text."
+        return f"Copied {source} into the clipboard {name} ({len(block.splitlines())} lines, {len(block)} characters). Paste it with transfer__paste_text."
 
     def list_clips(self):
         clips = self.readClips()
         lines = [f"- {name}: {len(clip['text'].splitlines())} lines from {clip['source']} ({clip['time']}), starting with: {firstLine(clip['text'])}" for name, clip in clips.items()]
-        return "\n".join(lines) or "Your clipboards are empty. Copy a block with copy_text."
+        return "\n".join(lines) or "Your clipboards are empty. Copy a block with transfer__copy_text."
 
     def paste_text(self, path, clip=DEFAULT_CLIP, at_line=None, after_text=None, replace_text=None, at_end=False, reason=""):
         name, clips = (clip or DEFAULT_CLIP).strip(), self.readClips()
         if name not in clips:
-            raise ValueError(f"There is no clipboard {name}. Your clipboards: {', '.join(clips) or 'none yet, copy a block with copy_text'}.")
+            raise ValueError(f"There is no clipboard {name}. Your clipboards: {', '.join(clips) or 'none yet, copy a block with transfer__copy_text'}.")
         if sum(choice for choice in (at_line is not None, after_text is not None, replace_text is not None, bool(at_end))) != 1:
             raise ValueError("Say where to paste with exactly one of at_line, after_text, replace_text or at_end.")
         block, spot = clips[name]["text"], self.target(path)

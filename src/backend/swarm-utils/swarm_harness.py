@@ -7,6 +7,7 @@ from datetime import datetime
 
 from harness_utils import STATE_LOCK, STATE_VERSION
 from mission_costs import MissionCosts
+from model_adapters import adapterOf
 from saved_swarms import saveSwarmState
 from swarm_review import SwarmReview
 from swarm_rounds import SwarmRounds
@@ -15,6 +16,8 @@ from swarm_team import SwarmTeam
 
 
 # What is saved of an agent of a swarm, apart from its loop and the lists.
+# The events that pass at once (the text an agent writes, the progress of a call, a call that failed): the state is not saved for them.
+PASSING_EVENTS = ("text", "progress", "call")
 SAVED_FIELDS = ("role", "task", "boss", "model", "recipe", "status", "result", "error", "mode", "review", "draft", "problem", "revision", "started", "sitsOut")
 
 
@@ -89,6 +92,8 @@ class Swarm(SwarmTeam, SwarmReview, SwarmRun, SwarmRounds):
         # The memory of the session, shared by the agents (WorkSession in agent_storehouse.py), and the name of the run, where the results are saved.
         self.session = None
         self.runName = ""
+        # The gateway of the mission (mcp_gateway.py): every call of a tool of its agents goes through it, while a run works.
+        self.gateway = None
         # A mission has rounds: the first request of the user, then each follow-up. requests holds them all, {round, text, time}.
         self.round = 1
         self.requests = []
@@ -107,7 +112,8 @@ class Swarm(SwarmTeam, SwarmReview, SwarmRun, SwarmRounds):
 
     def emit(self, kind, agent="", **details):
         event = {"kind": kind, "agent": agent, "time": f"{datetime.now():%H:%M:%S}", **details}
-        self.checkpoint()
+        if kind not in PASSING_EVENTS:
+            self.checkpoint()
         for listener in list(self.listeners):
             try:
                 listener(event)
@@ -149,10 +155,10 @@ class Swarm(SwarmTeam, SwarmReview, SwarmRun, SwarmRounds):
             warning = f"Warning: the state of the swarm could not be saved ({failure}). If the program stops, its work cannot be continued."
             threading.Thread(target=self.getMember(self.leader)["agent"].notifyUser, args=(warning,), daemon=True).start()
 
-    # The user leads the swarm instead of a model (UserLeader in cli_models.py): the leader is not asked to summarise for the user, or to send the
-    # corrections of the user on, since it is the user.
+    # The user leads the swarm instead of a model (UserLeader in cli_models.py, whose adapter approves itself): the leader is not asked to
+    # summarise for the user, or to send the corrections of the user on, since it is the user.
     def leaderIsUser(self):
-        return bool(self.leader) and getattr(self.getMember(self.leader)["agent"].agent, "isUser", False)
+        return bool(self.leader) and bool(getattr(adapterOf(self.getMember(self.leader)["agent"].agent), "approvesItself", False))
 
     # Writes in the memory of the mission (MissionMemory in mission_memory.py) while the swarm runs, for example
     # record("addUserPrompt", round, text). The memory is only a record: a problem with it never stops the swarm.

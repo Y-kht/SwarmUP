@@ -5,7 +5,7 @@
 // What the state of a mission says, in the tabs and in the history: [label, tone, icon].
 const MISSION_STATES = {
   building: ['Being built', '', 'edit'], running: ['Running', 'primary', 'activity'], waiting: ['Waits for you', 'honey', 'bell'],
-  finished: ['Round over', 'success', 'checkCircle'], stopped: ['Stopped', '', 'stop'], interrupted: ['Interrupted', 'warning', 'hourglass'], paused: ['Paused', 'warning', 'wifiOff'],
+  finished: ['Round over', 'success', 'checkCircle'], failed: ['Failed', 'danger', 'alert'], stopped: ['Stopped', '', 'stop'], interrupted: ['Interrupted', 'warning', 'hourglass'], paused: ['Paused', 'warning', 'wifiOff'],
 };
 
 // ==============

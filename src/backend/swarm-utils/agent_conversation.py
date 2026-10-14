@@ -1,42 +1,42 @@
-# The conversation of an agent with its model. A model client that can hold a conversation (converse: the API models and the local models)
-# works like Claude Code and Codex: SwarmUP and the model talk turn after turn, the model calls its tools (agent_tools.py), SwarmUP runs them and
-# gives back what they found, and so on until the model answers. The conversation goes on for the whole run of the agent: a correction of the
-# user is the next message of the same conversation, and the model still knows what it read and did.
-# The messages of the user and of the other agents arrive between two steps, so the agent reads them while it works, and not only at its next draft.
-# The conversation is saved in the session of the swarm after each step, so a swarm that goes on after a stop goes on with it.
-# A client that cannot hold a conversation (a test agent, or one with tools of its own like Claude Code) is asked one prompt at a time instead
-# (consultFolder in agent_storehouse.py).
+# The core loop of an agent (docs/MCP_DESIGN_BOOKLET.md, section 8). Every agent works the same way, whatever its model: SwarmUP and the
+# model talk turn after turn, the model calls the tools of the MCP servers of SwarmUP through the gateway (mcp_gateway.py), SwarmUP gives back
+# what they found, and so on until the model answers. The model is reached through its adapter (model_adapters.py), so this loop never asks
+# what kind of model it speaks to. The conversation goes on for the whole run of the agent: a correction of the user is the next message of
+# the same conversation, and the model still knows what it read and did.
+# The messages of the user and of the other agents arrive between two steps, so the agent reads them while it works, and never in the middle
+# of a call. The conversation is saved in the session of the swarm after each step, so a swarm that goes on after a stop goes on with it.
 #
-# The messages are written the same way for every provider, and each client translates them (model_clients.py):
+# The messages are written the same way for every model, and each adapter translates them:
 # {"role": "user", "content": text}, {"role": "assistant", "content": text, "calls": [{"id", "name", "arguments"}], "raw": what the provider sent},
 # and {"role": "tool", "id", "name", "content": text, "error": True if the tool failed}.
-# A client gives back {"text", "calls", "raw", "cut": True if the answer was cut before its calls were complete}.
+# An adapter gives back {"text", "calls", "raw", "cut": True if the answer was cut before its calls were complete}.
+import contextlib
 import json
+import time
 
 import agent_prompts as prompts
-from agent_storehouse import describeTree, safeName
-from agent_tools import Toolbox, describeCall
+from agent_storehouse import agentWorkspace, describeTree, safeName
 from harness_utils import STOPPED_MESSAGE, SwarmStopped
+from mcp_gateway import LOOSE_GATEWAY, gatewayOf
 from memory_cache import describeMemory
+from model_adapters import adapterOf
 
 
 MAX_STEPS = 25
 CONTEXT_CHARS = 600000
 KEEP_RECENT = 12
 CONVERSATIONS_FOLDER = "conversations"
-
-
-def canConverse(agent):
-    return callable(getattr(agent, "converse", None))
+BAD_CALLS = 3
+TEXT_SECONDS = 0.25
 
 
 # What the agent knows of itself for the whole conversation: who it is, where it works and how, its rules, its approved plan, and the memory
 # (its notes included) with the temp folder.
-def describeAgent(loop, toolbox, own):
-    workplace = prompts.FOLDER_WORKPLACE.format(folder=toolbox.root, tree=describeTree(toolbox.root)) if loop.folder else \
-        prompts.SCRATCH_WORKPLACE.format(folder=toolbox.root)
+def describeAgent(loop, readOnly, own):
+    root = agentWorkspace(loop)
+    workplace = prompts.FOLDER_WORKPLACE.format(folder=root, tree=describeTree(root)) if loop.folder else prompts.SCRATCH_WORKPLACE.format(folder=root)
     parts = [prompts.AGENT_SYSTEM_PROMPT.format(name=loop.name, task=loop.describeTask() or "the requests of SwarmUP below.", workplace=workplace)]
-    if toolbox.readOnly:
+    if readOnly:
         parts.append(prompts.LOOK_ONLY_PROMPT)
     if own and loop.rules:
         parts.append(f"THE RULES OF YOUR TASK. Follow them strictly:\n{loop.rules}")
@@ -47,11 +47,51 @@ def describeAgent(loop, toolbox, own):
     return "\n\n".join(parts)
 
 
+# The link of the agent to the servers, for one request. The gateway of a swarm keeps it open; an agent alone has it for one request.
+@contextlib.contextmanager
+def linkOf(loop):
+    gateway = gatewayOf(loop)
+    link = gateway.link(loop)
+    try:
+        yield link
+    finally:
+        if gateway is LOOSE_GATEWAY:
+            gateway.drop(loop)
+
+
+# The text a model writes, given to the loop while it writes it (UX-04), at most every TEXT_SECONDS, so the user sees the work at once.
+class LiveText:
+    def __init__(self, loop):
+        self.loop, self.text, self.told = loop, "", 0.0
+
+    def add(self, piece):
+        self.text += piece
+        now = time.monotonic()
+        if now - self.told >= TEXT_SECONDS:
+            self.told = now
+            self.loop.recordText(self.text)
+
+    def end(self):
+        if self.text:
+            self.loop.recordText(self.text, done=True)
+
+
+# What an adapter receives besides the conversation, by what it can do: the text while it writes it, and the tools to run itself.
+def adapterOptions(adapter, loop, link, readOnly, live):
+    options = {}
+    if getattr(adapter, "streams", False):
+        options["onText"] = live.add
+    if getattr(adapter, "runsTools", False) and link is not None:
+        options["runTool"] = lambda name, arguments: link.call(name, arguments, readOnly)
+    return options
+
+
 class Conversation:
     # own is False for a conversation that only serves one request of a leader (building the swarm): it only looks, and it is not kept.
     def __init__(self, loop, own=True):
         self.loop, self.own = loop, own
         self.system, self.messages, self.delivered = "", [], [0, 0]
+        self.badCalls = 0
 
     def path(self):
         return self.loop.session.folder / CONVERSATIONS_FOLDER / f"{safeName(self.loop.name)}.json"
@@ -88,9 +128,9 @@ class Conversation:
         self.delivered = [len(inbox), len(users)]
         return "\n".join(lines)
 
-    # A long conversation drops the old results of its tools, except for a provider that needs the conversation to stay as it was (Claude).
-    def shorten(self):
-        if getattr(self.loop.agent, "appendOnly", False) or sum(len(str(message.get("content") or "")) for message in self.messages) <= CONTEXT_CHARS:
+    # A long conversation drops the old results of its tools, except for a model whose old messages must stay as they were (Claude).
+    def shorten(self, adapter):
+        if not getattr(adapter, "canShorten", True) or sum(len(str(message.get("content") or "")) for message in self.messages) <= CONTEXT_CHARS:
             return
         for message in self.messages[:-KEEP_RECENT]:
             if message["role"] == "tool" and message["content"] != prompts.OLD_RESULT:
@@ -101,40 +141,94 @@ class Conversation:
         if team is not None and team.shouldStop(self.loop.name):
             raise SwarmStopped(STOPPED_MESSAGE)
 
+    # ADP-05: a model that cannot write a correct call is told the correct format, and after BAD_CALLS in a row its leader and the user know it.
+    def noteBadCall(self, bad):
+        self.badCalls = self.badCalls + 1 if bad else 0
+        if self.badCalls != BAD_CALLS:
+            return
+        loop, team = self.loop, getattr(self.loop, "team", None)
+        text = f"{loop.name} wrote {BAD_CALLS} tool calls in a row that SwarmUP could not read. Its model may be too small for its task."
+        if team is not None and team.leader != loop.name:
+            team.communicate("SwarmUP", team.leader, text)
+        loop.notifyUser(f"[{loop.name}] {text}")
+
     # One request: the model works with its tools for MAX_STEPS steps at most, then its answer is given back.
     def ask(self, prompt):
-        loop, toolbox = self.loop, Toolbox(self.loop, readOnly=not self.own)
-        if not self.system:
-            self.system = describeAgent(loop, toolbox, self.own)
-        news = self.news()
-        self.messages.append({"role": "user", "content": f"{news}\n\n{prompt}" if news else prompt})
-        reply = {"text": ""}
-        for step in range(MAX_STEPS):
-            self.checkStop()
-            self.shorten()
-            reply = loop.callModel(lambda: loop.agent.converse(self.system, self.messages, toolbox.schemas()), self.own)
-            calls = reply.get("calls") or []
-            self.messages.append({"role": "assistant", "content": reply.get("text") or "", "calls": calls, "raw": reply.get("raw")})
-            if not calls:
-                break
-            loop.recordActivity(", ".join(describeCall(call["name"], call.get("arguments")) for call in calls))
-            for call in calls:
-                problem = call.get("problem") or (prompts.CUT_CALL if reply.get("cut") else "")
-                text, error = (f"Not done: {problem}", True) if problem else toolbox.run(call["name"], call.get("arguments"))
-                self.messages.append({"role": "tool", "id": call["id"], "name": call["name"], "content": text, "error": error})
+        loop, readOnly = self.loop, not self.own
+        adapter = adapterOf(loop.agent)
+        self.checkStop()
+        with linkOf(loop) as link:
+            link.resume()
+            link.stale = True
+            if not self.system:
+                self.system = describeAgent(loop, readOnly, self.own)
             news = self.news()
-            if step == MAX_STEPS - 2:
-                news = f"{news}\n\n{prompts.LAST_STEP}" if news else prompts.LAST_STEP
-            if news:
-                self.messages.append({"role": "user", "content": news})
-            self.save()
+            self.messages.append({"role": "user", "content": f"{news}\n\n{prompt}" if news else prompt})
+            reply = {"text": ""}
+            for step in range(MAX_STEPS):
+                self.checkStop()
+                self.shorten(adapter)
+                tools = link.tools(readOnly)
+                if hasattr(adapter, "attach"):
+                    adapter.attach(loop)
+                live = LiveText(loop)
+                options = adapterOptions(adapter, loop, link, readOnly, live)
+                try:
+                    reply = loop.callModel(lambda: adapter.converse(self.system, self.messages, tools, **options), self.own)
+                finally:
+                    live.end()
+                calls = reply.get("calls") or []
+                self.messages.append({"role": "assistant", "content": reply.get("text") or "", "calls": calls, "raw": reply.get("raw")})
+                if not calls:
+                    break
+                loop.recordActivity(", ".join(describeCall(call["name"], call.get("arguments")) for call in calls))
+                for call in calls:
+                    problem = call.get("problem") or (prompts.CUT_CALL if reply.get("cut") else "")
+                    self.noteBadCall(bool(call.get("problem")))
+                    text, error = (f"Not done: {problem}", True) if problem else link.call(call["name"], call.get("arguments"), readOnly)
+                    self.messages.append({"role": "tool", "id": call["id"], "name": call["name"], "content": text, "error": error})
+                news = self.news()
+                if step == MAX_STEPS - 2:
+                    news = f"{news}\n\n{prompts.LAST_STEP}" if news else prompts.LAST_STEP
+                if news:
+                    self.messages.append({"role": "user", "content": news})
+                self.save()
         self.save()
         return reply.get("text") or ""
 
 
-# Asks the model of the loop in its conversation. own is False for a request of a leader that is not part of its own work: it gets a
-# conversation of its own, which only looks.
-def talk(loop, prompt, own):
+def describeCall(name, arguments):
+    shown = {key: (value if len(str(value)) <= 80 else str(value)[:77] + "...") for key, value in (arguments or {}).items() if key not in ("content", "new_text", "old_text")}
+    return f"{name}({json.dumps(shown, ensure_ascii=False)[1:-1]})"
+
+
+# A request that needs no tool (a check, a summary, a route): one message, with what the agent must know written before it.
+def answerOnce(loop, prompt, own):
+    if own and loop.approvedPlan:
+        prompt = prompts.APPROVED_PLAN_PROMPT.format(plan=loop.approvedPlan) + f"\n\n{prompt}"
+    if loop.userMessages:
+        prompt = prompts.USER_MESSAGES_PROMPT.format(messages="\n".join(f"- {message}" for message in loop.userMessages)) + f"\n\n{prompt}"
+    if loop.inbox:
+        prompt = "Messages from the other agents of your swarm:\n" + "\n".join(loop.inbox) + f"\n\n{prompt}"
+    if own and loop.rules:
+        prompt = f"Follow these rules strictly:\n{loop.rules}\n\n{prompt}"
+    adapter = adapterOf(loop.agent)
+    if hasattr(adapter, "attach"):
+        adapter.attach(loop)
+    live = LiveText(loop)
+    options = adapterOptions(adapter, loop, None, True, live)
+    try:
+        reply = loop.callModel(lambda: adapter.converse("", [{"role": "user", "content": prompt}], [], **options), own)
+    finally:
+        live.end()
+    return reply.get("text") or ""
+
+
+# Asks the model of the loop. With tools it works in its conversation (own: its own work, kept for the whole run; otherwise a request of a
+# leader that is not part of its own work, in a conversation of its own that only looks). Without tools it answers one message.
+def talk(loop, prompt, own, tools=True):
+    if not tools:
+        return answerOnce(loop, prompt, own)
     if not own:
         return Conversation(loop, own=False).ask(prompt)
     if loop.conversation is None:

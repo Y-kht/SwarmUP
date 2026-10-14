@@ -133,6 +133,9 @@ def formatEvent(event):
         return f"{agent} is gone: what it left half done was put back, and its model freed its memory.", "info"
     if kind == "model":
         return f"{agent} now uses {event.get('model')}.", "info"
+    # A call that took too long, and what a server outside SwarmUP must tell the user (a tool that changed, a server that did not start).
+    if kind == "call" and (event.get("outcome") == "timeout" or not event.get("tool")):
+        return f"{agent}: {event.get('note')}", "warning"
     return None, None
 
 

@@ -28,7 +28,8 @@ function viewRun() {
     flush: true,
     content: h('div', { class: 'run' },
       h('div', { class: 'run-left', 'data-scroll': 'run-left' },
-        h('div', { class: 'run-bar' }, costBadge(), h('span', { class: 'grow' }),
+        h('div', { class: 'run-bar' }, costBadge(), button('Calls', { kind: 'ghost', size: 'sm', iconName: 'list', title: 'Every tool the agents used, and how it ended', onClick: () => openCalls() }),
+          h('span', { class: 'grow' }),
           button('Add an agent', { size: 'sm', iconName: 'plus', disabled: !run.canJoin, onClick: () => openModal({ type: 'tasks', live: true }),
             title: run.canJoin ? 'A new agent joins the swarm now, and every agent is told' : 'The leader started its final work: an agent can join when the run is over' }),
           run.running ? button('Stop the swarm', { kind: 'danger-ghost', size: 'sm', iconName: 'stop', onClick: () => openModal({ type: 'stop' }) }) : null,
@@ -221,6 +222,7 @@ function agentDetail(run, agent) {
     h('div', { class: 'card-body' },
       h('div', { class: 'detail-section' }, h('h4', {}, 'Its task'), h('p', { class: 'muted' }, agent.description),
         agent.waitsFor.length && !agent.isLeader ? h('p', { class: 'small', style: { marginTop: '6px' } }, icon('clock', 'sm'), ` Waits for ${agent.waitsFor.join(', ')} and receives their results.`) : null),
+      liveSection(agent),
       ready ? h('div', { class: 'detail-section' }, h('div', { class: 'row', style: { marginBottom: '8px' } }, h('h4', { class: 'grow', style: { margin: '0' } }, `Its ${what} waits for you`), badge(`Draft ${agent.revision}`, 'outline')),
         h('div', { class: 'draft-box ready' }, agent.draft),
         agent.problem ? h('div', { style: { marginTop: '10px' } }, callout('warning', 'alert', h('b', {}, 'The automatic checks found a problem.'), h('div', {}, agent.problem))) :

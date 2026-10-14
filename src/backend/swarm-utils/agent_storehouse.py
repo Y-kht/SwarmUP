@@ -1,8 +1,6 @@
-# The storehouse of the agents: how every agent reaches the files of its folder, where the work it makes is saved, and what it remembers
-# during a swarm session.
-# 1. The files. Whatever its model, an agent sees the tree of its folder (every depth) and can ask, with blocks in its answer, to list a folder,
-#    find files by name, search words in the files, and read a file (text, .docx, and .pdf with pypdf). It only reads: nothing is changed.
-#    A path that leaves the folder is refused. The coding agents (Claude Code, Codex) have their own tools, so they do not use the blocks.
+# The storehouse of the agents: the files of their folders, where the work they make is saved, and their workspaces.
+# 1. The files. The tree of a folder (every depth), the files found by name, the words found in the files, and the text of a file (text, .docx,
+#    and .pdf with pypdf). The tools of the files server (server_files.py, agent_tools.py) use them, whatever the model behind the agent.
 # 2. The results. What an agent saves goes in swarmup-results/<run> inside its folder, one folder for each run of the swarm, named by its time
 #    and its mission. An agent without a folder saves in agent-files/results/<run>.
 # 3. The memory. Each swarm is a mission with a memory of its own, the long-term memory of the user and a temp folder (mission_memory.py):
@@ -22,9 +20,7 @@ from datetime import datetime
 from pathlib import Path
 from xml.etree import ElementTree
 
-import agent_prompts as prompts
 import harness_utils
-from memory_cache import describeMemory
 
 
 RESULTS_FOLDER = "swarmup-results"
@@ -34,23 +30,15 @@ WORKSPACES_FOLDER = "agent-workspaces"
 SKIPPED_FOLDERS = {"__pycache__", "node_modules", "venv", "env", "site-packages", "dist", "build", RESULTS_FOLDER}
 TREE_LIMIT = 200
 SCAN_LIMIT = 20000
-READ_PART_CHARS = 30000
 MAX_READ_BYTES = 20000000
-ROUND_CHARS = 80000
 FIND_LIMIT = 100
 SEARCH_LIMIT = 80
 SEARCH_FILE_BYTES = 2000000
 LINE_CHARS = 300
-MAX_TOOL_ROUNDS = 8
 ICLOUD_WAIT_SECONDS = 20
 BINARY_PROBE = 8192
 NAME_SIGNS = re.compile(r"[^\w.-]")
 WORD_NAMESPACE = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
-# The blocks are read even when they are not written exactly as asked: spaces, capitals, or a missing closing tag (then the line ends the block).
-REQUEST_PATTERN = re.compile(r"<\s*swarmup_(read|list|find|search)\b([^>]*)>(.*?)(?:<\s*/\s*swarmup_\1\s*>|$)", re.IGNORECASE | re.MULTILINE)
-NOTE_PATTERN = re.compile(r"<\s*swarmup_note\s*>(.*?)(?:<\s*/\s*swarmup_note\s*>|\Z)", re.IGNORECASE | re.DOTALL)
-PART_PATTERN = re.compile(r"part\s*=\s*[\"']?(\d+)", re.IGNORECASE)
-REQUEST_WORDS = {"read": "reads", "list": "lists", "find": "looks for", "search": "searches for"}
 
 
 # ==============
@@ -163,7 +151,7 @@ def describeTree(folder, sub=""):
     root = Path(folder).resolve()
     base = findPath(root, sub, folders=True) if cleanRequest(sub) else root
     if not base.is_dir():
-        raise ValueError(f"{cleanRequest(sub)} is a file, not a folder. Read it with <swarmup_read>.")
+        raise ValueError(f"{cleanRequest(sub)} is a file, not a folder. Read it with files__read_file.")
     found = scanFolder(root, base)
     skipped = [f"- {path}/ ({why})" for path, why in found["skipped"].items()]
     if len(found["files"]) <= TREE_LIMIT:
@@ -174,10 +162,10 @@ def describeTree(folder, sub=""):
             parent = path.rpartition("/")[0] or "."
             counts[parent] = counts.get(parent, 0) + 1
         lines = [f"It holds {len(found['files']):,} files, too many to list one by one. The folders, with the number of files in each "
-                 "(ask <swarmup_list>folder</swarmup_list> for the files of one, or <swarmup_find> to find a file by name):"]
+                 "(list one with files__list_files, or find a file by name with files__find_files):"]
         lines += [f"- {path}/ ({count} files)" for path, count in list(counts.items())[:TREE_LIMIT]] + skipped[:TREE_LIMIT]
         if len(counts) > TREE_LIMIT:
-            lines.append(f"- ... and {len(counts) - TREE_LIMIT:,} more folders: ask <swarmup_find> to find them by name.")
+            lines.append(f"- ... and {len(counts) - TREE_LIMIT:,} more folders: find them by name with files__find_files.")
     if not found["complete"]:
         lines.append(f"- ... the folder is very big, so only its first {SCAN_LIMIT:,} entries were looked at.")
     return "\n".join(lines) or "The folder is empty."
@@ -206,7 +194,7 @@ def findPath(root, text, folders=False):
         return findPath(root, same[0], folders)
     close = difflib.get_close_matches(text, names, n=3, cutoff=0.5)
     close += [name for name in names if comparable(name.rpartition("/")[2]) == comparable(Path(text).name) and name not in close][:3]
-    hint = f" Did you mean: {', '.join(close)}?" if close else " Ask <swarmup_find> to look for it by name."
+    hint = f" Did you mean: {', '.join(close)}?" if close else " Look for it by name with files__find_files."
     raise ValueError(f"There is no {'folder' if folders else 'file'} {text} in the folder.{hint}")
 
 
@@ -259,22 +247,6 @@ def extractText(path):
     return data.decode("utf-8", errors="replace")
 
 
-# A long file comes in parts of READ_PART_CHARS characters, and the agent asks for the next part.
-def readFile(folder, text, part=1):
-    root = Path(folder).resolve()
-    path = findPath(root, text)
-    name = path.relative_to(root).as_posix()
-    if path.is_dir():
-        return f"{name} is a folder. Its files:\n{describeTree(root, name)}"
-    content = extractText(path)
-    parts = max(1, -(-len(content) // READ_PART_CHARS))
-    part = min(max(part, 1), parts)
-    piece = content[(part - 1) * READ_PART_CHARS:part * READ_PART_CHARS]
-    heading = f"{name}" + (f" (part {part} of {parts})" if parts > 1 else "")
-    following = f'\n[The file goes on: ask <swarmup_read part="{part + 1}">{name}</swarmup_read> for the next part.]' if part < parts else ""
-    return f"{heading}:\n{piece or '(the file is empty)'}{following}"
-
-
 # The files and folders whose name matches: a pattern with * or ?, or any part of the name.
 def findFiles(folder, pattern):
     wanted = comparable(cleanRequest(pattern))
@@ -310,94 +282,6 @@ def searchFiles(folder, words):
                 if len(hits) >= SEARCH_LIMIT:
                     return "\n".join(hits) + "\n- ... more lines match: search for more precise words."
     return "\n".join(hits) or f"No text file of the folder contains {cleanRequest(words)}."
-
-
-# ==============
-# The blocks an agent writes to reach its folder, and the answers SwarmUP gives.
-# ==============
-# The requests of an answer, as (kind, what, part), in their order.
-def findRequests(answer):
-    requests = []
-    for kind, attributes, value in REQUEST_PATTERN.findall(answer):
-        part = PART_PATTERN.search(attributes)
-        if cleanRequest(value) or kind.lower() == "list":
-            requests.append((kind.lower(), cleanRequest(value), int(part.group(1)) if part else 1))
-    return requests
-
-
-# places are those of the mission (MissionMemory.roots): a request can name them, like <swarmup_read>@memory/PROGRESS.md</swarmup_read>.
-def answerRequest(folder, kind, value, part, places=None):
-    try:
-        place, folder, value = splitPlace(places or {}, value, folder or ".")
-        if not place and folder == Path("."):
-            raise ValueError("You have no folder of your own. Read the places of your mission instead: " + ", ".join(places or {}) + ".")
-        if place in ("@memory", "@long-term") and any(name.startswith(".") for name in Path(value).parts):
-            raise ValueError(f"{place}/{value} is kept by SwarmUP itself and cannot be reached.")
-        if kind == "read":
-            return readFile(folder, value, part)
-        if kind == "list":
-            return describeTree(folder, value)
-        return findFiles(folder, value) if kind == "find" else searchFiles(folder, value)
-    except (ValueError, OSError) as error:
-        return f"Not possible: {error}"
-
-
-# What SwarmUP answers to the requests of one round. All together they stay under ROUND_CHARS characters.
-def answerRequests(folder, requests, places=None):
-    replies, used = [], 0
-    for kind, value, part in requests:
-        reply = answerRequest(folder, kind, value, part, places)
-        if used + len(reply) > ROUND_CHARS:
-            reply = reply[:max(ROUND_CHARS - used, 0)] + "\n[Cut here: too much was asked at once. Ask for the rest in your next answer.]"
-        used += len(reply)
-        replies.append(f"=== {kind} {value or '(the whole folder)'}{f' (part {part})' if part > 1 else ''} ===\n{reply}")
-    return "\n\n".join(replies)
-
-
-def describeRequests(requests):
-    return ", ".join(f"{REQUEST_WORDS[kind]} {value or 'the whole folder'}" + (f" (part {part})" if part > 1 else "") for kind, value, part in requests)
-
-
-# The notes of an answer go to the memory of the agent, and the answer is given back without them.
-def takeNotes(answer, loop):
-    if not NOTE_PATTERN.search(answer):
-        return answer
-    if loop.session:
-        loop.session.addNotes(loop.name, [note.strip() for note in NOTE_PATTERN.findall(answer) if note.strip()])
-    return NOTE_PATTERN.sub("", answer).strip()
-
-
-# What an agent knows of its work place, before its task: the files of its folder and what it may ask of them (not for a coding agent, which
-# has its own tools), and the notes it kept in this session. tools is False for the calls that only check a draft.
-def describeWorkplace(loop, prompt, tools):
-    if not tools or getattr(loop.agent, "isUser", False):
-        return prompt
-    parts = []
-    if loop.folder and not hasattr(loop.agent, "attach"):
-        parts.append(prompts.FOLDER_TOOLS_PROMPT.format(folder=loop.folder, tree=describeTree(loop.folder), rounds=MAX_TOOL_ROUNDS))
-    if loop.session:
-        how = prompts.MEMORY_CODING_HOW if hasattr(loop.agent, "attach") else prompts.MEMORY_BLOCKS_HOW
-        parts += [describeMemory(loop.session.memory, loop.name, how=how), prompts.NOTES_PROMPT]
-    return "\n\n".join([*parts, prompt])
-
-
-# Asks the model of the loop (ask gives its answer) and answers the requests of files it writes, for MAX_TOOL_ROUNDS rounds at most.
-# The user is told what the agent reads. The answer that is given back has no request and no note left in it.
-def consultFolder(loop, prompt, ask, tools):
-    reaches = tools and not hasattr(loop.agent, "attach") and not getattr(loop.agent, "isUser", False) and (loop.folder or loop.session)
-    places = loop.session.memory.roots() if loop.session else {}
-    for number in range(MAX_TOOL_ROUNDS + 1):
-        answer = takeNotes(ask(prompt), loop) if tools else ask(prompt)
-        requests = findRequests(answer) if reaches else []
-        if not requests:
-            return answer
-        if number == MAX_TOOL_ROUNDS:
-            return REQUEST_PATTERN.sub("", answer).strip()
-        loop.notifyUser(f"[{loop.name}] {describeRequests(requests)} in its folder.")
-        last = number + 1 == MAX_TOOL_ROUNDS
-        prompt += "\n\n" + prompts.FOLDER_ANSWER_PROMPT.format(asked=answer.strip(), files=answerRequests(loop.folder, requests, places),
-                                                              next=prompts.FOLDER_LAST_ROUND if last else prompts.FOLDER_NEXT_ROUND)
-    return answer
 
 
 # ==============

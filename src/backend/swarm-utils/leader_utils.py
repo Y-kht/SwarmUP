@@ -2,29 +2,25 @@
 # and tells it the mission. The leader proposes the whole swarm: the agents, their tasks and settings, their models, and who waits for whom.
 # While the swarm works, it can propose to add an agent, to remove one, or to change the model of one that did not start yet.
 #
-# The leader never controls SwarmUP. It writes its proposals in blocks (LEADER_RULES in agent_prompts.py), and everything else is done here:
-# 1. parseOutput finds the blocks in what the leader writes, even when they are not written exactly as asked: other names of tags, other
-#    brackets, a missing closing tag, JSON in a code fence or alone in the text, JSON with comments, single quotes or trailing commas, or
-#    "key: value" lines. A block that cannot be read goes back to the leader, with what is wrong, to be written again.
-#    findSuggestions finds the sentences that suggest a change without a block. They are never acted upon: the leader is asked to confirm them
-#    in a block, because a sentence can be read wrong and a block cannot. Words that only look like a change (a negation, a past event, a
-#    possessive) are left alone, and the worst a wrong catch costs is one more question to the leader, never a change of the swarm.
-# 2. LeaderCatalog tells the leader what it can choose from (the tasks and their settings, the models that are ready on this computer),
-#    and checks every proposal: the task, the name, the model (it must fit in the GPUs with the others), who waits
-#    for whom, and every setting, with the same checks as the forms of the user (readAnswers in tasks_library.py).
-# 3. The user approves every proposal, with the reason the leader gave. Passwords, tokens and API keys are never taken from the leader: SwarmUP
+# The leader never controls SwarmUP. It proposes with the tools of the leader server (server_leader.py), and everything else is done here:
+# 1. LeaderCatalog tells the leader what it can choose from (the tasks and their settings, the models that are ready on this computer),
+#    and checks every proposal: the task, the name, the model (it must fit in the GPUs with the others), who waits for whom, and every
+#    setting, with the same checks as the forms of the user (readAnswers in tasks_library.py). What is wrong goes back to the leader as the
+#    result of its call, so it corrects it in the same conversation.
+# 2. The user approves every proposal, with the reason the leader gave. Passwords, tokens and API keys are never taken from the leader: SwarmUP
 #    asks the user for them, and for the settings the leader could not know (the address of the user...).
-# 4. designSwarm builds the swarm with the leader, and LeaderManager follows the swarm while it runs: the leader is asked if a change is needed
+# 3. designSwarm builds the swarm with the leader, and LeaderManager follows the swarm while it runs: the leader is asked if a change is needed
 #    each time an agent finishes or the user writes to it, and every change goes through the same checks and the approval of the user.
 #    The program that runs the swarm (the user interface or the command line) makes the loops of the agents (see LeaderManager).
-# This module has the building of the swarm. parseOutput and findSuggestions are in leader_parser.py, LeaderCatalog in leader_catalog.py
-# (its checks in leader_checks.py), and LeaderManager in leader_manager.py.
+# A model that writes its calls as text may write a proposal as a block: its adapter reads it as the call it means (leader_parser.py).
+# This module has the building of the swarm. LeaderCatalog is in leader_catalog.py (its checks in leader_checks.py), and LeaderManager in
+# leader_manager.py.
 import agent_prompts as prompts
 from harness_utils import ConnectionLost
 from leader_checks import describeAgent, describeProposal
-from leader_parser import parseOutput
 from messengers import MessagingError, findTelegramChats
 from models_library import API_KEYS
+from server_leader import LeaderDesk
 from tasks_library import answerKey, getFields
 
 
@@ -115,39 +111,39 @@ def findChat(agent):
 
 # ==============
 # Building the swarm with the leader. leader is the LeaderLoop, connected to the user (askProposal, askQuestions, notifyUser).
-# The leader sees every file of the folder of the mission, and can read them before it proposes (agent_storehouse.py).
-# The leader writes its swarm, SwarmUP checks it and sends it back with what is wrong, then the user approves it, rejects it, or says
-# what to change, and the leader writes it again. It returns the agents (with every answer the user gave), or None if the user rejected it.
+# The leader sees every file of the folder of the mission, and can read them before it proposes. It proposes the swarm with
+# leader__propose_swarm: SwarmUP checks it and gives back what is wrong, then the user approves it, rejects it, or says what to change, and the
+# leader proposes it again. It returns the agents (with every answer the user gave), or None if the user rejected it.
 # ==============
 def designSwarm(leader, catalog):
     if catalog.folder and leader.folder is None:
         leader.setFolder(catalog.folder)
+    desk = leader.leaderDesk = LeaderDesk(catalog, building=True)
+    try:
+        return proposeUntilApproved(leader, catalog, desk)
+    finally:
+        leader.leaderDesk = None
+
+
+def proposeUntilApproved(leader, catalog, desk):
     base = catalog.buildPrompt()
     prompt = base
     for revision in range(MAX_REVISIONS):
-        agents, problems, previous, note = None, [], "", ""
+        desk.proposed, desk.problems, reply = None, [], ""
         for attempt in range(REPAIR_ATTEMPTS + 1):
             reply = leader.askAgent(prompt, own=False, tools=True)
-            found = parseOutput(reply)
-            builds = [block for block in found["blocks"] if block["action"] == "build"]
-            previous, note = (builds[-1]["raw"] if builds else reply), found["text"]
-            if builds:
-                agents, problems = catalog.checkBuild(builds[-1]["data"])
-            else:
-                problems = [problem["error"] for problem in found["problems"]] or \
-                    ["Your answer has no <swarmup_build> block. The swarm must be written in one <swarmup_build> block, in strict JSON."]
-                problems += [f"Only the whole swarm can be proposed now, in one <swarmup_build> block: a <swarmup_{block['action']}> block is not possible yet."
-                             for block in found["blocks"] if block["action"] != "build"]
-            if not problems:
+            if desk.proposed:
                 break
+            problems = desk.problems or ["You did not call leader__propose_swarm. The swarm must be proposed with that tool, with every agent in its agents."]
             leader.notifyUser(f"The proposal of the leader cannot be used yet, so it writes it again: {' '.join(problems)[:600]}")
-            prompt = f"{base}\n\n{prompts.LEADER_REPAIR_PROMPT.format(problems=chr(10).join('- ' + problem for problem in problems), previous=previous, blocks='one <swarmup_build> block')}"
-        if problems:
+            prompt = f"{base}\n\n{prompts.LEADER_REPAIR_PROMPT.format(problems=chr(10).join('- ' + problem for problem in problems), previous=reply or '(nothing)', blocks='one call of leader__propose_swarm')}"
+        if not desk.proposed:
             raise ValueError("The leader could not write a swarm that SwarmUP can use. Try again, give it more details, or choose a more capable model for it. "
-                             f"The last problems: {' '.join(problems)[:900]}")
+                             f"The last problems: {' '.join(desk.problems)[:900]}")
+        agents, previous = desk.proposed["agents"], desk.proposed["raw"]
         shown = [describeAgent(agent) for agent in agents]
         text = f"A swarm of {len(agents)} {'agent' if len(agents) == 1 else 'agents'}: " + "; ".join(f"{agent['name']} ({agent['label']}, {agent['model']})" for agent in shown)
-        proposal = {"action": "build", "agent": catalog.leader, "why": note, "text": text, "agents": shown}
+        proposal = {"action": "build", "agent": catalog.leader, "why": (desk.proposed["why"] or reply or "").strip(), "text": text, "agents": shown}
         answer = leader.askProposal({**proposal, "summary": describeProposal(proposal)})
         if isinstance(answer, dict) and answer.get("decision") == "approve":
             if not askMissing(agents, catalog, leader):

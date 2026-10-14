@@ -218,9 +218,6 @@ class LeaderCatalog(LeaderChecks):
                                                   tasks=describeTasks(), models=self.describeModels(taken, self.moneyLeft(self.leaderTeam())),
                                                   costs=self.describeCosts(self.leaderTeam()), most=self.maxAgents)
 
-    def repairPrompt(self, problems, previous, blocks):
-        return f"{self.rules()}\n\n" + prompts.LEADER_REPAIR_PROMPT.format(problems="\n".join(f"- {problem}" for problem in problems), previous=previous, blocks=blocks)
-
     def describePossible(self, swarm):
         leader, members = swarm.getLeader(), list(swarm.members.items())
         others = [name for name, member in members if name != leader]
@@ -237,9 +234,3 @@ class LeaderCatalog(LeaderChecks):
                                                       events="\n".join(f"- {event}" for event in events), possible=self.describePossible(swarm), tasks=describeTasks(),
                                                       models=self.describeModels(swarm.getNeededVram(), self.moneyLeft(team)), decisions=decisions,
                                                       costs=self.describeCosts(team))
-
-    def confirmPrompt(self, swarm, sentences):
-        team = swarm.describeTeam()
-        return prompts.LEADER_CONFIRM_PROMPT.format(rules=self.rules(), mission=self.mission, progress=swarm.describeProgress(), possible=self.describePossible(swarm),
-                                                    tasks=describeTasks(), models=self.describeModels(swarm.getNeededVram(), self.moneyLeft(team)),
-                                                    sentences="\n".join(f'"{sentence}"' for sentence in sentences), costs=self.describeCosts(team))

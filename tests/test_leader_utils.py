@@ -21,7 +21,8 @@ import leader_utils
 import mission_costs
 from leader_catalog import LeaderCatalog
 from leader_manager import LeaderManager
-from leader_parser import findSuggestions, isNoChange, parseOutput
+from leader_parser import isNoChange, parseOutput
+from model_messages import readToolCalls
 from leader_utils import designSwarm
 from models_library import getModelInfo
 from swarm_harness import Swarm
@@ -77,11 +78,17 @@ class LeaderModel:
 
     def input(self, prompt):
         self.prompts.append(prompt)
+        # After a call of a leader tool: a call SwarmUP refused is written again (repair), and one it accepted ends the turn.
+        newest = prompt.split("\n\n[SwarmUP]\n")[-1]
+        if "[Result of leader__" in newest:
+            if "Not done:" not in newest.split("[Result of leader__")[-1]:
+                return "Done."
+            return self.replies["repair"].pop(0) if self.replies.get("repair") else "NO CHANGE"
         for marker, kind in self.KINDS:
             if marker in prompt:
                 return self.replies[kind].pop(0) if self.replies.get(kind) else "NO CHANGE"
-        # The memory of the mission comes before the request, and the fake only reads the request.
-        prompt = prompt.split(prompts.NOTES_PROMPT)[-1]
+        # The conversation comes before the request, and the fake only reads the newest request.
+        prompt = prompt.split("\n\n[SwarmUP]\n")[-1]
         names = re.findall(r"^- ([A-Za-z][\w.-]*) \(", prompt, re.M)
         if "final report" in prompt:
             return "Report: every agent did its work."
@@ -91,8 +98,15 @@ class LeaderModel:
             return "1. Follow the agents. 2. Write the report."
         return "OK"
 
+    # The kind of each prompt: a step after a call of a leader tool is a repair (the call was refused) or a result.
     def kinds(self):
-        return [next((kind for marker, kind in self.KINDS if marker in prompt), "other") for prompt in self.prompts]
+        return [self.kindOf(prompt) for prompt in self.prompts]
+
+    def kindOf(self, prompt):
+        newest = prompt.split("\n\n[SwarmUP]\n")[-1]
+        if "[Result of leader__" in newest:
+            return "repair" if "Not done:" in newest.split("[Result of leader__")[-1] else "result"
+        return next((kind for marker, kind in self.KINDS if marker in prompt), "other")
 
 
 # The leader of a test: its proposals and its questions are answered by the test (decisions and answers, in order).
@@ -201,30 +215,34 @@ class ParserTests(unittest.TestCase):
             self.assertFalse(isNoChange(text), text)
 
 
-class SuggestionTests(unittest.TestCase):
-    def testSentencesThatProposeAChangeAreFound(self):
-        cases = {"I suggest removing Checker, since its work is done.": ("remove", "Checker"), "Checker is no longer needed.": ("remove", "Checker"),
-                 "We should remove the agent Checker to free the GPU.": ("remove", "Checker"), "Researcher can now be removed.": ("remove", "Researcher"),
-                 "It would be better to drop Researcher now.": ("remove", "Researcher"), "I removed Checker.": ("remove", "Checker"),
-                 "I recommend adding a translator agent for the French version.": ("add", None), "Let's add another writer to speed things up.": ("add", None),
-                 "The swarm would benefit from a fact-checker agent.": ("add", None), "I propose to switch Writer to claude-opus-5-5.": ("model", "Writer"),
-                 "We could use a bigger model for Writer.": ("model", "Writer")}
-        for sentence, (action, agent) in cases.items():
-            found = findSuggestions(f"Here is the summary of the work. {sentence} Everything else is fine.", NAMES, "Leader")
-            self.assertEqual([(item["action"], item["agent"], item["sentence"]) for item in found], [(action, agent, sentence)], sentence)
+# A model that writes its calls as text may write the change of its swarm as a block: its adapter reads it as the call of the leader tool it
+# means, only when the agent has such tools.
+class BlockCallTests(unittest.TestCase):
+    LEADER_TOOLS = [{"name": name} for name in ("leader__propose_swarm", "leader__add_agent", "leader__remove_agent", "leader__change_model", "leader__keep_long_term")]
 
-    def testSentencesThatOnlyTalkAboutTheAgentsAreNotChanges(self):
-        for text in ("Checker is done and its result was sent to Writer.", "Checker left the swarm. Why: not needed.", "We should not remove Checker yet.",
-                     "There is no need to remove Researcher.", "Writer will add the references to the article.", "Remove the second paragraph of Writer's text.",
-                     "Writer removed the duplicate sentences.", "Checker was removed by the user.", "I suggest that Writer shortens the introduction.",
-                     "We should add a conclusion to the text.", "Writer uses claude-sonnet-5-5 and is working.", "I don't think we need another agent.",
-                     "Keep Checker until Writer is done, rather than removing it.", '{"Writer": "Remove the intro, we should drop Checker"}', "NO CHANGE",
-                     "I suggest removing Leader.", "We could ask the user for the email address."):
-            self.assertEqual(findSuggestions(text, NAMES, "Leader"), [], text)
+    def testABlockIsTheCallOfTheLeaderToolItMeans(self):
+        text = "Two changes.\n" + block("remove", name="Checker", reason="Done.") + "\n" + block("add", agent="Tr", task="author", model="claude-haiku-4-5", bits="8", waits_for="Writer")
+        calls, rest = readToolCalls(text, self.LEADER_TOOLS)
+        self.assertEqual([(call["name"], call["arguments"]) for call in calls], [("leader__remove_agent", {"name": "Checker", "why": "Done."}),
+                         ("leader__add_agent", {"name": "Tr", "task": "author", "model": "claude-haiku-4-5", "bits": 8, "waits_for": ["Writer"]})])
+        self.assertEqual(rest, "Two changes.")
+        calls, rest = readToolCalls('<swarmup_build>{"agents": [{"name": "A", "task": "author", "model": "m"}]}</swarmup_build>', self.LEADER_TOOLS)
+        self.assertEqual((calls[0]["name"], calls[0]["arguments"]), ("leader__propose_swarm", {"agents": [{"name": "A", "task": "author", "model": "m"}]}))
 
-    def testOnlyAFewSentencesAreSentBackAtOnce(self):
-        text = " ".join(f"We should add a {noun} agent." for noun in ("writer", "coder", "tester", "editor", "planner"))
-        self.assertEqual(len(findSuggestions(text, NAMES, "Leader")), leader_parser.MAX_SUGGESTIONS)
+    def testABrokenBlockIsACallWithItsProblem(self):
+        calls, rest = readToolCalls("<swarmup_remove>{oops</swarmup_remove>", self.LEADER_TOOLS)
+        self.assertEqual(calls[0]["name"], "leader__remove_agent")
+        self.assertIn("cannot be read as JSON", calls[0]["problem"])
+
+    def testWhatToKeepInTheLongTermMemoryIsACallToo(self):
+        calls, rest = readToolCalls('Kept.\n<swarmup_memory file="STYLE.md" mode="replace">- short</swarmup_memory>', self.LEADER_TOOLS)
+        self.assertEqual([(call["name"], call["arguments"]) for call in calls], [("leader__keep_long_term", {"file": "STYLE.md", "text": "- short", "mode": "replace"})])
+        self.assertEqual(rest, "Kept.")
+
+    def testAnAgentWithoutTheToolsOfALeaderKeepsItsText(self):
+        text = block("remove", name="Checker", why="Done.")
+        self.assertEqual(readToolCalls(text, [{"name": "files__read_file"}]), ([], text))
+        self.assertEqual(readToolCalls('{"name": "Writer", "task": "author"}', [{"name": "files__read_file"}])[0], [])
 
 
 class CatalogTests(FolderTestCase):
@@ -348,7 +366,7 @@ class CatalogTests(FolderTestCase):
         self.assertNotIn("leader", re.findall(r"^- (\w+):", tasks, re.M))
         self.assertEqual(agent_storehouse.describeTree(self.folder.resolve()).splitlines(), ["- paper.tex (29 bytes)", "- notes/ideas.md (5 bytes)"])
         prompt = catalog.buildPrompt()
-        for part in ("You are Leader, the leader of a swarm", "Check my paper and write a summary of it.", str(self.folder.resolve()), "<swarmup_build>"):
+        for part in ("You are Leader, the leader of a swarm", "Check my paper and write a summary of it.", str(self.folder.resolve()), "leader__propose_swarm"):
             self.assertIn(part, prompt)
 
 
@@ -417,23 +435,24 @@ class DesignTests(FolderTestCase):
         agents = designSwarm(leader, makeCatalog(self.folder))
         self.assertEqual([(agent["name"], agent["task"], agent["model"]["name"], agent["waitsFor"]) for agent in agents],
                          [("Checker", "math", "claude-sonnet-5-5", []), ("Writer", "author", "claude-haiku-4-5", ["Checker"])])
-        self.assertEqual(model.kinds(), ["build", "repair", "repair"])
-        self.assertIn("Your answer has no <swarmup_build> block", model.prompts[1])
+        self.assertEqual(model.kinds(), ["build", "repair", "repair", "result"])
+        self.assertIn("You did not call leader__propose_swarm", model.prompts[1])
         self.assertIn("'gpt-9' is not a model of the list of models", model.prompts[2])
         [proposal] = leader.proposals
         self.assertEqual((proposal["action"], proposal["why"], [agent["name"] for agent in proposal["agents"]]), ("build", "Fixed.", ["Checker", "Writer"]))
         self.assertIn("1. Checker: Math checker, with claude-sonnet-5-5 (Anthropic API), $15.00 per 1M tokens. It starts right away.", proposal["summary"])
         self.assertIn("   Why: It writes the summary.", proposal["summary"])
         self.assertEqual(agents[1]["answers"]["folder"], str(self.folder.resolve()))
-        self.assertEqual(len(leader.notes), 2)
+        self.assertEqual(len([note for note in leader.notes if "cannot be used yet" in note]), 1)
 
     def testTheUserSaysWhatToChangeAndTheLeaderWritesTheWholeSwarmAgain(self):
         model = LeaderModel(build=[block("build", agents=self.GOOD)], revise=[block("build", agents=self.GOOD[:1])])
         leader = makeLeader(model, decisions=[{"decision": "reject", "message": "Only the checker, please."}])
         agents = designSwarm(leader, makeCatalog(self.folder))
         self.assertEqual([agent["name"] for agent in agents], ["Checker"])
-        self.assertIn("The user read the swarm you proposed and wants changes: Only the checker, please.", model.prompts[1])
-        self.assertIn('"name": "Writer"', model.prompts[1])
+        revise = next(prompt for prompt in model.prompts if "wants changes:" in prompt)
+        self.assertIn("The user read the swarm you proposed and wants changes: Only the checker, please.", revise)
+        self.assertIn('"name": "Writer"', revise.split("wants changes:")[1])
 
     def testARejectedSwarmBuildsNothing(self):
         leader = makeLeader(LeaderModel(build=[block("build", agents=self.GOOD)]), decisions=[{"decision": "reject", "message": ""}])
@@ -520,7 +539,7 @@ class ManagerTests(FolderTestCase):
         self.assertEqual(swarm.getInfo("Translator")["result"], "Translator made it")
         self.assertEqual([message["message"] for message in swarm.getMessages("Checker", "Translator")], ["checked"])
         self.assertIn("Checker is done.", model.prompts[model.kinds().index("supervise")])
-        self.assertIn("SwarmUP: The user approved your proposal, and it is done: Add Translator", "\n".join(leader.inbox))
+        self.assertIn("[Result of leader__add_agent]\nThe user approved your proposal, and it is done: Add Translator", "\n".join(model.prompts))
         self.assertIn("Translator joined the swarm", "\n".join(swarm.getMember("Writer")["agent"].inbox))
         self.assertEqual(swarm.getMember("Translator")["recipe"]["task"], "author")
 
@@ -546,56 +565,24 @@ class ManagerTests(FolderTestCase):
         waitUntil(lambda: model.kinds().count("supervise") >= 1 and leader.proposals, "the first proposal")
         gate.set()
         waitUntil(lambda: model.kinds().count("supervise") == 2, "the second supervision")
-        waitUntil(lambda: "already rejected" in "\n".join(leader.inbox), "the leader to be told")
+        waitUntil(lambda: any("already rejected" in prompt for prompt in model.prompts), "the leader to be told")
         last.set()
         swarm.wait(10)
         self.assertEqual(len(leader.proposals), 1)
         self.assertIn("Checker", swarm.getAgents())
-        inbox = "\n".join(leader.inbox)
-        self.assertIn("The user rejected your proposal: Remove Checker (math checker, done). The user said: Keep it, I may need it.", inbox)
+        told = "\n".join(model.prompts)
+        self.assertIn("The user rejected your proposal: Remove Checker (math checker, done). The user said: Keep it, I may need it.", told)
         second = model.prompts[[index for index, kind in enumerate(model.kinds()) if kind == "supervise"][1]]
         self.assertIn("- Rejected: Remove Checker (math checker, done). The user said: Keep it, I may need it.", second)
 
-    def testASentenceThatSuggestsAChangeIsConfirmedByTheLeaderBeforeTheUserIsAsked(self):
-        gate = threading.Event()
-        model = LeaderModel(supervise=["Checker is no longer needed, its check is done."], confirm=[block("remove", name="Checker", why="Its check is done.")])
-        swarm, leader = self.build(model, gate=gate)
-        self.start(swarm)
-        waitUntil(lambda: "Checker" not in swarm.getAgents(), "the checker to leave")
-        gate.set()
-        swarm.wait(10)
-        confirm = model.prompts[model.kinds().index("confirm")]
-        self.assertIn('"Checker is no longer needed, its check is done."', confirm)
-        self.assertEqual(len(leader.proposals), 1)
-
-    def testASentenceTheLeaderDoesNotConfirmChangesNothing(self):
-        gate = threading.Event()
-        model = LeaderModel(supervise=["We should remove Checker."], confirm=["NO CHANGE"])
-        swarm, leader = self.build(model, gate=gate)
-        self.start(swarm)
-        waitUntil(lambda: "confirm" in model.kinds(), "the confirmation")
-        gate.set()
-        swarm.wait(10)
-        self.assertEqual((leader.proposals, "Checker" in swarm.getAgents()), ([], True))
-
-    def testEveryAnswerOfTheLeaderIsReadAndItsBlocksAreTakenOutOfTheTextForTheUser(self):
+    def testTheLeaderHasItsDeskWhileTheSwarmRuns(self):
         swarm, leader = self.build(LeaderModel())
-        text = "Where the team stands: Checker, Writer.\n" + block("remove", name="Writer", why="Not needed.")
-        self.assertEqual(self.manager.readOutput(text), "Where the team stands: Checker, Writer.")
-        kind, found = self.manager.queue.get_nowait()
-        self.assertEqual((kind, found["blocks"][0]["data"]), ("output", {"name": "Writer", "why": "Not needed."}))
-        self.assertEqual(self.manager.readOutput("Checker is no longer needed."), "Checker is no longer needed.")
-        kind, found = self.manager.queue.get_nowait()
-        self.assertEqual(([item["action"] for item in found["suggestions"]], found["blocks"]), (["remove"], []))
-        for text in ("Where the team stands: all is fine.", '{"Writer": [], "Checker": ["Writer"]}', '{"Writer": "Remove the second paragraph"}'):
-            self.assertEqual(self.manager.readOutput(text), text)
-        self.assertTrue(self.manager.queue.empty())
         swarm.manager = self.manager
-        member = swarm.getMember("Leader")
-        swarm.connectAgent("Leader", member, False)
-        self.assertEqual(leader.onAnswer, self.manager.readOutput)
+        swarm.connectAgent("Leader", swarm.getMember("Leader"), False)
+        self.assertIs(leader.leaderDesk.manager, self.manager)
+        self.assertFalse(leader.leaderDesk.building)
         swarm.connectAgent("Writer", swarm.getMember("Writer"), False)
-        self.assertIsNone(swarm.getMember("Writer")["agent"].onAnswer)
+        self.assertIsNone(swarm.getMember("Writer")["agent"].leaderDesk)
 
     def testAChangeThatIsNotPossibleGoesBackToTheLeaderBeforeTheUserIsAsked(self):
         gate = threading.Event()
@@ -610,7 +597,7 @@ class ManagerTests(FolderTestCase):
         self.assertIn("You cannot remove yourself nor change your own model", repair)
         self.assertIn("There is no agent called Ghost in the swarm. Its agents are: Checker, Writer.", repair)
         self.assertEqual(leader.proposals, [])
-        self.assertIn("Writer already started, so its model cannot change", "\n".join(leader.inbox))
+        self.assertIn("Writer already started, so its model cannot change", "\n".join(model.prompts))
 
     def testAChangeWithoutAReasonGoesBackToTheLeader(self):
         catalog = makeCatalog(self.folder)
@@ -647,7 +634,7 @@ class ManagerTests(FolderTestCase):
         swarm.wait(10)
         prompt = model.prompts[[index for index, kind in enumerate(model.kinds()) if kind == "supervise"][1]]
         self.assertIn("- The user wrote to you: Please also translate it into French.", prompt)
-        self.assertIn("Messages from the user, sent while you work", prompt)
+        self.assertIn("[Message from the user] Please also translate it into French.", prompt)
 
     def testTheManagerIsSavedWithTheSwarm(self):
         swarm, leader = self.build(LeaderModel())

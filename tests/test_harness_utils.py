@@ -157,8 +157,8 @@ class ReviewLoopTests(LoopTestCase):
     def testChangeRequestSendsPreviousDraftAndRequest(self):
         loop = self.makeLoop(["first", "second"], ["make it shorter", "yes"])
         self.assertEqual(loop.reviewLoop("write a text", lambda draft: ""), "second")
-        self.assertIn("Your previous draft:\nfirst", loop.agent.prompts[1])
-        self.assertIn("make it shorter", loop.agent.prompts[1])
+        self.assertIn("[Your answer]\nfirst", loop.agent.prompts[1])
+        self.assertIn("Write your answer again, with this change: make it shorter", loop.agent.prompts[1])
         self.assertIn("write a text", loop.agent.prompts[1])
 
     def testFailedChecksAreFixedWithoutBotheringTheUser(self):
@@ -186,8 +186,9 @@ class ReviewLoopTests(LoopTestCase):
         loop.receive("Writer", "here is my text")
         loop.reviewLoop("the task", lambda draft: "")
         prompt = loop.agent.prompts[0]
-        self.assertTrue(prompt.startswith("Follow these rules strictly:"))
-        self.assertIn("Writer: here is my text", prompt)
+        self.assertTrue(prompt.startswith("You are Loop, an agent of a swarm"))
+        self.assertIn("THE RULES OF YOUR TASK. Follow them strictly:", prompt)
+        self.assertIn("[Message from Writer] here is my text", prompt)
         self.assertTrue(prompt.endswith("the task"))
 
     def testUserMessagesComeAfterTheOtherAgentsAndBeforeTheTask(self):
@@ -196,11 +197,11 @@ class ReviewLoopTests(LoopTestCase):
         loop.receiveFromUser("Use {a} formal tone")
         loop.reviewLoop("the task", lambda draft: "")
         prompt = loop.agent.prompts[0]
-        self.assertTrue(prompt.startswith("Follow these rules strictly:"))
-        self.assertLess(prompt.index("Writer: here is my text"), prompt.index("- Use {a} formal tone"))
-        self.assertLess(prompt.index("- Use {a} formal tone"), prompt.index("the task"))
+        self.assertIn("THE RULES OF YOUR TASK. Follow them strictly:", prompt)
+        self.assertLess(prompt.index("[Message from Writer] here is my text"), prompt.index("[Message from the user] Use {a} formal tone"))
+        self.assertLess(prompt.index("[Message from the user] Use {a} formal tone"), prompt.index("the task"))
         self.assertTrue(prompt.endswith("the task"))
-        self.assertIn("exactly the format your task asks for", prompt)
+        self.assertIn("The user comes first", prompt)
 
     def testMessagesAlreadyInThePromptDoNotMakeTheAgentWriteAgain(self):
         loop = self.makeLoop(["draft"], ["yes"])
@@ -222,8 +223,8 @@ class ReviewLoopTests(LoopTestCase):
         self.sendMessageDuringFirstAnswer(loop, "Mention the budget")
         self.assertEqual(loop.reviewLoop("task", lambda draft: ""), "second")
         self.assertNotIn("budget", loop.agent.prompts[0])
-        self.assertIn("- Mention the budget", loop.agent.prompts[1])
-        self.assertIn("Your previous draft:\nfirst", loop.agent.prompts[1])
+        self.assertIn("[Message from the user] Mention the budget", loop.agent.prompts[1])
+        self.assertIn("[Your answer]\nfirst", loop.agent.prompts[1])
         self.assertIn("The user sent new messages", loop.agent.prompts[1])
         self.assertEqual(len([said for said in loop.said if said.startswith("[")]), 1)
 
@@ -280,7 +281,7 @@ class ReviewLoopTests(LoopTestCase):
         loop.receiveFromUser("Be brief")
         loop.reviewLoop("the task", lambda draft: "")
         prompt = loop.agent.prompts[1]
-        self.assertLess(prompt.index("- Be brief"), prompt.index("Your plan, approved by the user"))
+        self.assertLess(prompt.index("Your plan, approved by the user"), prompt.index("[Message from the user] Be brief"))
         self.assertLess(prompt.index("the plan"), prompt.index("the task"))
         self.assertTrue(prompt.endswith("the task"))
 
@@ -1331,7 +1332,7 @@ class SwarmTests(LoopTestCase):
         thread.join(timeout=5)
         self.assertEqual((swarm.getStatus("Writer"), swarm.getInfo("Writer")["result"]), ("done", "second"))
         self.assertNotIn("budget", writer.agent.prompts[0])
-        self.assertIn("- Mention the budget", writer.agent.prompts[1])
+        self.assertIn("[Message from the user] Mention the budget", writer.agent.prompts[1])
         self.assertEqual([message["message"] for message in swarm.getMessages(USER_NAME, "Writer")], ["Mention the budget"])
         self.assertFalse([link for link in swarm.getConnections() if USER_NAME in (link["from"], link["to"])])
 
@@ -1355,8 +1356,8 @@ class SwarmTests(LoopTestCase):
         release.set()
         thread.join(timeout=5)
         self.assertEqual(swarm.getInfo("Leader")["result"], "final text")
-        self.assertIn("- Keep the final text short", leader.agent.prompts[0])
-        self.assertIn("Busy:", leader.agent.prompts[0])
+        self.assertIn("[Message from the user] Keep the final text short", leader.agent.prompts[0])
+        self.assertIn("[Message from Busy]", leader.agent.prompts[0])
 
     def testMessagesThatCannotBeReadAreRefused(self):
         swarm = self.makeSwarm(Writer=self.worker(), Bad=self.worker(fail=True))
@@ -1489,8 +1490,8 @@ class SwarmTests(LoopTestCase):
         self.assertEqual(len(writer.agent.prompts), 2)
         self.assertEqual(len(mailer.agent.prompts), 1)
         correction = "The user asked for a correction: Make the plan of the writer shorter\nWhat to change in your plan: Make it shorter"
-        self.assertIn(f"Leader: {correction}", writer.agent.prompts[1])
-        self.assertIn("Your previous draft:\na long plan", writer.agent.prompts[1])
+        self.assertIn(f"[Message from Leader] {correction}", writer.agent.prompts[1])
+        self.assertIn("[Your answer]\na long plan", writer.agent.prompts[1])
         self.assertIn("It is in your newest messages", writer.agent.prompts[1])
         self.assertFalse(any("correction" in line for line in mailer.inbox))
         self.assertIn("a short plan", leader.agent.prompts[3])
@@ -1540,8 +1541,8 @@ class SwarmTests(LoopTestCase):
         self.assertEqual(len(calls), 2)
         self.assertIn("changed while you were reading", self.saidText(leader))
         writer = self.agentOf(swarm, "Writer")
-        self.assertIn("- Use bullet points", writer.agent.prompts[1])
-        self.assertIn("Your previous draft:\nwriter plan", writer.agent.prompts[1])
+        self.assertIn("[Message from the user] Use bullet points", writer.agent.prompts[1])
+        self.assertIn("[Your answer]\nwriter plan", writer.agent.prompts[1])
         self.assertEqual(len(self.agentOf(swarm, "Mailer").agent.prompts), 1)
         self.assertEqual([message["message"] for message in swarm.getMessages(USER_NAME, "Writer")], ["Use bullet points"])
         self.assertIn("writer bullets", leader.agent.prompts[2])
@@ -1560,7 +1561,7 @@ class SwarmTests(LoopTestCase):
         leader.askUser = askUser
         swarm.run()
         self.assertEqual(swarm.getInfo("Writer")["plan"], "writer plan two")
-        self.assertIn("- Add the dates", self.agentOf(swarm, "Writer").agent.prompts[1])
+        self.assertIn("[Message from the user] Add the dates", self.agentOf(swarm, "Writer").agent.prompts[1])
 
     def testAnAgentCanBeApprovedByItselfWhileTheSummaryWaits(self):
         swarm = self.reviewedSwarm("plan", ["leader plan", "Summary: Leader Writer Mailer"], ["yes"], Writer=["writer plan"], Mailer=["mailer plan"])
@@ -1744,8 +1745,8 @@ class SwarmTests(LoopTestCase):
         self.assertEqual(swarm.run(), "Summary two: Leader Writer Mailer")
         self.assertIn("[Writer] its plan:\na long plan", leader.said)
         writer = self.agentOf(swarm, "Writer")
-        self.assertIn("- Make it shorter", writer.agent.prompts[1])
-        self.assertIn("Your previous draft:\na long plan", writer.agent.prompts[1])
+        self.assertIn("[Message from the user] Make it shorter", writer.agent.prompts[1])
+        self.assertIn("[Your answer]\na long plan", writer.agent.prompts[1])
         self.assertEqual(len(self.agentOf(swarm, "Mailer").agent.prompts), 1)
         self.assertEqual(leader.agent.replies, [])
 
@@ -2013,7 +2014,7 @@ class ManagementCallTests(LoopTestCase):
         loop.askAgent("do my task")
         loop.askAgent("summarise the swarm", own=False)
         own, managing = loop.agent.prompts
-        self.assertTrue(own.startswith("Follow these rules strictly:") and "PLAN OF MY TASK" in own)
+        self.assertTrue("THE RULES OF YOUR TASK. Follow them strictly:" in own and "PLAN OF MY TASK" in own)
         self.assertNotIn("Follow these rules strictly", managing)
         self.assertNotIn("PLAN OF MY TASK", managing)
         self.assertTrue(all(text in managing for text in ("Writer: a report", "- be brief", "summarise the swarm")))
@@ -3037,7 +3038,7 @@ class GeneralAgentTests(LoopTestCase):
         self.assertIn("List the findings of my notes, with their files", agent.prompts[0])
         self.assertIn("Rules for the text the agent writes", agent.prompts[1])
         self.assertIn("The result of the agent:\nA draft", agent.prompts[1])
-        self.assertIn("Improve it. What to change: 1) It misses the file names.", agent.prompts[2])
+        self.assertIn("Write your answer again, with this change: 1) It misses the file names.", agent.prompts[2])
         self.assertEqual(list((self.folder / "results").glob("*/GeneralLoop_result.md"))[0].read_text(encoding="utf-8"), "A better draft")
 
     def testTheReviewStopsAfterItsRoundsAndTheUserDecides(self):

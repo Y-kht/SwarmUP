@@ -1,21 +1,21 @@
-# A model client is any object with an input(prompt) method that returns the answer as text: it is the agent of a loop.
-# ApiModel asks the API of a provider with its official library (anthropic for Claude, openai for GPT and for the OpenAI-compatible
-# APIs of Gemini and DeepSeek). LocalModel runs a model of Hugging Face on the GPUs of the user with transformers.
+# The model clients are the agents of the loops, and the adapters of their models (model_adapters.py): converse(system, messages, tools, onText)
+# is one step of the core loop of an agent (agent_conversation.py), with the tools of the MCP servers of SwarmUP, and input(prompt) answers one
+# prompt. ApiModel asks the API of a provider with its official library (anthropic for Claude, openai for GPT and for the OpenAI-compatible
+# APIs of Gemini and DeepSeek). LocalModel runs a model of Hugging Face on the GPUs of the user with transformers. They translate the messages
+# and the tools into those of their provider (model_messages.py), and its answer back into text and calls of tools.
 # The libraries are only imported when a model is used, so a user who only needs one kind of model does not install the others.
 # The Hugging Face cache is the folder of the HF_HOME environment variable, so the user chooses where the models are stored.
 # The coding agents are in coding_agents.py and codex_agent.py, and what every client needs in model_support.py.
-# Besides input (one prompt, one answer), ApiModel and LocalModel hold a conversation with tools (converse, see agent_conversation.py): they
-# translate the messages and the tools of SwarmUP into those of their provider, and its answer back into text and calls of tools.
 import gc
 import json
 import re
 import threading
-import uuid
 
-import agent_prompts as prompts
 from codex_agent import CodexModel
 from coding_agents import ClaudeCodeModel
 from harness_utils import isOnline
+from model_messages import (claudeBlock, claudeMessages, explainApiError, localMessages, openAiMessages, readOpenAiUsage,  # noqa: F401
+                            readToolCalls)
 from model_support import API_LIBRARIES, ModelConnectionError, ModelError, getApiKey, importLibrary, isDownloaded, recordCall
 from models_library import API_KEYS, isGated
 
@@ -26,156 +26,7 @@ ACCEPTED_ENCODINGS = "gzip, deflate"
 CLAUDE_MAX_TOKENS = 32000
 LOCAL_MAX_TOKENS = 4096
 THINKING_PATTERN = re.compile(r"<think>.*?</think>", re.DOTALL)
-TOOL_CALL_PATTERN = re.compile(r"<tool_call>\s*(.*?)\s*(?:</tool_call>|$)", re.DOTALL)
 STREAM_ATTEMPTS = 2
-
-
-# What went wrong with a call to an API, in words a user understands. The libraries of Anthropic and OpenAI have the same error classes.
-def explainApiError(library, error, company, name):
-    if isinstance(error, library.APITimeoutError):
-        return f"{company} took too long to answer."
-    if isinstance(error, library.APIConnectionError):
-        return f"{company} could not be reached. Check the internet connection."
-    if isinstance(error, library.AuthenticationError):
-        return f"{company} refused the API key. Check that it is correct and still active."
-    if isinstance(error, library.PermissionDeniedError):
-        return f"{company} does not allow this API key to use {name} (permissions, region, or an access request is missing)."
-    if isinstance(error, library.NotFoundError):
-        return f"{company} does not know a model called {name}, or this account cannot use it."
-    if isinstance(error, library.RateLimitError):
-        return f"{company} says there are too many requests, or that the account has no credit left. Try again later or check the billing page."
-    if isinstance(error, library.APIStatusError):
-        return f"{company} answered with error {error.status_code}: {getattr(error, 'message', error)}"
-    return f"{company} failed: {error}"
-
-
-# The tokens of an answer of the OpenAI API, and of the APIs like it. The cached tokens are part of prompt_tokens (OpenAI gives them in
-# prompt_tokens_details, DeepSeek in prompt_cache_hit_tokens). The thinking of a model is billed as output: it is in completion_tokens for
-# OpenAI and DeepSeek, and Gemini only counts it in total_tokens, so the output is what the total has beyond the prompt.
-def readOpenAiUsage(usage):
-    if usage is None:
-        return {"missing": True}
-    prompt = usage.prompt_tokens or 0
-    details = getattr(usage, "prompt_tokens_details", None)
-    cached = (getattr(details, "cached_tokens", None) or 0) if details is not None else 0
-    cached = min(prompt, cached or getattr(usage, "prompt_cache_hit_tokens", None) or 0)
-    output = max(usage.completion_tokens or 0, (usage.total_tokens or 0) - prompt)
-    return {"input": prompt - cached, "cachedInput": cached, "output": output}
-
-
-# ==============
-# The conversation of SwarmUP (agent_conversation.py) in the words of each provider.
-# ==============
-# Claude: the system prompt and the end of the conversation are kept in the cache of Anthropic, so each step only pays the new part in full.
-# What Claude answered is given back exactly as it came (its thinking included), because Claude needs the conversation unchanged.
-def claudeBlocks(message):
-    if message["role"] == "user":
-        return [{"type": "text", "text": message["content"]}] if message["content"] else []
-    if message["role"] == "tool":
-        return [{"type": "tool_result", "tool_use_id": message["id"], "content": message["content"] or "(empty)", **({"is_error": True} if message.get("error") else {})}]
-    raw = (message.get("raw") or {}).get("claude")
-    if raw:
-        return raw
-    text = [{"type": "text", "text": message["content"]}] if message["content"] else []
-    return text + [{"type": "tool_use", "id": call["id"], "name": call["name"], "input": call.get("arguments") or {}} for call in message.get("calls") or []]
-
-
-# The results of the tools and the messages that arrived meanwhile go together in one message of the user, as Claude wants them.
-def claudeMessages(messages):
-    result = []
-    for message in messages:
-        role, blocks = "assistant" if message["role"] == "assistant" else "user", claudeBlocks(message)
-        if not blocks:
-            continue
-        if result and result[-1]["role"] == role:
-            result[-1]["content"] = result[-1]["content"] + blocks
-        else:
-            result.append({"role": role, "content": list(blocks)})
-    return result
-
-
-def claudeBlock(block):
-    if block.type == "text":
-        return {"type": "text", "text": block.text}
-    if block.type == "tool_use":
-        return {"type": "tool_use", "id": block.id, "name": block.name, "input": block.input}
-    if block.type == "thinking":
-        return {"type": "thinking", "thinking": block.thinking, "signature": block.signature}
-    if block.type == "redacted_thinking":
-        return {"type": "redacted_thinking", "data": block.data}
-    return block.model_dump(mode="json", exclude_none=True)
-
-
-# The API of OpenAI, and those of Gemini and DeepSeek that work like it. What the model answered is given back as it came, with what some
-# providers add to it (the thinking of DeepSeek, the signatures of Gemini).
-def openAiMessages(system, messages):
-    result = [{"role": "system", "content": system}]
-    for message in messages:
-        if message["role"] == "user":
-            result.append({"role": "user", "content": message["content"]})
-        elif message["role"] == "tool":
-            result.append({"role": "tool", "tool_call_id": message["id"], "content": message["content"] or "(empty)"})
-        elif (message.get("raw") or {}).get("openai"):
-            result.append(message["raw"]["openai"])
-        else:
-            entry = {"role": "assistant", "content": message["content"] or ""}
-            if message.get("calls"):
-                entry["tool_calls"] = [{"id": call["id"], "type": "function", "function": {"name": call["name"], "arguments": json.dumps(call.get("arguments") or {})}}
-                                       for call in message["calls"]]
-            result.append(entry)
-    return result
-
-
-# A local model whose chat template knows tools gets them as such. Another one gets them in its system prompt (TEXT_TOOLS_PROMPT), writes its
-# calls in its text, and reads their results as messages of the user. Such templates often want the user and the model to speak in turn.
-def localMessages(system, messages, tools, native):
-    chat = [{"role": "system", "content": system if native else f"{system}\n\n" + prompts.TEXT_TOOLS_PROMPT.format(tools=json.dumps(tools, ensure_ascii=False))}]
-    for message in messages:
-        calls = message.get("calls") or []
-        if message["role"] == "user":
-            entry = {"role": "user", "content": message["content"]}
-        elif message["role"] == "tool":
-            entry = {"role": "tool", "name": message["name"], "tool_call_id": message["id"], "content": message["content"]} if native else \
-                {"role": "user", "content": f"[Result of {message['name']}]\n{message['content']}"}
-        elif native:
-            entry = {"role": "assistant", "content": message["content"] or ""}
-            if calls:
-                entry["tool_calls"] = [{"id": call["id"], "type": "function", "function": {"name": call["name"], "arguments": call.get("arguments") or {}}} for call in calls]
-        else:
-            written = [f"<tool_call>{json.dumps({'name': call['name'], 'arguments': call.get('arguments') or {}}, ensure_ascii=False)}</tool_call>" for call in calls]
-            entry = {"role": "assistant", "content": "\n".join([message["content"] or "", *written]).strip()}
-        if not native and chat[-1]["role"] == entry["role"] == "user":
-            chat[-1]["content"] += f"\n\n{entry['content']}"
-        else:
-            chat.append(entry)
-    return chat
-
-
-def readCall(body):
-    try:
-        data = json.loads(body)
-        arguments = data.get("arguments", data.get("parameters", {}))
-        arguments = json.loads(arguments) if isinstance(arguments, str) else arguments
-        return {"id": f"call_{uuid.uuid4().hex[:12]}", "name": str(data["name"]), "arguments": arguments}
-    except (ValueError, KeyError, TypeError, AttributeError):
-        return {"id": f"call_{uuid.uuid4().hex[:12]}", "name": "unknown", "arguments": {}, "problem": "this tool call is not valid JSON. Write it again."}
-
-
-# The calls a local model wrote: <tool_call>{json}</tool_call> (Qwen, Hermes and most models), or its whole answer as JSON (Llama, Mistral).
-def readToolCalls(text):
-    calls = [readCall(body) for body in TOOL_CALL_PATTERN.findall(text)]
-    if calls:
-        return calls, TOOL_CALL_PATTERN.sub("", text).strip()
-    stripped = text.strip()
-    if stripped[:1] in ("[", "{"):
-        try:
-            data = json.loads(stripped)
-        except ValueError:
-            return [], text
-        items = data if isinstance(data, list) else [data]
-        if items and all(isinstance(item, dict) and "name" in item for item in items):
-            return [readCall(json.dumps(item)) for item in items], ""
-    return [], text
 
 
 class ApiModel:
@@ -187,8 +38,11 @@ class ApiModel:
         self.usage = {"calls": 0, "input": 0, "output": 0}
         self.client = None
         self.lock = threading.Lock()
-        # Claude needs the conversation to stay exactly as it was: its old messages are never shortened (see Conversation.shorten).
-        self.appendOnly = provider == "claude"
+        # Claude needs the conversation to stay exactly as it was, for its cache: its old messages are never shortened (see Conversation.shorten).
+        self.canShorten = provider != "claude"
+        # Claude gives its text while it writes it, and a stop of the swarm ends it there (cancel). The other APIs give their answer at once.
+        self.streams = provider == "claude"
+        self.stopping = threading.Event()
 
     # The answers are only asked compressed with gzip or deflate (ACCEPTED_ENCODINGS). Without it, the HTTP library of the providers asks for
     # Brotli when a brotli package is installed, and an old one (before 1.2, common in conda environments) makes every answer fail to decode.
@@ -207,15 +61,20 @@ class ApiModel:
 
     # Claude is asked with a stream and not with a single request, because a long answer would hit the time limit of a single request.
     # A refusal is a normal answer of the API (HTTP 200), so it is checked before the text is read. Thinking blocks are not part of the answer.
-    def askClaude(self, prompt):
-        message = self.streamClaude(messages=[{"role": "user", "content": prompt}])
+    def askClaude(self, prompt, onText=None):
+        message = self.streamClaude(onText, messages=[{"role": "user", "content": prompt}])
         return "".join(block.text for block in message.content if block.type == "text")
 
     # A streamed answer can carry a call whose arguments cannot be read (they are streamed as they are written): it is asked once more.
-    def streamClaude(self, **options):
+    def streamClaude(self, onText=None, **options):
         for attempt in range(STREAM_ATTEMPTS):
             try:
                 with self.client.messages.stream(model=self.name, max_tokens=CLAUDE_MAX_TOKENS, **options) as stream:
+                    for text in getattr(stream, "text_stream", None) or []:
+                        if self.stopping.is_set():
+                            raise ModelError(f"{self.name} was stopped while it wrote.")
+                        if onText is not None:
+                            onText(text)
                     message = stream.get_final_message()
                 break
             except ValueError:
@@ -229,16 +88,16 @@ class ApiModel:
             raise ModelError(f"{self.name} declined this request ({category or 'no reason given'}). Choose another model for this agent, or change what it is asked.")
         return message
 
-    def converseClaude(self, system, messages, tools):
+    def converseClaude(self, system, messages, tools, onText=None):
         options = {"system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}], "messages": claudeMessages(messages), "cache_control": {"type": "ephemeral"}}
         if tools:
             options["tools"] = [{"name": item["name"], "description": item["description"], "input_schema": item["parameters"], "eager_input_streaming": True} for item in tools]
-        message = self.streamClaude(**options)
+        message = self.streamClaude(onText, **options)
         calls = [{"id": block.id, "name": block.name, "arguments": block.input} for block in message.content if block.type == "tool_use"]
         return {"text": "".join(block.text for block in message.content if block.type == "text"), "calls": calls, "raw": {"claude": [claudeBlock(block) for block in message.content]},
                 "cut": message.stop_reason == "max_tokens" and bool(calls)}
 
-    def converseOpenAi(self, system, messages, tools):
+    def converseOpenAi(self, system, messages, tools, onText=None):
         options = {"model": self.name, "messages": openAiMessages(system, messages)}
         if tools:
             options["tools"] = [{"type": "function", "function": {"name": item["name"], "description": item["description"], "parameters": item["parameters"]}} for item in tools]
@@ -280,9 +139,13 @@ class ApiModel:
     def input(self, prompt):
         return self.ask(lambda: self.askClaude(prompt) if self.provider == "claude" else self.askOpenAi(prompt))
 
-    # One step of a conversation (agent_conversation.py): {"text", "calls", "raw", "cut"}.
-    def converse(self, system, messages, tools):
-        return self.ask(lambda: (self.converseClaude if self.provider == "claude" else self.converseOpenAi)(system, messages, tools))
+    # One step of a conversation (agent_conversation.py): {"text", "calls", "raw", "cut"}. onText receives the text while the model writes it.
+    def converse(self, system, messages, tools, onText=None):
+        self.stopping.clear()
+        return self.ask(lambda: (self.converseClaude if self.provider == "claude" else self.converseOpenAi)(system, messages, tools, onText))
+
+    def cancel(self):
+        self.stopping.set()
 
 
 # A Hugging Face model on the GPUs. It is loaded when it is first asked something, one model at a time (a swarm has many),
@@ -292,6 +155,8 @@ class LocalModel:
     loading = threading.Lock()
     # A model on the GPUs of this computer: a swarm lets its memory go when its agent has finished (Swarm.release), and it loads again if needed.
     local = True
+    # It gives its text while it writes it, and a stop of the swarm ends it there (cancel).
+    streams = True
 
     # vram is the memory the model is expected to need (getModelInfo), so it can be put on one GPU that has room for it.
     def __init__(self, name, bits=16, token=None, report=None, maxNewTokens=LOCAL_MAX_TOKENS, vram=None):
@@ -304,8 +169,9 @@ class LocalModel:
         self.usage = {"calls": 0, "input": 0, "output": 0}
         self.model = None
         self.tokenizer = None
-        self.torch = None
+        self.torch = self.transformers = None
         self.lock = threading.Lock()
+        self.stopping = threading.Event()
 
     def load(self):
         torch, transformers = importLibrary("torch"), importLibrary("transformers")
@@ -328,7 +194,7 @@ class LocalModel:
             if multimodal is None:
                 raise ModelError(f"{self.name} needs a newer version of transformers. Update it with: pip install -U transformers") from None
             self.model = multimodal.from_pretrained(self.name, **options)
-        self.torch = torch
+        self.torch, self.transformers = torch, transformers
         self.checkPlacement()
         self.checkSpread()
         self.report(f"{self.name} is ready.")
@@ -376,12 +242,12 @@ class LocalModel:
             return self.generate([{"role": "user", "content": prompt}])
 
     # A step of a conversation. The chat template of the model says if it knows tools; otherwise they are written in its system prompt.
-    def dialogue(self, system, messages, tools):
+    def dialogue(self, system, messages, tools, onText=None):
         with self.lock:
             self.ensureLoaded()
             native = bool(tools) and "tools" in str(self.tokenizer.chat_template or "")
-            text = self.generate(localMessages(system, messages, tools, native), [{"type": "function", "function": item} for item in tools] if native else None)
-        calls, text = readToolCalls(text)
+            text = self.generate(localMessages(system, messages, tools, native), [{"type": "function", "function": item} for item in tools] if native else None, onText)
+        calls, text = readToolCalls(text, tools)
         return {"text": text, "calls": calls, "raw": None, "cut": False}
 
     def ensureLoaded(self):
@@ -389,13 +255,18 @@ class LocalModel:
             with LocalModel.loading:
                 self.load()
 
-    # Must be called with self.lock held.
-    def generate(self, messages, tools=None):
+    # Must be called with self.lock held. With onText the text is given while it is written (the model writes in a thread of its own).
+    def generate(self, messages, tools=None, onText=None):
         self.ensureLoaded()
         inputs = self.tokenizer.apply_chat_template(messages, tools=tools, add_generation_prompt=True, return_tensors="pt", return_dict=True, enable_thinking=False)
         inputs = inputs.to(self.model.device)
-        with self.torch.no_grad():
-            output = self.model.generate(**inputs, max_new_tokens=self.maxNewTokens)
+        options = {**inputs, "max_new_tokens": self.maxNewTokens, **self.stoppingOptions()}
+        streamer = getattr(self.transformers, "TextIteratorStreamer", None) if onText is not None else None
+        if streamer is None:
+            with self.torch.no_grad():
+                output = self.model.generate(**options)
+        else:
+            output = self.generateWhileReading(options, streamer(self.tokenizer, skip_prompt=True, skip_special_tokens=True), onText)
         start = inputs["input_ids"].shape[-1]
         self.usage["calls"] += 1
         self.usage["input"] += start
@@ -403,11 +274,46 @@ class LocalModel:
         text = self.tokenizer.decode(output[0][start:], skip_special_tokens=True)
         return THINKING_PATTERN.sub("", text).split("<think>")[0].strip()
 
+    def generateWhileReading(self, options, streamer, onText):
+        done = {}
+
+        def work():
+            try:
+                with self.torch.no_grad():
+                    done["output"] = self.model.generate(**options, streamer=streamer)
+            except BaseException as error:
+                done["error"] = error
+                streamer.end()
+        thread = threading.Thread(target=work, daemon=True)
+        thread.start()
+        for text in streamer:
+            onText(text)
+        thread.join()
+        if "error" in done:
+            raise done["error"]
+        return done["output"]
+
+    # A stop of the swarm ends the text the model writes at its next token.
+    def stoppingOptions(self):
+        base = getattr(self.transformers, "StoppingCriteria", None)
+        if base is None or self.torch is None:
+            return {}
+        stopping, torch = self.stopping, self.torch
+
+        class StopWhenCancelled(base):
+            def __call__(self, input_ids, scores, **options):
+                return torch.full((input_ids.shape[0],), stopping.is_set(), dtype=torch.bool, device=input_ids.device)
+        return {"stopping_criteria": self.transformers.StoppingCriteriaList([StopWhenCancelled()])}
+
     def input(self, prompt):
         return self.guard(lambda: self.answer(prompt))
 
-    def converse(self, system, messages, tools):
-        return self.guard(lambda: self.dialogue(system, messages, tools))
+    def converse(self, system, messages, tools, onText=None):
+        self.stopping.clear()
+        return self.guard(lambda: self.dialogue(system, messages, tools, onText))
+
+    def cancel(self):
+        self.stopping.set()
 
     # The two things that go wrong most with a local model are told in words a user understands.
     def guard(self, work):
