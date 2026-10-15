@@ -157,14 +157,15 @@ function settingsModal(modal) {
     const data = await act('saveSettings', { maxAgents: modal.maxAgents }, { busy: 'saveSettings', form: modal });
     if (data) { closeModal(); toast('Your settings are saved.', 'success'); } else render();
   };
-  return modalFrame({ iconEl: h('span', { class: 'task-icon lg', style: { '--task': '#5B4CF0', '--task-soft': '#5B4CF026' } }, icon('settings', 'lg')), title: 'Settings',
+  return modalFrame({ size: 'wide', iconEl: h('span', { class: 'task-icon lg', style: { '--task': '#5B4CF0', '--task-soft': '#5B4CF026' } }, icon('settings', 'lg')), title: 'Settings',
     subtitle: 'Kept on this computer, for all your missions.',
     body: h('div', { class: 'stack' }, h('div', { class: ['field', modal.errors.maxAgents && 'has-error'] },
       h('label', { class: 'field-label', for: 'max-agents' }, 'The most agents a leader can put in a swarm'),
       h('input', { id: 'max-agents', class: 'input', type: 'number', min: '1', max: String(store.state.maxAgentsLimit), step: '1', style: { maxWidth: '140px' }, 'data-key': 'max-agents',
         value: modal.maxAgents, onInput: event => { modal.maxAgents = event.target.value; }, onKeydown: event => { if (event.key === 'Enter') save(); } }),
       modal.errors.maxAgents ? h('div', { class: 'field-error' }, icon('alert'), modal.errors.maxAgents) :
-        h('div', { class: 'field-help' }, icon('info'), `When the leader builds the swarm or adds agents while it runs, it never goes beyond this. The default is 10, and it can be 1 to ${store.state.maxAgentsLimit}. You can always add agents yourself.`))),
+        h('div', { class: 'field-help' }, icon('info'), `When the leader builds the swarm or adds agents while it runs, it never goes beyond this. The default is 10, and it can be 1 to ${store.state.maxAgentsLimit}. You can always add agents yourself.`)),
+      mcpSection(modal)),
     foot: [h('div', { class: 'spacer' }), button('Cancel', { kind: 'ghost', onClick: closeModal }), button('Save', { kind: 'primary', iconName: 'check', busy: ui.busy.saveSettings, onClick: save })] });
 }
 
@@ -203,7 +204,7 @@ function renderModal() {
     const modal = ui.modal;
     const builders = {
       tasks: taskPickerModal, agent: agentFormModal, browse: browseModal, model: modelPickerModal, help: helpModal, stop: stopModal, cancel: cancelModal,
-      join: joinModal, removeAgent: removeAgentModal, settings: settingsModal, deleteMission: deleteMissionModal,
+      join: joinModal, removeAgent: removeAgentModal, settings: settingsModal, deleteMission: deleteMissionModal, calls: callsModal,
       quit: () => confirmModal({ title: 'Quit SwarmUP?', iconName: 'power', confirm: 'Quit', danger: true, text: store.state.tabs.some(tab => ['running', 'waiting'].includes(tab.state)) ? 'Some missions are running. They are saved now, and you can continue them at the next start.' : 'Every mission that ran stays in the history. A team you built but did not run is lost when you quit.',
         run: async () => { const data = await act('quit', {}, { busy: 'confirm' }); if (data) document.body.replaceChildren(h('div', { class: 'splash' }, h('div', { class: 'splash-logo' }, logo()), h('div', { class: 'splash-text' }, data.message))); } }),
       confirmNew: () => confirmModal({ title: 'Start a new swarm in this tab?', iconName: 'plus', confirm: 'Start a new swarm', danger: true, text: 'The mission, the agents and their models of this tab are cleared (a mission that ran stays in the history). To keep them, open a new mission in the sidebar instead. The API keys you gave stay in memory.',

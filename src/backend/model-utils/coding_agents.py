@@ -1,6 +1,9 @@
-# The coding agents (Claude Code and Codex) think for an agent like a model, and ask the user through its loop before they act.
+# The coding agents (Claude Code and Codex) think for an agent like a model. They run their own loop, so they are adapters that run their
+# tools themselves (runsTools, model_adapters.py): the tools of SwarmUP reach them through the bridge (mcp_bridge.py), as one MCP server, and
+# every action they want to do with their own tools goes to the policy of the gateway (mcp_policy.py), like the actions of every other agent.
 # This module has what both need, and Claude Code. Codex is in codex_agent.py.
 import asyncio
+import contextlib
 import importlib.util
 import json
 import threading
@@ -9,28 +12,32 @@ import harness_utils
 # Where a coding agent works, and what is inside its folder, are part of the storehouse of the agents (agent_storehouse.py).
 from agent_storehouse import WORKSPACES_FOLDER, agentWorkspace, isInside
 from harness_utils import isOnline
+from mcp_bridge import BRIDGE, BRIDGE_NAME
+from mcp_policy import decidePermission
 from model_support import ModelConnectionError, ModelError, importLibrary, recordCall
 from models_library import DEFAULT_CLI_MODEL
 
 
 # ==============
-# Coding agents: Claude Code and Codex, which run on the computer of the user. For a loop they are a model like the others (input gives
-# the reply), but they can also read files, run commands and use the web. The loop gives itself to them (attach), so they work in its
-# folder (or in a folder of their own, empty, if it has none), and they ask the user through it: askPermission before an action,
-# askQuestions when they have questions. Reading inside the folder needs no permission, every other action does. What the user allows
-# "until the swarm runs again" is remembered until newRun. Nothing that an agent asks is ever answered without the user.
+# Coding agents: Claude Code and Codex, which run on the computer of the user. The loop gives itself to them (attach), so they work in its
+# folder (or in a folder of their own, empty, if it has none). They change files, copy, run commands and talk with the swarm with the tools of
+# SwarmUP (the server swarmup, through the bridge). What they still do with their own tools (Claude Code only reads; Codex also runs commands)
+# goes to the policy of the gateway: reading inside the folder and the free places needs no permission, every other action shows the user a
+# card, and what the user allows "until the swarm runs again" is remembered in the loop (loop.allowed), for every agent kind the same way.
 # ==============
 CODING_AGENT_RULES = """You work as one agent of a swarm run by SwarmUP, a program that asks its user before anything is done.
 Reply with exactly what the request asks for (a text, a plan, an email, the content of a file...) and nothing else: SwarmUP shows your reply to the user and acts on it only after the user approves it.
-You may read files and run commands to do the task well. Every action other than reading your own folder is shown to the user first, who may refuse it: then go on without it.
-Do not create, change or delete files unless the request asks for it: SwarmUP saves the approved result itself."""
+Use the tools of the MCP server swarmup to change files, copy, run commands, write to the other agents and ask the user: they keep a backup of
+every change and show each action to the user, who may refuse it: then go on without it. Do not create, change or delete files unless the
+request asks for it: SwarmUP saves the approved result itself."""
 
 
-# Without a loop (a test of the connection), nobody can be asked, so every action is refused.
+# Without a loop (a test of the connection), nobody can be asked, so every action is refused. Otherwise the policy of the gateway decides.
 def askPermission(loop, request):
     if loop is None:
         return {"decision": "deny", "message": "Nobody can approve actions during a test of the connection."}
-    answer = loop.askPermission(request)
+    # A request without a key is only remembered for itself: the same action and the same detail.
+    answer = decidePermission(loop, {"key": f"{request.get('action')}:{request.get('detail') or ''}", **request})
     return answer if isinstance(answer, dict) and answer.get("decision") in ("once", "run", "deny") else {"decision": "deny", "message": ""}
 
 
@@ -44,12 +51,12 @@ def askQuestions(loop, questions):
 # of it, the other credentials of the environment are blanked, Claude Code gets a configuration folder of its own (so it finds no login of
 # the user), and the run stops if Claude Code says it uses anything else than the key. The settings files of the folder are not loaded
 # (setting_sources=[]), so a project cannot allow commands on its own. Claude Code retries a refused key for minutes: the first refusal ends it.
-CLAUDE_CODE_TOOLS = ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "WebFetch", "WebSearch", "AskUserQuestion"]
+# Claude Code keeps only its tools that read: everything else goes through the tools of SwarmUP (mcp__swarmup__...), which the gateway decides on.
+CLAUDE_CODE_TOOLS = ["Read", "Glob", "Grep"]
 CLAUDE_CODE_CREDENTIALS = ("ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY")
 CLAUDE_CODE_HOME = "claude-code-home"
 REFUSED_STATUSES = (401, 403)
 # What Claude Code wants to do with each tool, in words, and the field of its input that says what exactly.
-CLAUDE_CODE_WRITERS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
 CLAUDE_CODE_ACTIONS = {"Bash": ("run a command", "command"), "Write": ("create or replace a file", "file_path"), "Edit": ("change a file", "file_path"),
                        "MultiEdit": ("change a file", "file_path"), "NotebookEdit": ("change a notebook", "notebook_path"),
                        "Read": ("read a file outside its folder", "file_path"), "Glob": ("look for files outside its folder", "path"),
@@ -79,83 +86,77 @@ def describeClaudeCodeRequest(tool, data, folder):
     return {"action": action, "detail": detail or json.dumps(data, ensure_ascii=False)[:2000], "folder": str(folder), "reason": str(data.get("description") or "")}
 
 
-# The rules that allow again what the user allowed until the swarm runs again, written like Claude Code writes them ("Bash(npm test *)").
-def describeRunRules(tool, data, suggestions):
-    rules = [f"{rule.tool_name}({rule.rule_content})" if rule.rule_content else rule.tool_name for update in suggestions
-             if update.type == "addRules" and update.behavior == "allow" for rule in update.rules or []]
-    if rules:
-        return rules
-    return [f"Bash({data['command']})"] if tool == "Bash" and data.get("command") else [tool]
-
-
-# The questions of Claude (AskUserQuestion) in the form of Loop.askQuestions, and the answers in the form Claude expects.
-def readClaudeQuestions(data):
-    return [{"id": question.get("question", ""), "header": question.get("header", ""), "question": question.get("question", ""),
-             "options": [{"label": option.get("label", ""), "description": option.get("description", "")} for option in question.get("options") or []],
-             "multiple": bool(question.get("multiSelect")), "secret": False} for question in data.get("questions") or []]
-
-
 class ClaudeCodeModel:
+    runsTools = True
+
     def __init__(self, name, apiKey, report=None):
         self.name = name or DEFAULT_CLI_MODEL
         self.apiKey = apiKey
         self.report = report or (lambda message: None)
         self.usage = {"calls": 0, "input": 0, "output": 0}
         self.loop = None
-        self.runRules = []
-        self.runExact = set()
+        self.client = None
         self.lock = threading.Lock()
 
     def attach(self, loop):
         self.loop = loop
 
     def newRun(self):
-        self.runRules, self.runExact = [], set()
+        pass
 
-    def options(self, sdk, folder):
+    def options(self, sdk, folder, bridge=None):
         environment = {**{name: "" for name in CLAUDE_CODE_CREDENTIALS}, "ANTHROPIC_API_KEY": self.apiKey,
                        "CLAUDE_CONFIG_DIR": str(harness_utils.AGENT_FILES / CLAUDE_CODE_HOME)}
-        return sdk.ClaudeAgentOptions(cwd=str(folder), add_dirs=missionFolders(self.loop), permission_mode="default", tools=list(CLAUDE_CODE_TOOLS), allowed_tools=list(self.runRules),
-                                      setting_sources=[], can_use_tool=self.decide, env=environment, model=None if self.name == DEFAULT_CLI_MODEL else self.name,
+        servers = {BRIDGE_NAME: {"type": "http", "url": bridge[0], "headers": {"Authorization": f"Bearer {bridge[1]}"}}} if bridge else {}
+        return sdk.ClaudeAgentOptions(cwd=str(folder), add_dirs=missionFolders(self.loop), permission_mode="default", tools=list(CLAUDE_CODE_TOOLS),
+                                      allowed_tools=[f"mcp__{BRIDGE_NAME}"] if bridge else [], mcp_servers=servers, setting_sources=[], can_use_tool=self.decide,
+                                      env=environment, model=None if self.name == DEFAULT_CLI_MODEL else self.name,
                                       system_prompt={"type": "preset", "preset": "claude_code", "append": CODING_AGENT_RULES},
                                       extra_args={"no-session-persistence": None})
 
+    # Claude Code asks before it uses a tool. A tool of SwarmUP is decided by the gateway when it runs. Its own tools only read: inside the
+    # folder and the free places they need nothing, elsewhere the policy decides, as for every agent.
     async def decide(self, tool, data, context):
         types = importlib.import_module("claude_agent_sdk.types")
-        folder = agentWorkspace(self.loop)
-        if tool == "AskUserQuestion":
-            answers = await asyncio.to_thread(askQuestions, self.loop, readClaudeQuestions(data))
-            chosen = {question: values if len(values) != 1 else values[0] for question, values in answers.items()}
-            return types.PermissionResultAllow(updated_input={"questions": data.get("questions") or [], "answers": chosen})
-        # Claude Code asks again for some commands its rules cover (those that write with >): the exact action the user allowed is not asked again.
+        if tool.startswith(f"mcp__{BRIDGE_NAME}__"):
+            return types.PermissionResultAllow(updated_input=data)
+        if tool not in CLAUDE_CODE_TOOLS:
+            return types.PermissionResultDeny(message=f"{tool} is not used in SwarmUP: use the tools of the server {BRIDGE_NAME}.")
         field = CLAUDE_CODE_ACTIONS.get(tool, ("", None))[1]
-        rule = placeRule(self.loop, data.get(field) if field and tool not in ("Bash", "WebFetch", "WebSearch") else None, tool in CLAUDE_CODE_WRITERS)
-        if rule == "free":
+        path = data.get(field) if field else None
+        rule = placeRule(self.loop, path, False)
+        if rule == "free" or (path and self.loop is not None and isInside(agentWorkspace(self.loop), path)):
             return types.PermissionResultAllow(updated_input=data)
         if rule != "ask":
             return types.PermissionResultDeny(message=rule)
-        exact = (tool, json.dumps(data, sort_keys=True))
-        if exact in self.runExact:
-            return types.PermissionResultAllow(updated_input=data)
-        answer = await asyncio.to_thread(askPermission, self.loop, describeClaudeCodeRequest(tool, data, folder))
+        request = {**describeClaudeCodeRequest(tool, data, agentWorkspace(self.loop)), "key": f"read:{path or json.dumps(data, sort_keys=True)}", "readOnly": True}
+        answer = await asyncio.to_thread(askPermission, self.loop, request)
         if answer["decision"] == "deny":
             return types.PermissionResultDeny(message=f"The user refused this. {answer.get('message') or ''}".strip())
-        if answer["decision"] == "once":
-            return types.PermissionResultAllow(updated_input=data)
-        rules = describeRunRules(tool, data, context.suggestions or [])
-        self.runRules += [rule for rule in rules if rule not in self.runRules]
-        self.runExact.add(exact)
-        # Claude Code suggests rules saved in the folder of the user (localSettings): they are kept in memory for this session instead.
-        update = types.PermissionUpdate(type="addRules", rules=[types.PermissionRuleValue(tool_name=rule.split("(", 1)[0], rule_content=rule[len(rule.split("(", 1)[0]) + 1:-1] or None)
-                                                                for rule in rules], behavior="allow", destination="session")
-        return types.PermissionResultAllow(updated_input=data, updated_permissions=[update])
+        return types.PermissionResultAllow(updated_input=data)
 
-    async def converse(self, prompt):
+    # One step of the core loop is one turn of Claude Code, with the conversation so far, and the tools of SwarmUP through the bridge.
+    def converse(self, system, messages, tools, onText=None, runTool=None):
+        from model_adapters import renderPrompt
+        prompt = renderPrompt(system, messages, [])
+        if not tools or runTool is None:
+            return {"text": self.input(prompt), "calls": [], "raw": None, "cut": False}
+        with BRIDGE.offer(tools, runTool) as bridge:
+            return {"text": self.input(prompt, bridge), "calls": [], "raw": None, "cut": False}
+
+    def cancel(self):
+        client = self.client
+        if client is not None:
+            with contextlib.suppress(Exception):
+                asyncio.run_coroutine_threadsafe(client.interrupt(), self.turnLoop)
+
+    async def runTurn(self, prompt, bridge=None):
         sdk = importLibrary("claude_agent_sdk")
         folder = agentWorkspace(self.loop)
         (harness_utils.AGENT_FILES / CLAUDE_CODE_HOME).mkdir(parents=True, exist_ok=True)
         result, retries = None, set()
-        async with sdk.ClaudeSDKClient(self.options(sdk, folder)) as client:
+        async with sdk.ClaudeSDKClient(self.options(sdk, folder, bridge)) as client:
+            self.client, self.turnLoop = client, asyncio.get_running_loop()
             await client.query(prompt)
             async for message in client.receive_response():
                 if isinstance(message, sdk.SystemMessage) and message.subtype == "init" and message.data.get("apiKeySource") != "ANTHROPIC_API_KEY":
@@ -198,13 +199,15 @@ class ClaudeCodeModel:
             cost = sum(usage["costUSD"] for usage in models.values())
         recordCall(self.usage, **tokens, cost=cost)
 
-    def input(self, prompt):
+    def input(self, prompt, bridge=None):
         with self.lock:
             try:
-                return asyncio.run(self.converse(prompt))
+                return asyncio.run(self.runTurn(prompt, bridge))
             except ModelError:
                 raise
             except Exception as error:
                 if not isOnline():
                     raise ModelConnectionError("Claude Code cannot reach Anthropic: the internet connection is lost.") from error
                 raise ModelError(f"Claude Code failed: {type(error).__name__}: {error}") from error
+            finally:
+                self.client = None

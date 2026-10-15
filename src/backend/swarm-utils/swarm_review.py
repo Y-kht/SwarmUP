@@ -308,6 +308,10 @@ class SwarmReview:
             for member in self.members.values():
                 member["wake"].set()
             self.changed.notify_all()
+        if self.gateway is not None:
+            self.gateway.cancelAll()
+        for member in list(self.members.values()):
+            self.cancelModel(member)
         self.record("addProgress", self.round, "The user stopped the swarm", "The agents that did not finish were stopped.")
         self.emit("stopped")
 
@@ -359,8 +363,8 @@ class SwarmReview:
                     leader.notifyUser(str(error))
 
     # ---------- The long-term memory (mission_memory.py). ----------
-    # At the end of a round the leader keeps in the long-term memory what the next swarms of the user should know. It writes it freely, and the
-    # user is told of every change (tellLongTermChange). A round where the user only gave the mission and approved has nothing to teach, so the
+    # At the end of a round the leader keeps in the long-term memory what the next swarms of the user should know, with leader__keep_long_term.
+    # It writes it freely, and the user is told of every change (tellLongTermChange). A round where the user only gave the mission and approved has nothing to teach, so the
     # leader is asked only after a correction, a rejection, a message, an answer or a follow-up.
     def updateLongTermMemory(self):
         if self.session is None:
@@ -369,15 +373,16 @@ class SwarmReview:
         written = memory.readRound(USER_PROMPTS, self.round)
         if not hasFeedback(written):
             return
-        prompt = prompts.LONG_TERM_UPDATE_PROMPT.format(mission=self.mission, prompts=written, memory=describeLongTerm(memory))
+        before = describeLongTerm(memory)
+        prompt = prompts.LONG_TERM_UPDATE_PROMPT.format(mission=self.mission, prompts=written, memory=before)
         try:
-            answer = leader.askAgent(prompt, own=False, tools=False)
-            changed, problems = memory.applyBlocks(self.leader, answer)
+            leader.askAgent(prompt, own=False, tools=True)
+            problem = ""
         except Exception as error:
-            changed, problems = [], [f"{type(error).__name__}: {error}"]
-        if problems:
-            leader.notifyUser(f"[{self.leader}] Some of the long-term memory could not be updated: {'; '.join(problems)}")
-        elif not changed:
+            problem = f"{type(error).__name__}: {error}"
+        if problem:
+            leader.notifyUser(f"[{self.leader}] Some of the long-term memory could not be updated: {problem}")
+        elif describeLongTerm(memory) == before:
             leader.notifyUser(f"[{self.leader}] I read what you wrote in this round, and found nothing new to keep in the long-term memory for the next swarms.")
 
     def tellLongTermChange(self, agent, relative, change):

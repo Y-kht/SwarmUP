@@ -20,7 +20,7 @@ import harness_utils
 import model_support
 from base_loop import Loop
 from codex_agent import CodexModel, checkCodex, isSafeRead, unwrapCommand
-from coding_agents import ClaudeCodeModel, describeClaudeCodeRequest, describeRunRules
+from coding_agents import ClaudeCodeModel, describeClaudeCodeRequest
 from model_clients import createModel
 from model_support import ModelError, findMissingPackages
 from models_library import DEFAULT_CLI_MODEL, getModelInfo
@@ -221,11 +221,16 @@ class PermissionWordsTests(FolderTestCase):
         self.assertEqual(describeClaudeCodeRequest("WebSearch", {"query": "bees"}, self.folder)["action"], "search the web")
         self.assertEqual(describeClaudeCodeRequest("Mystery", {"x": 1}, self.folder)["action"], "use its tool Mystery")
 
-    def testWhatIsAllowedUntilTheNextRunFollowsTheSuggestionsOfClaudeCode(self):
-        suggestion = SimpleNamespace(type="addRules", behavior="allow", rules=[SimpleNamespace(tool_name="Bash", rule_content="npm test *")])
-        self.assertEqual(describeRunRules("Bash", {"command": "npm test"}, [suggestion]), ["Bash(npm test *)"])
-        self.assertEqual(describeRunRules("Bash", {"command": "ls -la"}, []), ["Bash(ls -la)"])
-        self.assertEqual(describeRunRules("WebFetch", {"url": "x"}, []), ["WebFetch"])
+    def testWhatIsAllowedUntilTheNextRunIsKeptByTheLoopForEveryAgentKind(self):
+        asked = []
+        loop = Loop(None)
+        loop.askPermission = lambda request: asked.append(request) or {"decision": "run", "message": ""}
+        request = {"action": "run a command", "detail": "npm test", "folder": str(self.folder), "reason": "", "key": "run:npm test"}
+        self.assertEqual([coding_agents.askPermission(loop, request)["decision"] for attempt in range(2)], ["run", "once"])
+        self.assertEqual((len(asked), loop.allowed), (1, {"run:npm test"}))
+        coding_agents.askPermission(loop, {"action": "read a file outside its folder", "detail": "/etc/hosts"})
+        self.assertIn("read a file outside its folder:/etc/hosts", loop.allowed)
+        self.assertEqual(len(asked), 2)
 
     def testTheConsoleAsksForPermissionsAndQuestions(self):
         replies = iter(["yes please", "always", "no not that", "use git instead", "2", "my own words"])
@@ -266,15 +271,16 @@ class ClaudeCodeTests(FolderTestCase):
         model.attach(loop)
         return model, loop, server
 
-    def testACommandRunsOnlyAfterTheUserAllowsIt(self):
-        model, loop, server = self.agent([("tool", "Bash", {"command": "echo hi > made.txt", "description": "Make a file"}), ("text", "Done.")], ["once"])
-        self.assertEqual(model.input("Make a file."), "Done.")
-        self.assertTrue((self.folder / "made.txt").exists())
-        self.assertEqual([(request["action"], request["detail"], request["reason"]) for request in loop.asked], [("run a command", "echo hi > made.txt", "Make a file")])
-        model, loop, server = self.agent([("tool", "Bash", {"command": "echo hi > other.txt"}), ("text", "Done.")], ["deny"])
-        model.input("Make a file.")
-        self.assertFalse((self.folder / "other.txt").exists())
-        self.assertIn("The user refused this. not now", server.results)
+    def testClaudeCodeOnlyReadsWithItsOwnToolsAndActsWithThoseOfSwarmUp(self):
+        model, loop, server = self.agent([("tool", "Bash", {"command": "echo hi > made.txt"}), ("tool", "mcp__swarmup__files__write_file", {"path": "made.txt", "content": "hi"}),
+                                          ("text", "Done.")])
+        calls = []
+        tools = [{"name": "files__write_file", "description": "Write a file.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}}}]
+        reply = model.converse("System", [{"role": "user", "content": "Make a file."}], tools, runTool=lambda name, arguments: calls.append((name, arguments)) or ("Done: create made.txt.", False))
+        self.assertEqual(reply["text"], "Done.")
+        self.assertEqual(calls, [("files__write_file", {"path": "made.txt", "content": "hi"})])
+        self.assertFalse((self.folder / "made.txt").exists())
+        self.assertEqual(loop.asked, [])
 
     def testReadingInsideTheFolderNeedsNoPermissionButReadingOutsideDoes(self):
         model, loop, server = self.agent([("tool", "Read", {"file_path": str(self.folder / "notes.txt")}), ("tool", "Read", {"file_path": str(self.root / "secret.txt")}),
@@ -285,23 +291,18 @@ class ClaudeCodeTests(FolderTestCase):
         self.assertIn("bees", server.results[0])
 
     def testWhatTheUserAllowsUntilTheNextRunIsNotAskedAgain(self):
-        model, loop, server = self.agent([("tool", "Bash", {"command": "echo a > a.txt"}), ("text", "One.")], ["run"])
+        (self.root / "secret.txt").write_text("secret", encoding="utf-8")
+        read = ("tool", "Read", {"file_path": str(self.root / "secret.txt")})
+        model, loop, server = self.agent([read, ("text", "One.")], ["run"])
         model.input("First.")
-        server.steps = [("tool", "Bash", {"command": "echo a > a.txt"}), ("text", "Two.")]
+        server.steps = [read, ("text", "Two.")]
         self.assertEqual(model.input("Second."), "Two.")
         self.assertEqual(len(loop.asked), 1)
         self.assertFalse((self.folder / ".claude").exists())
-        model.newRun()
-        server.steps = [("tool", "Bash", {"command": "echo a > a.txt"}), ("text", "Three.")]
+        loop.allowed = set()
+        server.steps = [read, ("text", "Three.")]
         model.input("Third.")
         self.assertEqual(len(loop.asked), 2)
-
-    def testTheQuestionsOfClaudeGoToTheUser(self):
-        question = {"question": "Which tone?", "header": "Tone", "options": [{"label": "Formal", "description": ""}, {"label": "Warm", "description": ""}], "multiSelect": False}
-        model, loop, server = self.agent([("tool", "AskUserQuestion", {"questions": [question]}), ("text", "Warm it is.")], answers={"Which tone?": ["Warm"]})
-        self.assertEqual(model.input("Write."), "Warm it is.")
-        self.assertEqual(loop.questions[0][0]["options"][1]["label"], "Warm")
-        self.assertIn("Warm", server.results[0])
 
     def testARefusedKeyStopsAtOnce(self):
         model, loop, server = self.agent([], status=401)
@@ -361,7 +362,7 @@ class CodexTests(FolderTestCase):
         server.steps = [("tool", "exec_command", {"cmd": "touch made.txt"}), ("text", "Two.")]
         self.assertEqual(model.input("Second."), "Two.")
         self.assertEqual(len(loop.asked), 1)
-        model.newRun()
+        loop.allowed = set()
         server.steps = [("tool", "exec_command", {"cmd": "touch made.txt"}), ("text", "Three.")]
         model.input("Third.")
         self.assertEqual(len(loop.asked), 2)

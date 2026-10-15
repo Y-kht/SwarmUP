@@ -20,6 +20,7 @@ ASSETS = {"style.css": "text/css; charset=utf-8", "views.css": "text/css; charse
           "step_teamwork.js": "text/javascript; charset=utf-8",
           "live_swarm.js": "text/javascript; charset=utf-8",
           "missions.js": "text/javascript; charset=utf-8",
+          "mcp_views.js": "text/javascript; charset=utf-8",
           "app.js": "text/javascript; charset=utf-8",
           "logo.svg": "image/svg+xml"}
 HOST = "127.0.0.1"

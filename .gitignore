@@ -1,2 +1,4 @@
 agent-files
 __pycache__/
+*.pdf
+*BOOKLET*

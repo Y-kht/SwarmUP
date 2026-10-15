@@ -49,8 +49,9 @@ LOCK_TRIES = 600
 KNOWN_FILES = {USER_PROMPTS: "every prompt of the user: the mission, the follow-ups, the corrections, the messages to the agents and the answers",
                PROGRESS: "where the mission stands: the summaries of the leader, the agents that did not finish, the final reports",
                PLANS: "the plans the user approved in plan mode, by round and agent"}
-# The blocks are read even when they are not written exactly as asked: a closing tag with a typo, or none (then the next block or the end
-# of the answer ends it).
+# A block of what to keep in the long-term memory, as a model that writes its calls as text writes it (model_messages.py reads it as a call of
+# leader__keep_long_term): <swarmup_memory file="USER_PREFERENCES.md" mode="append">...</swarmup_memory>. It is read even when it is not
+# written exactly as asked: a closing tag with a typo, or none (then the next block or the end of the answer ends it).
 MEMORY_BLOCK = re.compile(r"<\s*swarmup_memory\s+file\s*=\s*[\"']?([^\"'>\s]+)[\"']?(?:\s+mode\s*=\s*[\"']?(\w+)[\"']?)?\s*>(.*?)"
                           r"(?:<\s*/[^>]{0,30}memory\s*>|(?=<\s*swarmup_memory\b)|\Z)", re.IGNORECASE | re.DOTALL)
 
@@ -384,26 +385,6 @@ class MissionMemory:
     # recorded in it can have headings of its own.
     def readRound(self, relative, round):
         return "".join(section for section in splitRecord(readText(self.folder / relative)) if section.startswith(f"## Round {round}:")).strip()
-
-    # ---------- The leader updates the long-term memory with blocks. ----------
-    # <swarmup_memory file="USER_PREFERENCES.md" mode="append">...</swarmup_memory>. It gives back the files changed, and the problems. An
-    # answer that is neither NOTHING nor a block that can be read is a problem too, so the user knows the update was lost.
-    def applyBlocks(self, agent, text):
-        changed, problems = [], []
-        blocks = MEMORY_BLOCK.findall(text or "")
-        if not blocks and (text or "").strip() and not (text or "").strip().upper().startswith("NOTHING"):
-            problems.append("its answer had no <swarmup_memory> block that SwarmUP could read")
-        for name, mode, content in blocks:
-            relative = Path(name.strip()).as_posix()
-            if not relative.lower().endswith(".md") or relative.startswith(("/", "..")) or ".." in Path(relative).parts:
-                problems.append(f"{name}: the long-term memory only holds .md files inside its folder.")
-                continue
-            try:
-                self.write(agent, relative, content.strip() + "\n", long=True, append=(mode or "append").lower() != "replace")
-                changed.append(relative)
-            except (MemoryRefused, OSError) as error:
-                problems.append(f"{name}: {error}")
-        return changed, problems
 
 
 # ==============

@@ -58,7 +58,7 @@ def describeLongTerm(memory):
     for relative, path in files:
         text = head(readText(path).strip(), FILE_CHARS, f"@long-term/{relative}")
         if used + len(text) > LONG_TERM_CHARS:
-            parts.append(f"(More files, by name only: {', '.join(name for name, _ in files[len(parts):])}. Read them with read_file @long-term/<name>.)")
+            parts.append(f"(More files, by name only: {', '.join(name for name, _ in files[len(parts):])}. Read them with files__read_file @long-term/<name>.)")
             break
         parts.append(f"--- @long-term/{relative} ---\n{text}")
         used += len(text)
@@ -89,7 +89,7 @@ def describeMission(memory, agent, budget):
         parts.append(f"--- @memory/{relative} ---\n{text}")
         used += len(text)
     if left:
-        parts.append("Not shown here (read them with read_file when you need them): " + ", ".join(f"@memory/{name}" for name in sorted(left)))
+        parts.append("Not shown here (read them with files__read_file when you need them): " + ", ".join(f"@memory/{name}" for name in sorted(left)))
     return "\n\n".join(parts) or "Nothing yet."
 
 

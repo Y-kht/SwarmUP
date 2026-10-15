@@ -1,4 +1,4 @@
-# The commands of the agents (the tools run_command, process_status and stop_process of agent_tools.py). A command runs in the folder of the
+# The commands of the agents (the tools of the processes server, server_processes.py). A command runs in the folder of the
 # agent or in its temp folder (mission_memory.py), always after the permission of the user, because it can change anything. It waits for its end,
 # or it runs in the background while the agent works: what it prints goes to @temp/processes/<id>.log, and the agent follows it and stops it.
 # A command of the background runs in a group of its own, so stopping it stops everything it started. The commands of a mission stop when its
@@ -8,6 +8,7 @@ import json
 import os
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 from datetime import datetime
@@ -18,6 +19,8 @@ MAX_COMMAND_SECONDS = 600
 RESULT_CHARS = 60000
 STATUS_LINES = 60
 STOP_SECONDS = 5
+PROGRESS_SECONDS = 5
+POLL_SECONDS = 0.2
 PROCESSES_FOLDER = "processes"
 PIDS_FILE = "processes.json"
 # The commands that run in the background in this program: {mission: {id: {"process", "agent", "command", "folder", "started", "log"}}}.
@@ -131,13 +134,34 @@ class ProcessTools:
         if background:
             return self.startProcess(command, folder)
         seconds = min(max(timeout_seconds, 1), MAX_COMMAND_SECONDS)
-        try:
-            done = subprocess.run(command, shell=True, cwd=folder, capture_output=True, text=True, errors="replace", timeout=seconds)
-        except subprocess.TimeoutExpired:
+        code, output = self.runInForeground(command, folder, seconds)
+        if code is None:
             return f"The command ran for more than {seconds} seconds and was stopped. Run a long command with background."
         self.loop.logAction(f"Ran in {folder}: {command}")
-        output = (done.stdout + done.stderr).strip()
-        return f"Exit code {done.returncode}.\n" + (output[-RESULT_CHARS:] if output else "(it printed nothing)")
+        return f"Exit code {code}.\n" + (output[-RESULT_CHARS:] if output else "(it printed nothing)")
+
+    # Waits for a command and says every few seconds that it still runs. A stop of the swarm stops it at once, with everything it started.
+    def runInForeground(self, command, folder, seconds):
+        options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
+        with tempfile.TemporaryFile() as output:
+            process = subprocess.Popen(command, shell=True, cwd=folder, stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, **options)
+            started = told = time.monotonic()
+            try:
+                while process.poll() is None:
+                    now = time.monotonic()
+                    if now - started > seconds:
+                        stopTree(process.pid)
+                        return None, ""
+                    if now - told >= PROGRESS_SECONDS:
+                        told = now
+                        self.progress(now - started, seconds, f"The command still runs ({int(now - started)} s).")
+                    self.checkCancelled()
+                    time.sleep(POLL_SECONDS)
+            except BaseException:
+                stopTree(process.pid)
+                raise
+            output.seek(0)
+            return process.returncode, output.read()[-RESULT_CHARS * 4:].decode("utf-8", errors="replace").strip()
 
     def startProcess(self, command, folder):
         logs = self.session.temp / PROCESSES_FOLDER
@@ -154,8 +178,8 @@ class ProcessTools:
                             "started": f"{datetime.now():%Y-%m-%d %H:%M:%S}"}
         savePids(self.session.id, self.session.temp)
         self.loop.logAction(f"Started in the background, in {folder}: {command}")
-        return (f"Started {key} in {folder}. What it prints goes to @temp/{PROCESSES_FOLDER}/{key}.log. Follow it with process_status, stop it with "
-                "stop_process. It is stopped when the swarm stops.")
+        return (f"Started {key} in {folder}. What it prints goes to @temp/{PROCESSES_FOLDER}/{key}.log. Follow it with processes__check_process, stop it "
+                "with processes__stop_process. It is stopped when the swarm stops.")
 
     def ownProcesses(self):
         with RUNNING_LOCK:

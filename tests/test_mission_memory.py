@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
 from patching import everywhere
 from pathlib import Path
@@ -16,7 +17,9 @@ import harness_utils
 import mission_memory
 from base_loop import Loop
 from memory_cache import describeMemory, noteUse
+from mcp_gateway import Gateway
 from mission_memory import SWARMUP, MemoryRefused, MissionMemory, WorkSession
+from model_messages import readToolCalls
 from swarm_harness import Swarm
 
 
@@ -145,28 +148,40 @@ class LongTermTests(MemoryTestCase):
         self.memory.delete("Leader", "STYLE.md", long=True)
         self.assertIn("-- short sentences", self.told[-1][2])
 
-    def testTheBlocksOfTheLeaderAreAppliedWhenTheyAreSafe(self):
-        changed, problems = self.memory.applyBlocks("Leader", """Here is what I keep:
-<swarmup_memory file="USER_PREFERENCES.md">- writes in French</swarmup_memory>
-<swarmup_memory file='STYLE.md' mode="replace">- formal</swarmup_memory>
-<swarmup_memory file="../evil.md">x</swarmup_memory>
-<swarmup_memory file="run.sh">x</swarmup_memory>""")
-        self.assertEqual(changed, ["USER_PREFERENCES.md", "STYLE.md"])
-        self.assertEqual(len(problems), 2)
+    # The leader keeps what lasts with its tool leader__keep_long_term, through the gateway; only .md files inside the long-term memory.
+    def leaderLink(self, name="Leader"):
+        loop = Loop(None)
+        loop.name, loop.session = name, WorkSession("m1", "run", leader="Leader")
+        loop.team = types.SimpleNamespace(leader="Leader", id="m1")
+        loop.notifyUser = lambda message: None
+        gateway = Gateway("m1")
+        self.addCleanup(gateway.close)
+        return gateway.link(loop)
+
+    def testTheLeaderKeepsWhatIsSafeWithItsTool(self):
+        link = self.leaderLink()
+        self.assertFalse(link.call("leader__keep_long_term", {"file": "USER_PREFERENCES.md", "text": "- writes in French"})[1])
+        self.assertFalse(link.call("leader__keep_long_term", {"file": "STYLE.md", "text": "- formal", "mode": "replace"})[1])
+        self.assertIn("only holds .md files", link.call("leader__keep_long_term", {"file": "../evil.md", "text": "x"})[0])
+        self.assertIn("only holds .md files", link.call("leader__keep_long_term", {"file": "run.sh", "text": "x"})[0])
         self.assertEqual((self.memory.longTerm / "STYLE.md").read_text(encoding="utf-8"), "- formal\n")
         self.assertFalse((self.memory.longTerm.parent / "evil.md").exists())
-        self.assertEqual(self.memory.applyBlocks("Writer", '<swarmup_memory file="X.md">x</swarmup_memory>')[0], [])
+        text, error = self.leaderLink("Writer").call("leader__keep_long_term", {"file": "X.md", "text": "x"})
+        self.assertTrue(error)
+        self.assertIn("there is no tool leader__keep_long_term for you now", text)
 
-    # A model writes its blocks as it can: a closing tag with a typo, or none. An answer without any block is told as a problem.
-    def testTheBlocksAreReadEvenWhenTheyAreNotExact(self):
-        changed, problems = self.memory.applyBlocks("Leader", '<swarmup_memory file="USER_PREFERENCES.md" mode="append">\n- writes in French\n</swwarmup_memory>\n'
-                                                              '<swarmup_memory file="SIGNATURE.md">- signs "The Bee Club team"')
-        self.assertEqual((changed, problems), (["USER_PREFERENCES.md", "SIGNATURE.md"], []))
-        self.assertEqual((self.memory.longTerm / "USER_PREFERENCES.md").read_text(encoding="utf-8"), "- writes in French\n")
+    # A model that writes its calls as text writes what to keep as blocks, as it can: a closing tag with a typo, or none.
+    def testTheBlocksOfAModelThatWritesItsCallsAsTextAreItsCalls(self):
+        text = ('<swarmup_memory file="USER_PREFERENCES.md" mode="append">\n- writes in French\n</swwarmup_memory>\n'
+                '<swarmup_memory file="SIGNATURE.md">- signs "The Bee Club team"')
+        calls, rest = readToolCalls(text, [{"name": "leader__keep_long_term"}])
+        self.assertEqual([call["arguments"] for call in calls], [{"file": "USER_PREFERENCES.md", "text": "- writes in French", "mode": "append"},
+                                                                 {"file": "SIGNATURE.md", "text": '- signs "The Bee Club team"', "mode": "append"}])
+        link = self.leaderLink()
+        for call in calls:
+            self.assertFalse(link.call(call["name"], call["arguments"])[1])
         self.assertEqual((self.memory.longTerm / "SIGNATURE.md").read_text(encoding="utf-8"), '- signs "The Bee Club team"\n')
-        self.assertEqual(self.memory.applyBlocks("Leader", "NOTHING"), ([], []))
-        self.assertEqual(self.memory.applyBlocks("Leader", "I would keep that the user likes French."),
-                         ([], ["its answer had no <swarmup_memory> block that SwarmUP could read"]))
+        self.assertEqual(readToolCalls("NOTHING", [{"name": "leader__keep_long_term"}]), ([], "NOTHING"))
 
 
 class LockTests(MemoryTestCase):
@@ -216,7 +231,7 @@ class CacheTests(MemoryTestCase):
         self.assertIn("--- @memory/C_MINE.md ---", text)
         self.assertIn("--- @memory/B_DATA.md ---", text)
         self.assertNotIn("--- @memory/A_NOTES_OF_CHECKER.md ---", text)
-        self.assertIn("Not shown here (read them with read_file when you need them): @memory/A_NOTES_OF_CHECKER.md", text)
+        self.assertIn("Not shown here (read them with files__read_file when you need them): @memory/A_NOTES_OF_CHECKER.md", text)
 
     def testALongFileShowsItsLatestPartWithWhereToReadTheRest(self):
         self.memory.addProgress(1, "Old", "x" * 5000)

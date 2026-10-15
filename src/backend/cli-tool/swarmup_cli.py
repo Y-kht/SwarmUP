@@ -12,6 +12,9 @@
 #   history [--json]          every mission of the history: running, interrupted, finished (it can be followed up) or stopped
 #   open mission              a new session that continues the mission, or follows it up with a new request
 #   delete mission... [--yes] delete missions of the history, with their memory and their temp folder
+#   calls mission             every call of a tool in a mission, with how it ended (the gateway records them, mcp_records.py)
+#   mcp list|add|approve|remove   the MCP servers of other programs that the agents can use (cli_mcp.py)
+#   mcp-serve                 SwarmUP as an MCP server on stdio, so another AI agent can drive it (swarmup_mcp_server.py)
 #   run                       the program in this terminal only, without a session (it stops with the terminal)
 # The screen of a session (cli_screen.py) has a window for the swarm and one for each agent (Ctrl-b then ? for the keys).
 #
@@ -42,6 +45,7 @@ from pathlib import Path
 # The modules of SwarmUP are in the folders of src/backend. Their names have hyphens, so they are not packages: each folder goes on the path.
 sys.path[:0] = [str(folder) for folder in sorted(Path(__file__).resolve().parents[1].iterdir()) if folder.is_dir() and not folder.name.startswith(("_", "."))]
 from cli_hub import SWARM_WINDOW, Hub, HubConsole, startServer
+from cli_mcp import addMcpArguments, runMcp, showCalls
 from cli_screen import attach
 from cli_sessions import findSession, killSession, listSessions, logPath, newSessionId, removeSession, request, startDaemon, writeSession
 from internet_cache import keepFresh
@@ -271,6 +275,8 @@ def makeParser():
     deleting = commands.add_parser("delete", help="delete missions of the history, with their memory and their temp folder")
     deleting.add_argument("missions", nargs="+", help="their numbers in the history, or their ids")
     deleting.add_argument("--yes", action="store_true", help="do not ask for a confirmation")
+    addMcpArguments(commands)
+    commands.add_parser("mcp-serve", help="run SwarmUP as an MCP server on stdio, so another AI agent can start, lead and follow its swarms")
     serving = commands.add_parser("serve")
     serving.add_argument("--session", required=True)
     serving.add_argument("--mission")
@@ -302,6 +308,13 @@ def main(arguments=None):
                 print(attach(info, options.plain, options.prefix))
         elif command == "delete":
             deleteMissions(options.missions, options.yes)
+        elif command == "mcp":
+            runMcp(options)
+        elif command == "calls":
+            showCalls(findMission(options.mission, listMissions()), options.agent, options.server, options.lines)
+        elif command == "mcp-serve":
+            from swarmup_mcp_server import serveMcp
+            serveMcp()
         elif command == "attach":
             print(attach(findSession(options.session, listSessions()), options.plain, options.prefix))
         elif command in ("list", "ls"):

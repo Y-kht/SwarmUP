@@ -6,9 +6,10 @@ from datetime import datetime
 from pathlib import Path
 
 import agent_prompts as prompts
-from agent_conversation import canConverse, talk
-from agent_storehouse import consultFolder, describeWorkplace, folderProblem, resultsFolder, safeName
+from agent_conversation import talk
+from agent_storehouse import folderProblem, resultsFolder, safeName
 from agent_tools import describeChanges, undoChanges
+from model_adapters import adapterOf
 from harness_utils import ConnectionLost, USER_LOCK, asConnectionLost, checkLength, isNo, isOnline, isYes, loadRules
 
 
@@ -38,9 +39,8 @@ class Loop:
         self.resumed = False
         self.onProgress = None
         self.onConnectionLost = None
-        # When the leader manages the swarm, every answer of its model goes through onAnswer (LeaderManager.readOutput), which acts on the
-        # blocks it finds and gives back the text without them.
-        self.onAnswer = None
+        # What a leader is doing now (LeaderDesk in server_leader.py): building its swarm, or managing it while it runs.
+        self.leaderDesk = None
         # The model answers one prompt at a time, even when two threads ask it (the leader that works, and the manager of the swarm).
         self.thinking = threading.RLock()
         # Called after every call of the model, even one that failed (it may have been billed), so the cost of the mission is shown as it grows.
@@ -54,6 +54,8 @@ class Loop:
         self.allowed = set()
         self.activity = []
         self.onActivity = None
+        # The text the model writes now, while it writes it (onText(text, done)).
+        self.onText = None
         # What the loop says and asks is never mixed with what another loop says and asks to the same user. A window with several missions gives
         # each of them its own lock, so a question of one mission never waits for the answer to another.
         self.userLock = USER_LOCK
@@ -149,6 +151,10 @@ class Loop:
         else:
             self.notifyUser(f"[{self.name}] {text}")
 
+    def recordText(self, text, done=False):
+        if self.onText:
+            self.onText(text, done)
+
     # Runs a step that needs the network. If the connection is lost inside a swarm, the agent waits here until the user decides:
     # to continue (the step is tried again) or to stop (SwarmStopped). Outside of a swarm the error goes up as it is.
     def keepTrying(self, step):
@@ -186,31 +192,13 @@ class Loop:
 
     # own is False for the calls a leader makes to manage the swarm (summaries, corrections): the rules and the plan
     # of the task of the leader, like the rules of emails, do not apply to them.
-    # With tools (by default for its own calls) the agent sees the files of its folder and can read them before it answers, and it keeps
-    # notes in the memory of the session (see agent_storehouse.py). The calls that only check a draft go without them.
-    # A model that can hold a conversation works in one, with all its tools (agent_conversation.py): its rules, its plan and the messages it
-    # receives are part of the conversation. Another model is asked one prompt at a time, with them written before the prompt.
+    # With tools (by default for its own calls) the agent works in its conversation with the tools of the MCP servers of SwarmUP
+    # (agent_conversation.py): its rules, its plan and the messages it receives are part of it. The calls that only check a draft go without them.
+    # Every model is reached the same way, through its adapter (model_adapters.py).
     def askAgent(self, prompt, own=True, tools=None):
         tools = own if tools is None else tools
-        if tools and canConverse(self.agent):
-            with self.thinking:
-                answer = talk(self, prompt, own)
-            return self.onAnswer(answer) if self.onAnswer else answer
-        prompt = describeWorkplace(self, prompt, tools)
-        if own and self.approvedPlan:
-            prompt = prompts.APPROVED_PLAN_PROMPT.format(plan=self.approvedPlan) + f"\n\n{prompt}"
-        if self.userMessages:
-            prompt = prompts.USER_MESSAGES_PROMPT.format(messages="\n".join(f"- {message}" for message in self.userMessages)) + f"\n\n{prompt}"
-        if self.inbox:
-            prompt = "Messages from the other agents of your swarm:\n" + "\n".join(self.inbox) + f"\n\n{prompt}"
-        if own and self.rules:
-            prompt = f"Follow these rules strictly:\n{self.rules}\n\n{prompt}"
         with self.thinking:
-            # A coding agent (Claude Code, Codex) works in the folder of the loop and asks the user through it before it acts.
-            if hasattr(self.agent, "attach"):
-                self.agent.attach(self)
-            answer = consultFolder(self, prompt, lambda text: self.callModel(lambda: self.agent.input(text), own), tools)
-        return self.onAnswer(answer) if self.onAnswer else answer
+            return talk(self, prompt, own, tools)
 
     # One call of the model (work). The calls of a leader that manages the swarm never wait for the user: they have a fallback of their own.
     def callModel(self, work, own):
@@ -344,8 +332,8 @@ class Loop:
     def reviewLoop(self, task, verify, ask=True, own=True, key=None):
         if key and self.resumed and key in self.progress:
             return self.progress[key]
-        # The user who leads the swarm (UserLeader) writes the draft: nobody checks or approves it but the user, who just wrote it.
-        if ask and getattr(self.agent, "isUser", False):
+        # The user who leads the swarm writes the draft (its adapter approves itself): nobody checks or approves it but the user, who just wrote it.
+        if ask and getattr(adapterOf(self.agent), "approvesItself", False):
             draft = self.askAgent(task, own)
             if key:
                 self.remember(key, draft)
@@ -355,7 +343,7 @@ class Loop:
             prompt = task
             if feedback:
                 # In a conversation the model still has the task and its draft, so it is only told what to change.
-                conversing = own and self.conversation is not None and canConverse(self.agent)
+                conversing = own and self.conversation is not None
                 prompt = prompts.CONVERSATION_REVISION_PROMPT.format(feedback=feedback) if conversing else \
                     f"{task}\n\nYour previous draft:\n{draft}\n\nImprove it. What to change: {feedback}"
             messagesBefore = len(self.userMessages)

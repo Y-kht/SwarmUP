@@ -1098,7 +1098,7 @@ class EndToEndTests(ProgramCase):
         self.assertIn("Me: I lead the swarm myself", text)
         self.assertIn("Boss [agent] you lead it", text)
         self.assertIn("SwarmUP asks you what it would ask the model of the leader", text)
-        self.assertIn("Writer: writer: A short text.", text.split("SwarmUP asks you")[1])
+        self.assertIn("[Message from Writer] writer: A short text.", text.split("SwarmUP asks you")[1])
         self.assertIn("- Boss: done. result: Final report: the text is ready. Nothing else to do.", text)
         self.assertNotIn("Summary of:", text)
         self.assertEqual(len(self.models), 1)

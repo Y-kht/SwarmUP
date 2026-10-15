@@ -3,6 +3,7 @@ import itertools
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -12,6 +13,7 @@ from pathlib import Path
 from coding_agents import CODING_AGENT_RULES, agentWorkspace, askPermission, askQuestions, isInside, placeRule
 from harness_utils import isOnline
 from internet_cache import remember
+from mcp_bridge import BRIDGE, BRIDGE_NAME
 from model_support import ModelConnectionError, ModelError, recordCall
 from models_library import DEFAULT_CLI_MODEL
 
@@ -22,9 +24,17 @@ from models_library import DEFAULT_CLI_MODEL
 # (CodexLogin), which keeps the sign-in the way it does for its own window. Every thread is ephemeral (nothing is kept by Codex), works in the
 # folder of the agent, and asks before every command (approval policy untrusted). SwarmUP answers alone only for a command that only reads
 # inside the folder: one program among CODEX_READERS, without any sign of the shell, whose paths all stay inside the folder, and that Codex
-# itself describes as reading. The web search of Codex (which never asks), its sub-agents and the MCP servers of the user are switched off.
+# itself describes as reading. The web search of Codex (which never asks), its sub-agents and the MCP servers of the user are switched off:
+# its only MCP server is the one of SwarmUP (the bridge, mcp_bridge.py), with the tools of its agent, behind a token of its own.
 CODEX_TESTED = (0, 160)
 CODEX_SETTINGS = ["-c", 'web_search="disabled"', "-c", "features.multi_agent=false", "-c", "mcp_servers={}"]
+BRIDGE_TOKEN_VARIABLE = "SWARMUP_BRIDGE_TOKEN"
+
+
+# The settings that give Codex the server of SwarmUP: its address, and the variable of the environment that holds its token.
+def bridgeSettings(url):
+    return ["-c", "features.multi_agent=false", "-c", 'web_search="disabled"', "-c", f'mcp_servers.{BRIDGE_NAME}.url="{url}"',
+            "-c", f'mcp_servers.{BRIDGE_NAME}.bearer_token_env_var="{BRIDGE_TOKEN_VARIABLE}"']
 CODEX_CLIENT = {"name": "swarmup", "title": "SwarmUP", "version": "1.0"}
 CODEX_REQUEST_TIMEOUT = 60
 CODEX_READERS = ("cat", "head", "tail", "ls", "wc", "grep", "rg")
@@ -64,7 +74,7 @@ def checkCodex():
 # One app-server of Codex. onRequest(method, params) answers the questions of Codex (its result, or None if SwarmUP does not handle them),
 # and onNotify(method, params) receives its news. The questions are answered in their own thread, because the user can take long.
 class CodexConnection:
-    def __init__(self, path, onRequest=None, onNotify=None):
+    def __init__(self, path, onRequest=None, onNotify=None, settings=None, environment=None):
         self.onRequest = onRequest or (lambda method, params: None)
         self.onNotify = onNotify or (lambda method, params: None)
         self.pending = {}
@@ -72,8 +82,9 @@ class CodexConnection:
         self.lock = threading.Lock()
         self.closed = False
         try:
-            self.process = subprocess.Popen([path, "app-server", *CODEX_SETTINGS], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-                                            encoding="utf-8", bufsize=1, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            self.process = subprocess.Popen([path, "app-server", *(settings or CODEX_SETTINGS)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                            text=True, encoding="utf-8", bufsize=1, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                                            env={**os.environ, **environment} if environment else None)
         except OSError as error:
             raise ModelError(f"Codex could not be started: {error}") from None
         threading.Thread(target=self.read, daemon=True).start()
@@ -142,11 +153,11 @@ class CodexConnection:
                 self.process.kill()
 
 
-def openCodex(onRequest=None, onNotify=None):
+def openCodex(onRequest=None, onNotify=None, settings=None, environment=None):
     status = checkCodex()
     if status["problem"]:
         raise ModelError(status["problem"])
-    return CodexConnection(status["path"], onRequest, onNotify)
+    return CodexConnection(status["path"], onRequest, onNotify, settings, environment)
 
 
 # Who is signed in to Codex: {"signedIn", "type" (chatgpt or apiKey), "email", "plan"}.
@@ -263,6 +274,8 @@ def describeCodexPermissions(permissions):
 
 
 class CodexModel:
+    runsTools = True
+
     def __init__(self, name, report=None):
         self.name = name or DEFAULT_CLI_MODEL
         self.report = report or (lambda message: None)
@@ -274,19 +287,20 @@ class CodexModel:
         self.loop = None
         self.connection = None
         self.turn = None
-        self.runCommands = set()
-        self.runKinds = set()
+        # Codex starts once with the address of the bridge and this token: each turn offers the tools of its agent under it.
+        self.token = secrets.token_urlsafe(24)
         self.lock = threading.Lock()
 
     def attach(self, loop):
         self.loop = loop
 
     def newRun(self):
-        self.runCommands, self.runKinds = set(), set()
+        pass
 
     def connect(self):
         if self.connection is None or self.connection.closed:
-            self.connection = openCodex(self.answer, self.notice)
+            BRIDGE.start()
+            self.connection = openCodex(self.answer, self.notice, bridgeSettings(BRIDGE.url), {BRIDGE_TOKEN_VARIABLE: self.token})
             account = self.connection.request("account/read", {})
             if not account.get("account") and account.get("requiresOpenaiAuth", True):
                 self.close()
@@ -326,17 +340,12 @@ class CodexModel:
         folder = agentWorkspace(self.loop)
         if method == "item/commandExecution/requestApproval":
             command = unwrapCommand(params.get("command"))
-            if isSafeRead(params, folder) or command in self.runCommands:
-                return {"decision": "accept"}
             network = params.get("networkApprovalContext")
             action = f"connect to {network.get('host')}" if network else "run a command"
-            decision = askPermission(self.loop, {"action": action, "detail": command, "folder": params.get("cwd") or str(folder), "reason": params.get("reason") or ""})
-            if decision["decision"] == "run":
-                self.runCommands.add(command)
+            decision = askPermission(self.loop, {"action": action, "detail": command, "folder": params.get("cwd") or str(folder), "reason": params.get("reason") or "",
+                                                 "key": f"web:{network.get('host')}" if network else f"run:{command}", "free": isSafeRead(params, folder)})
             return {"decision": "decline" if decision["decision"] == "deny" else "accept"}
         if method == "item/fileChange/requestApproval":
-            if "fileChange" in self.runKinds:
-                return {"decision": "accept"}
             files = (self.turn or {}).get("files", {}).get(params.get("itemId")) or []
             rules = [placeRule(self.loop, path, True) for path in files]
             if files and not params.get("grantRoot") and all(rule == "free" for rule in rules):
@@ -347,13 +356,11 @@ class CodexModel:
                 return {"decision": "decline"}
             detail = ", ".join(files) or params.get("reason") or "files of its folder"
             action = f"write anywhere in {params['grantRoot']}" if params.get("grantRoot") else "change files"
-            decision = askPermission(self.loop, {"action": action, "detail": detail, "folder": str(folder), "reason": params.get("reason") or ""})
-            if decision["decision"] == "run":
-                self.runKinds.add("fileChange")
+            decision = askPermission(self.loop, {"action": action, "detail": detail, "folder": str(folder), "reason": params.get("reason") or "", "key": "change"})
             return {"decision": "decline" if decision["decision"] == "deny" else "accept"}
         if method == "item/permissions/requestApproval":
             decision = askPermission(self.loop, {"action": "get more permissions", "detail": describeCodexPermissions(params.get("permissions")),
-                                                 "folder": params.get("cwd") or str(folder), "reason": params.get("reason") or ""})
+                                                 "folder": params.get("cwd") or str(folder), "reason": params.get("reason") or "", "key": "permissions"})
             if decision["decision"] == "deny":
                 return {"permissions": {}}
             return {"permissions": params.get("permissions") or {}, "scope": "session" if decision["decision"] == "run" else "turn"}
@@ -363,7 +370,26 @@ class CodexModel:
                           "multiple": False, "secret": bool(question.get("isSecret"))} for question in params.get("questions") or []]
             answers = askQuestions(self.loop, questions)
             return {"answers": {question["id"]: {"answers": [str(value) for value in answers.get(question["id"]) or []]} for question in questions}}
+        # A call of a tool of SwarmUP: the gateway decides on it when it runs, with the same policy as for every agent.
+        if "mcp" in method.lower() and "approval" in method.lower():
+            return {"decision": "accept"}
         return None
+
+    # One step of the core loop is one turn of Codex, with the conversation so far, and the tools of SwarmUP through the bridge.
+    def converse(self, system, messages, tools, onText=None, runTool=None):
+        from model_adapters import renderPrompt
+        refuse = lambda name, arguments: ("Not done: there are no tools of SwarmUP for this request.", True)
+        with BRIDGE.offer(tools or [], runTool or refuse, token=self.token):
+            return {"text": self.input(renderPrompt(system, messages, [])), "calls": [], "raw": None, "cut": False}
+
+    # A stop of the swarm interrupts the turn that runs.
+    def cancel(self):
+        turn, connection = self.turn, self.connection
+        if turn is not None and turn.get("id") and connection is not None and not connection.closed:
+            try:
+                connection.request("turn/interrupt", {"threadId": turn["thread"], "turnId": turn["id"]}, timeout=5)
+            except ModelError:
+                pass
 
     def input(self, prompt):
         with self.lock:
@@ -372,7 +398,8 @@ class CodexModel:
             thread = connection.request("thread/start", {"cwd": str(folder), "approvalPolicy": "untrusted", "sandbox": "workspace-write", "ephemeral": True,
                                                          "model": None if self.name == DEFAULT_CLI_MODEL else self.name, "developerInstructions": CODING_AGENT_RULES})
             self.turn = {"thread": thread["thread"]["id"], "done": threading.Event(), "messages": [], "files": {}, "usage": None, "result": None}
-            connection.request("turn/start", {"threadId": self.turn["thread"], "input": [{"type": "text", "text": prompt}]})
+            started = connection.request("turn/start", {"threadId": self.turn["thread"], "input": [{"type": "text", "text": prompt}]})
+            self.turn["id"] = (started.get("turn") or {}).get("id")
             self.turn["done"].wait()
             turn, self.turn = self.turn, None
         usage = turn["usage"] or {}

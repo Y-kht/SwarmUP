@@ -404,3 +404,9 @@
 .cost-total.warning { color: var(--warning-text); }
 .cost-total.danger { color: var(--danger-text); }
 .cost-total.info { color: var(--text); }
+
+/* ---------- The MCP layer: the calls of a mission, the text an agent writes now ---------- */
+.calls-table td { vertical-align: top; }
+.calls-table code { font-size: 12px; }
+.live-text { max-height: 220px; overflow: auto; white-space: pre-wrap; font-size: 13px; }
+.live-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--success); animation: pulse 1.4s infinite; vertical-align: middle; }

@@ -6,7 +6,7 @@ import time
 import traceback
 
 from harness_utils import USER_NAME
-from leader_parser import findSuggestions, isNoChange, normalizeKeys, parseOutput, squash
+from leader_parser import normalizeKeys, squash
 from leader_utils import askMissing
 from model_support import ModelError
 from tasks_library import TASKS, describeLoop, publicAnswers
@@ -20,10 +20,10 @@ SENDER = "SwarmUP"
 
 
 # ==============
-# The leader manages the swarm while it runs. The manager is the listener of the swarm, and it reads every answer of the leader (readOutput,
-# called by the loop of the leader): the blocks it finds are proposed to the user, the sentences that suggest a change are sent back to the
-# leader to confirm, and the leader is asked if a change is needed when an agent finishes or the user writes to it.
-# The work is done in a thread of its own, so the swarm never waits for the manager.
+# The leader manages the swarm while it runs. The manager is the listener of the swarm: the leader is asked if a change is needed when an agent
+# finishes or the user writes to it, in a conversation with the tools of the leader (server_leader.py). Each change the leader proposes with a
+# tool comes to propose: it is checked, shown to the user, and made if the user approves it; the leader gets the decision as the result of its
+# call. The work is done in a thread of its own, so the swarm never waits for the manager.
 # maker is the program that runs the swarm (the user interface or the command line). It makes the loops of the agents:
 # makeLoop(agent) gives the loop of a new agent, from agent["name"], ["task"], ["answers"] and ["model"], with the keys of the catalog;
 # joined(agent, loop) is told once that agent is in the swarm; remakeLoop(name, model) gives the loop of an agent with another model,
@@ -63,17 +63,6 @@ class LeaderManager:
         self.thread = threading.Thread(target=self.work, args=(self.queue,), daemon=True, name="leader-manager")
         self.thread.start()
 
-    # Every answer of the leader comes here (Loop.onAnswer). The blocks are taken out of the text, which goes on to the user without them.
-    # What the manager asks the leader itself is read by the manager, so it is given back as it is.
-    def readOutput(self, text):
-        if threading.current_thread() is self.thread:
-            return text
-        found = parseOutput(text)
-        suggestions = [] if found["blocks"] or found["problems"] else findSuggestions(found["text"], self.swarm.getAgents(), self.swarm.getLeader())
-        if found["blocks"] or found["problems"] or suggestions:
-            self.queue.put(("output", {**found, "suggestions": suggestions}))
-        return found["text"]
-
     def work(self, items):
         while True:
             kind, data = items.get()
@@ -94,9 +83,6 @@ class LeaderManager:
         return self.swarm.active and not self.swarm.stopped
 
     def handle(self, batch, ending):
-        for kind, data in batch:
-            if kind == "output" and self.isOpen():
-                self.act(data)
         events = [data for kind, data in batch if kind == "event"]
         if events and not ending:
             self.supervise(events)
@@ -107,29 +93,13 @@ class LeaderManager:
     def tell(self, text):
         self.leaderLoop().receive(SENDER, text)
 
+    # The leader decides in a conversation of its own, with its tools: it proposes each change with a call, or answers NO CHANGE.
     def ask(self, prompt):
         try:
-            return self.leaderLoop().askAgent(prompt, own=False)
+            return self.leaderLoop().askAgent(prompt, own=False, tools=True)
         except Exception as error:
             self.leaderLoop().notifyUser(f"The leader could not be asked about the swarm: {error}")
             return None
-
-    # The blocks of an answer of the leader are proposed one after the other. What cannot be used is sent back to the leader once; a sentence
-    # that suggests a change, without any block, is sent back to be confirmed.
-    def act(self, found, again=True):
-        problems = [problem["error"] for problem in found["problems"]]
-        for block in found["blocks"]:
-            problems += [f"{error} (in: {block['raw'][:300]})" for error in self.propose(block)]
-        if problems and again:
-            reply = self.ask(self.catalog.repairPrompt(problems, "\n".join(block["raw"] for block in found["blocks"] + found["problems"]) or found["text"], "the right blocks"))
-            if reply is not None:
-                self.act(parseOutput(reply), again=False)
-        elif problems:
-            self.tell("SwarmUP could not use your proposal, so the user was not asked: " + " ".join(problems))
-        elif not found["blocks"] and found.get("suggestions") and again:
-            reply = self.ask(self.catalog.confirmPrompt(self.swarm, [item["sentence"] for item in found["suggestions"]]))
-            if reply is not None and not isNoChange(reply):
-                self.act({**parseOutput(reply), "suggestions": []}, again=False)
 
     def supervise(self, events):
         stage = self.swarm.stage
@@ -137,49 +107,40 @@ class LeaderManager:
         if self.rounds >= MAX_SUPERVISIONS or not self.isOpen() or self.swarm.interruption or leaderWorks:
             return
         self.rounds += 1
-        reply = self.ask(self.catalog.supervisePrompt(self.swarm, events, "\n".join(f"- {decision}" for decision in self.decisions[-12:]) or "Nothing yet."))
-        if reply is None:
-            return
-        found = parseOutput(reply)
-        if found["blocks"] or found["problems"]:
-            self.act({**found, "suggestions": []})
-        elif not isNoChange(found["text"]):
-            self.act({**found, "suggestions": findSuggestions(found["text"], self.swarm.getAgents(), self.swarm.getLeader())})
+        self.ask(self.catalog.supervisePrompt(self.swarm, events, "\n".join(f"- {decision}" for decision in self.decisions[-12:]) or "Nothing yet."))
 
-    # One change of the leader: checked, shown to the user with the reason of the leader, and made if the user approves it. It returns what
-    # the leader must correct (the change was not shown to the user then), or [].
-    def propose(self, block):
+    # One change of the leader (a call of its tools): checked, shown to the user with the reason of the leader (ask, the proposal card), and made
+    # if the user approves it. It gives (what the leader must correct, or [], and what happened, for the leader).
+    def propose(self, block, ask=None):
+        if not self.isOpen():
+            return ["The swarm is not running now, so it cannot change."], ""
         if block["action"] == "build":
             known = {squash(name) for name in [*self.swarm.getAgents(), *(item["name"] for item in self.swarm.removed)]}
-            if all(squash(normalizeKeys(agent)[0].get("name")) in known for agent in block["data"]["agents"]):
-                return []
-            return ["The swarm is already built: propose each new agent in its own <swarmup_add> block, and each agent to take out in a <swarmup_remove> block."]
+            if all(squash(normalizeKeys(agent)[0].get("name")) in known for agent in block["data"].get("agents") or []):
+                return [], "These agents are already in the swarm."
+            return ["The swarm is already built: propose each new agent with leader__add_agent, and each agent to take out with leader__remove_agent."], ""
         change, errors = self.catalog.checkChange(block["action"], block["data"], self.swarm)
         if errors:
-            return errors
+            return errors, ""
         if change["signature"] in self.rejected:
-            self.tell(f"You proposed again what the user already rejected, so it was not shown to the user: {change['text']}.")
-            return []
+            return [], f"You proposed again what the user already rejected, so it was not shown to the user: {change['text']}."
         leader = self.leaderLoop()
-        answer = leader.askProposal(change["proposal"])
+        answer = (ask or leader.askProposal)(change["proposal"])
         if not self.isOpen():
-            return []
+            return [], "The swarm stopped before the change could be made."
         if not isinstance(answer, dict) or answer.get("decision") != "approve":
             message = str(answer.get("message") or "").strip() if isinstance(answer, dict) else ""
             self.rejected[change["signature"]] = message
             self.decisions.append(f"Rejected: {change['text']}." + (f" The user said: {message}" if message else ""))
-            self.tell(f"The user rejected your proposal: {change['text']}." + (f" The user said: {message}" if message else ""))
-            return []
+            return [], f"The user rejected your proposal: {change['text']}." + (f" The user said: {message}" if message else "")
         try:
             self.apply(change, leader)
         except (ValueError, ModelError, OSError) as error:
             leader.notifyUser(f"The change you approved could not be made: {error}")
             self.decisions.append(f"Approved, but it could not be made: {change['text']}. Why: {error}")
-            self.tell(f"The user approved {change['text']}, but it could not be made: {error}")
-            return []
+            return [], f"The user approved {change['text']}, but it could not be made: {error}"
         self.decisions.append(f"Approved and done: {change['text']}.")
-        self.tell(f"The user approved your proposal, and it is done: {change['text']}.")
-        return []
+        return [], f"The user approved your proposal, and it is done: {change['text']}."
 
     def apply(self, change, leader):
         action = change["action"]

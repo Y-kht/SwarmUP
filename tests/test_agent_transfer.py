@@ -10,11 +10,25 @@ from pathlib import Path
 sys.path[:0] = [str(folder) for folder in sorted((Path(__file__).resolve().parent.parent / "src" / "backend").iterdir()) if folder.is_dir() and not folder.name.startswith(("_", "."))]
 import background_processes
 import harness_utils
-from agent_storehouse import answerRequest
-from agent_tools import Toolbox, undoChanges
+from agent_tools import undoChanges
 from base_loop import Loop
 from coding_agents import placeRule
+from mcp_gateway import Gateway, builtinServers
 from mission_memory import MissionMemory, WorkSession
+
+
+# The tools of an agent, reached as the agent reaches them: through its link to the gateway, over MCP. A tool is named without its server.
+SERVERS = {tool.name: spec.name for spec in builtinServers() for tool in spec.tools}
+NAMES = {"process_status": "check_process"}
+
+
+class Box:
+    def __init__(self, gateway, loop):
+        self.loop, self.link = loop, gateway.link(loop)
+
+    def run(self, name, arguments):
+        name = NAMES.get(name, name)
+        return self.link.call(f"{SERVERS[name]}__{name}", arguments)
 
 
 class TransferTestCase(unittest.TestCase):
@@ -31,6 +45,8 @@ class TransferTestCase(unittest.TestCase):
         (self.work / "notes" / "ideas.md").write_text("Bees\nHoney is sweet\nWax\n", encoding="utf-8")
         (self.work / "windows.txt").write_bytes("one\r\ntwo\r\nthree".encode("utf-8"))
         self.session = WorkSession("m1", "run", leader="Leader")
+        self.gateway = Gateway("m1")
+        self.addCleanup(self.gateway.close)
         self.asked = []
         self.addCleanup(lambda: background_processes.stopProcesses("m1"))
 
@@ -42,7 +58,7 @@ class TransferTestCase(unittest.TestCase):
         loop.askPermission = lambda request: self.asked.append(request) or {"decision": decision, "message": "no"}
         if folder:
             loop.setFolder(self.work)
-        return Toolbox(loop)
+        return Box(self.gateway, loop)
 
     def ok(self, box, name, **arguments):
         text, error = box.run(name, arguments)
@@ -72,15 +88,6 @@ class PlaceTests(TransferTestCase):
         self.assertIn("is kept by SwarmUP itself", self.refused(box, "read_file", path="@memory/.swarmup/owners.json"))
         self.assertIn("is not a place", self.refused(box, "read_file", path="@other/x.md"))
         self.assertIn("is outside the folder", self.refused(box, "read_file", path="@temp/../../mission-specific-memory/m1/FINDINGS.md"))
-
-    # A model asked one prompt at a time reads the places with its requests.
-    def testTheRequestsOfAOnePromptModelReachThePlacesToo(self):
-        (self.session.temp / "scratch.md").write_text("in temp", encoding="utf-8")
-        places = self.session.memory.roots()
-        self.assertIn("in temp", answerRequest(self.work, "read", "@temp/scratch.md", 1, places))
-        self.assertIn("in temp", answerRequest(None, "read", "@temp/scratch.md", 1, places))
-        self.assertIn("You have no folder of your own", answerRequest(None, "read", "notes/ideas.md", 1, places))
-        self.assertIn("kept by SwarmUP itself", answerRequest(self.work, "read", "@memory/.swarmup/owners.json", 1, places))
 
     def testEachPlaceHasItsRulesForAChange(self):
         writer, checker, leader = self.box(), self.box("Checker"), self.box("Leader")

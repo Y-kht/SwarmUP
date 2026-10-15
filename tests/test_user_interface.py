@@ -60,8 +60,8 @@ class Model:
     def input(self, prompt):
         self.prompts.append(prompt)
         self.usage["calls"] += 1
-        # The memory of the mission comes before the request, and the fake only reads the request.
-        prompt = prompt.split(prompts.NOTES_PROMPT)[-1]
+        # The conversation comes before the request, and the fake only reads the newest request.
+        prompt = prompt.split("\n\n[SwarmUP]\n")[-1]
         names = re.findall(r"^- ([A-Za-z][\w.-]*) \(", prompt, re.M)
         if "summary" in prompt.lower() and names:
             return "Where the team stands: " + ", ".join(names) + "."
@@ -453,7 +453,8 @@ class RunTests(SessionTestCase):
         self.assertEqual(saved_swarms.findUnfinishedSwarms(), [])
 
 
-# A pretend coding agent: before its plan it asks for a permission and asks a question, through the same helpers as Claude Code and Codex.
+# A pretend coding agent: before its first answer it asks for a permission and asks a question, through the same helpers as Claude Code and Codex.
+# Plan mode refuses every action that does more than look (mcp_policy.py), so the tests run it in execute mode.
 class CodingAgent(Model):
     def __init__(self, info=None):
         super().__init__(info)
@@ -466,7 +467,7 @@ class CodingAgent(Model):
         self.runs += 1
 
     def input(self, prompt):
-        if "write a plan" in prompt.lower():
+        if not self.decisions:
             self.decisions.append(coding_agents.askPermission(self.loop, {"action": "run a command", "detail": "npm test", "folder": "/work", "reason": "Check the code"}))
             self.answers.append(coding_agents.askQuestions(self.loop, [{"id": "tone", "header": "Tone", "question": "Which tone?",
                                                                          "options": [{"label": "Warm", "description": ""}], "multiple": False, "secret": False}]))
@@ -495,7 +496,7 @@ class CodingAgentTests(SessionTestCase):
         self.chooseCodex()
         model = self.session.describe()["agents"][0]["model"]
         self.assertEqual((model["cli"], model["label"]), ("codex", "Codex · its default model"))
-        self.act("start", mode="plan")
+        self.act("start", mode="execute")
         question = self.waitForQuestion("permission")
         self.assertEqual((question["payload"]["detail"], [reply["value"] for reply in question["replies"]]), ("npm test", ["once", "run", "deny"]))
         with self.assertRaises(ValueError):
@@ -511,7 +512,7 @@ class CodingAgentTests(SessionTestCase):
 
     def testStoppingTheSwarmDeniesAPermissionThatWaits(self):
         self.chooseCodex()
-        self.act("start", mode="plan")
+        self.act("start", mode="execute")
         self.waitForQuestion("permission")
         self.act("stop")
         self.waitForEnd()
@@ -623,7 +624,7 @@ class LeaderModeTests(SessionTestCase):
                          [("Leader", "leader", "claude-opus-5-5", []), ("Writer", "author", "claude-sonnet-5-5", []), ("Shortener", "author", "claude-haiku-4-5", ["Writer"])])
         self.assertEqual((state["agents"][2]["folder"], state["agents"][2]["why"], state["order"], state["buildMode"]), (str(self.folder.resolve()), "It writes the short version.", "custom", "leader"))
         self.assertIn("Approved: the swarm of the leader", [item["text"] for item in self.session.feed])
-        self.assertIn("The user read the swarm you proposed and wants changes: Add a short version too.", self.leaderModel.prompts[1])
+        self.assertIn("The user read the swarm you proposed and wants changes: Add a short version too.", "\n".join(self.leaderModel.prompts))
         self.assertIn("notes.md", self.leaderModel.prompts[0])
         self.act("start", mode="execute")
         self.assertIsInstance(self.session.swarm.manager, leader_manager.LeaderManager)

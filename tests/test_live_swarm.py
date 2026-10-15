@@ -25,8 +25,8 @@ class Model:
         self.result, self.unloaded = result, False
 
     def input(self, prompt):
-        # The memory of the mission comes before the request, and the fake only reads the request.
-        prompt = prompt.split(prompts.NOTES_PROMPT)[-1]
+        # The conversation comes before the request, and the fake only reads the newest request.
+        prompt = prompt.split("\n\n[SwarmUP]\n")[-1]
         names = re.findall(r"^- ([A-Za-z][\w.-]*) \(", prompt, re.M)
         if "summary" in prompt.lower() and names:
             return "Where the team stands: " + ", ".join(names) + "."

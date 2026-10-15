@@ -521,9 +521,9 @@ class RememberedWorkTests(SavedSwarmCase):
         resumed.members["Leader"]["agent"].agent = FakeAgent(["Summary of Coder"])
         resumed.members["Coder"]["agent"].askUser = lambda question: "yes"
         self.assertEqual(resumed.resume(), "final")
-        prompt = resumed.members["Coder"]["agent"].agent.prompts[0]
-        self.assertIn("ORIGINAL", prompt)
-        self.assertNotIn("print('draft')", prompt)
+        current = resumed.members["Coder"]["agent"].agent.prompts[0].split("Current content of the file:")[-1]
+        self.assertIn("ORIGINAL", current)
+        self.assertNotIn("print('draft')", current)
         self.assertEqual(target.read_text(encoding="utf-8"), "print('final')")
 
     def testTheOriginalCodeIsInTheSavedStateBeforeTheFileIsFirstOverwritten(self):
@@ -852,7 +852,7 @@ class FollowUpTests(SavedSwarmCase):
         writer = ChatModel("Bees make honey.", "Les abeilles font du miel.")
         swarm = self.build(RoleModel(self.leaderAnswer), writer)
         swarm.run()
-        checks = swarm.getInfo("Checker")["result"]
+        checks, report = swarm.getInfo("Checker")["result"], swarm.getInfo("Leader")["result"]
         with self.assertRaisesRegex(ValueError, "Write what the swarm must do now"):
             swarm.followUp("  ")
         swarm.followUp("Now in French.")
@@ -861,6 +861,10 @@ class FollowUpTests(SavedSwarmCase):
         self.assertEqual(swarm.getInfo("Writer")["result"], "Les abeilles font du miel.")
         self.assertEqual((swarm.getInfo("Checker")["result"], swarm.getInfo("Checker")["sitsOut"]), (checks, True))
         self.assertEqual(swarm.roundParts, {"Writer": "Translate your text to French."})
+        # The leader routes the follow-up knowing its report of the round before.
+        route = next(prompt for prompt in swarm.getMember("Leader")["agent"].agent.prompts if "follows up with a new request" in prompt)
+        self.assertIn(f"Your report on it: {report}", route)
+        self.assertNotIn("Your report on it: none", route)
         # The writer still has its first round in its conversation, and reads its part of the follow-up.
         last = writer.seen[-1]
         self.assertIn("Bees make honey.", [message["content"] for message in last if message["role"] == "assistant"])

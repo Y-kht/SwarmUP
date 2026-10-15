@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import tempfile
@@ -15,7 +16,8 @@ import agent_prompts as prompts
 import agent_storehouse
 import harness_utils
 import mission_memory
-from agent_storehouse import agentWorkspace, describeTree, findFiles, findRequests, folderProblem, makeRunName, readFile, resultsFolder, searchFiles
+from agent_storehouse import agentWorkspace, describeTree, findFiles, folderProblem, makeRunName, resultsFolder, searchFiles
+from agent_tools import Toolbox
 from mission_memory import WorkSession, pruneSessions
 from base_loop import Loop
 from saved_swarms import saveSwarmState
@@ -101,7 +103,7 @@ class TreeTests(StorehouseTestCase):
         with mock.patch.object(agent_storehouse, "TREE_LIMIT", 2):
             tree = describeTree(self.work)
         self.assertIn("It holds 3 files, too many to list one by one.", tree)
-        self.assertEqual(tree.splitlines()[1:], ["- ./ (1 files)", "- notes/ (1 files)", "- ... and 1 more folders: ask <swarmup_find> to find them by name."])
+        self.assertEqual(tree.splitlines()[1:], ["- ./ (1 files)", "- notes/ (1 files)", "- ... and 1 more folders: find them by name with files__find_files."])
 
     def testAnEmptyFolderAndAMissingOneAreSaid(self):
         (self.work / "empty").mkdir()
@@ -123,55 +125,60 @@ class TreeTests(StorehouseTestCase):
 
 
 class ReadTests(StorehouseTestCase):
+    def read(self, path, **options):
+        loop = Loop(FakeAgent())
+        loop.setFolder(self.work)
+        return Toolbox(loop).read_file(path, **options)
+
     def testALongFileComesInParts(self):
-        (self.work / "long.txt").write_text("0123456789abcdefghijXYZ", encoding="utf-8")
-        with mock.patch.object(agent_storehouse, "READ_PART_CHARS", 10):
-            first, last = readFile(self.work, "long.txt"), readFile(self.work, "long.txt", 3)
-        self.assertEqual(first, 'long.txt (part 1 of 3):\n0123456789\n[The file goes on: ask <swarmup_read part="2">long.txt</swarmup_read> for the next part.]')
-        self.assertEqual(last, "long.txt (part 3 of 3):\nXYZ")
-        self.assertEqual(readFile(self.work, "./notes/ideas.md"), "notes/ideas.md:\nBees\nHoney is sweet\nWax")
+        (self.work / "long.txt").write_text("one\ntwo\nthree\nfour\n", encoding="utf-8")
+        first = self.read("long.txt", line_count=2)
+        self.assertIn("1\tone", first)
+        self.assertIn("[Lines 1 to 2 of 4. Read on with start_line=3.]", first)
+        self.assertIn("4\tfour", self.read("long.txt", start_line=3))
+        self.assertIn("Honey is sweet", self.read("./notes/ideas.md"))
 
     def testWordDocumentsAndUtf16AreReadAndBinaryFilesAreNot(self):
         document = '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Hello </w:t></w:r><w:r><w:t>bees</w:t></w:r></w:p><w:p><w:r><w:t>Second</w:t></w:r></w:p></w:body></w:document>'
         with zipfile.ZipFile(self.work / "letter.docx", "w") as archive:
             archive.writestr("word/document.xml", document)
-        self.assertEqual(readFile(self.work, "letter.docx"), "letter.docx:\nHello bees\nSecond")
+        self.assertIn("1\tHello bees\n     2\tSecond", self.read("letter.docx"))
         (self.work / "wide.txt").write_text("Wide text", encoding="utf-16")
-        self.assertEqual(readFile(self.work, "wide.txt"), "wide.txt:\nWide text")
+        self.assertIn("1\tWide text", self.read("wide.txt"))
         (self.work / "image.png").write_bytes(b"\x89PNG\0\0\0")
         with self.assertRaisesRegex(ValueError, "image.png is a binary file"):
-            readFile(self.work, "image.png")
+            self.read("image.png")
         (self.work / "broken.docx").write_text("not a zip")
         with self.assertRaisesRegex(ValueError, "not a Word document"):
-            readFile(self.work, "broken.docx")
+            self.read("broken.docx")
 
     def testAPdfNeedsPypdf(self):
         (self.work / "paper.pdf").write_bytes(b"%PDF-1.4")
         with mock.patch.dict(sys.modules, {"pypdf": None}):
             with self.assertRaisesRegex(ValueError, "pip install pypdf"):
-                readFile(self.work, "paper.pdf")
+                self.read("paper.pdf")
 
     def testNothingOutsideTheFolderCanBeRead(self):
         (self.files / "secret.txt").write_text("secret")
         for path in ("../secret.txt", str(self.files / "secret.txt")):
             with self.assertRaisesRegex(ValueError, "is outside the folder"):
-                readFile(self.work, path)
+                self.read(path)
         try:
             (self.work / "link.txt").symlink_to(self.files / "secret.txt")
         except OSError:
             self.skipTest("this computer does not allow links")
         with self.assertRaisesRegex(ValueError, "link.txt is outside the folder"):
-            readFile(self.work, "link.txt")
+            self.read("link.txt")
 
     def testAPathWrittenDifferentlyStillFindsItsFile(self):
-        self.assertIn("Honey is sweet", readFile(self.work, "NOTES/Ideas.MD"))
-        (self.work / "café.md").write_text("Coffee", encoding="utf-8")
-        self.assertEqual(readFile(self.work, "café.md"), "café.md:\nCoffee")
+        self.assertIn("Honey is sweet", self.read("NOTES/Ideas.MD"))
+        (self.work / "café.md").write_text("Coffee", encoding="utf-8")
+        self.assertIn("1\tCoffee", self.read("café.md"))
         with self.assertRaisesRegex(ValueError, "There is no file notes/idea.md in the folder. Did you mean: notes/ideas.md"):
-            readFile(self.work, "notes/idea.md")
+            self.read("notes/idea.md")
         with self.assertRaisesRegex(ValueError, "Did you mean: a/b/c/d/e/deep.md"):
-            readFile(self.work, "deep.md")
-        self.assertIn("- notes/ideas.md", readFile(self.work, "notes"))
+            self.read("deep.md")
+        self.assertIn("- notes/ideas.md", self.read("notes"))
 
     def testFilesAreFoundByNameAndByWhatTheySay(self):
         self.assertEqual(findFiles(self.work, "*.md"), "- notes/ideas.md (23 bytes)\n- a/b/c/d/e/deep.md (17 bytes)")
@@ -182,55 +189,47 @@ class ReadTests(StorehouseTestCase):
         self.assertEqual(searchFiles(self.work, "wasps"), "No text file of the folder contains wasps.")
 
 
+# A model that only answers a prompt gets the tools of the MCP servers as text, and its calls in its text go through the gateway.
 class LoopTests(StorehouseTestCase):
-    def testTheRequestsAreReadEvenWhenTheyAreNotWrittenExactly(self):
-        answer = ("First I read.\n<SWARMUP_READ part='2'>`notes/ideas.md`</swarmup_read>\n<swarmup_list></swarmup_list>\n"
-                  "<swarmup_find>*.tex\n< swarmup_search >honey</ swarmup_search >")
-        self.assertEqual(findRequests(answer), [("read", "notes/ideas.md", 2), ("list", "", 1), ("find", "*.tex", 1), ("search", "honey", 1)])
-        self.assertEqual(findRequests("A normal answer."), [])
+    def call(self, name, **arguments):
+        return f'<tool_call>{{"name": "{name}", "arguments": {json.dumps(arguments)}}}</tool_call>'
 
-    def testAnyModelReadsTheFilesOfItsFolderBeforeItAnswers(self):
-        agent = FakeAgent(["Let me look.\n<swarmup_read>a/b/c/d/e/deep.md</swarmup_read>", "A text built on the deepest note."])
+    def testAModelThatOnlyAnswersAPromptReadsTheFilesWithTheTools(self):
+        agent = FakeAgent(["Let me look.\n" + self.call("files__read_file", path="a/b/c/d/e/deep.md"), "A text built on the deepest note."])
         loop = self.script(AuthorLoop(agent, "bees", 50))
         loop.setFolder(self.work)
         self.assertEqual(loop.run(), "A text built on the deepest note.")
         self.assertIn("- a/b/c/d/e/deep.md (17 bytes)", agent.prompts[0])
-        self.assertIn("<swarmup_read>path/of/a/file</swarmup_read>", agent.prompts[0])
-        self.assertIn("=== read a/b/c/d/e/deep.md ===\na/b/c/d/e/deep.md:\nThe deepest note.", agent.prompts[1])
-        self.assertIn(prompts.FOLDER_NEXT_ROUND, agent.prompts[1])
-        self.assertIn("[AuthorLoop] reads a/b/c/d/e/deep.md in its folder.", loop.said)
+        self.assertIn(prompts.TEXT_TOOLS_PROMPT.split("\n")[0], agent.prompts[0])
+        self.assertIn('"files__read_file"', agent.prompts[0])
+        self.assertIn("[Result of files__read_file]\na/b/c/d/e/deep.md (1 lines):\n     1\tThe deepest note.", agent.prompts[1])
+        self.assertTrue(any("files__read_file" in said for said in loop.said))
 
-    def testTheAgentStopsAskingAfterTheLastRound(self):
-        agent = FakeAgent(["<swarmup_find>*.md</swarmup_find>"] * 2 + ["<swarmup_read>paper.tex</swarmup_read>The answer"])
+    def testAWrongCallIsToldToTheModelThatGoesOn(self):
+        agent = FakeAgent(["<tool_call>{not json</tool_call>", self.call("files__read_file"), "The answer"])
         loop = self.script(Loop(agent))
         loop.setFolder(self.work)
-        with mock.patch.object(agent_storehouse, "MAX_TOOL_ROUNDS", 2):
-            self.assertEqual(loop.askAgent("Task"), "The answer")
-        self.assertEqual(len(agent.prompts), 3)
-        self.assertIn(prompts.FOLDER_LAST_ROUND, agent.prompts[2])
+        self.assertEqual(loop.askAgent("Task"), "The answer")
+        self.assertIn("not valid JSON", agent.prompts[1])
+        self.assertIn("files__read_file needs path", agent.prompts[2])
 
-    def testChecksAgentsWithoutAFolderAndCodingAgentsGetNoBlocks(self):
-        agent = FakeAgent(["OK", "Fine", "Fine"])
+    def testChecksGetNoTools(self):
+        agent = FakeAgent(["OK"])
         loop = self.script(Loop(agent))
         loop.setFolder(self.work)
         loop.askAgent("Check this", tools=False)
-        loop.setFolder(None)
-        loop.askAgent("Task")
-        coding = FakeCodingAgent(["Done"])
-        loop = self.script(Loop(coding))
-        loop.setFolder(self.work)
-        loop.askAgent("Task")
-        for prompt in [*agent.prompts, *coding.prompts]:
-            self.assertNotIn("<swarmup_read>", prompt)
+        self.assertNotIn("YOUR TOOLS", agent.prompts[0])
+        self.assertTrue(agent.prompts[0].endswith("Check this"))
 
     def testNotesAreTheMemoryOfTheAgentForTheWholeSession(self):
-        agent = FakeAgent(["Draft one <swarmup_note>The user prefers short texts.</swarmup_note>", "Draft two"])
+        agent = FakeAgent([self.call("memory__keep_note", note="The user prefers short texts."), "Draft one", "Draft two"])
         loop = self.script(Loop(agent))
         loop.name, loop.session = "Writer", WorkSession("swarm1", "run")
         self.assertEqual(loop.askAgent("Task"), "Draft one")
-        self.assertNotIn("The user prefers short texts.", agent.prompts[0])
+        self.assertNotIn("The user prefers short texts.", agent.prompts[0].split("[SwarmUP]")[0])
+        loop.conversation = None
         self.assertEqual(loop.askAgent("Task again"), "Draft two")
-        self.assertIn("The user prefers short texts.", agent.prompts[1])
+        self.assertIn("The user prefers short texts.", agent.prompts[2].split("[SwarmUP]")[0])
         self.assertIn("The user prefers short texts.", WorkSession("swarm1", "run").readNotes("Writer"))
         self.assertEqual(WorkSession("swarm1", "run").readNotes("Other"), "")
 

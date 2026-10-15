@@ -7,7 +7,9 @@ from functools import partial
 from agent_storehouse import makeRunName
 from background_processes import stopProcesses
 from harness_utils import STATE_LOCK, STOPPED_MESSAGE, SwarmStopped
+from mcp_gateway import Gateway
 from mission_memory import WorkSession
+from server_leader import LeaderDesk
 from saved_swarms import saveSwarmState
 
 
@@ -229,6 +231,9 @@ class SwarmRun:
             self.runName = makeRunName(self.currentRequest() if following else self.mission)
         self.session = WorkSession(self.id, self.runName, self.round, self.leader)
         self.session.memory.onLongTermChange = self.tellLongTermChange
+        if self.gateway is None:
+            self.gateway = Gateway(self.id, onEvent=self.onGatewayEvent)
+        self.gateway.setFolder(self.session.folder)
         self.record("setMission", self.mission, self.round)
         if not any(request["round"] == self.round for request in self.requests):
             self.requests.append({"round": self.round, "text": self.mission, "time": f"{datetime.now():%Y-%m-%d %H:%M:%S}"})
@@ -264,16 +269,23 @@ class SwarmRun:
 
     # What a swarm gives to the loop of an agent while it runs: who reviews its drafts, what happens when the connection is lost, when it is saved,
     # the memory of the session, and the swarm itself, which its tools reach. What the user allowed its tools until the swarm runs again ends here.
-    # What the user allowed a coding agent "until the swarm runs again" ends here. The leader of a managed swarm has what it writes read by the manager.
+    # The leader of a managed swarm has its desk: the manager receives the changes it proposes with its tools.
     def connectAgent(self, name, member, resume):
         agent = member["agent"]
         agent.resumed = resume
         if hasattr(agent.agent, "newRun"):
             agent.agent.newRun()
         agent.name, agent.reviewer, agent.session = name, partial(self.waitForReview, name), self.session
-        agent.team, agent.allowed, agent.onActivity = self, set(), partial(self.noteActivity, name)
+        agent.team, agent.allowed, agent.onActivity, agent.gateway = self, set(), partial(self.noteActivity, name), self.gateway
+        agent.onText = partial(self.noteText, name)
         agent.onConnectionLost, agent.onProgress = partial(self.waitForResume, name), self.checkpoint
-        agent.onAnswer = self.manager.readOutput if self.manager is not None and name == self.leader else None
+        agent.leaderDesk = LeaderDesk(self.manager.catalog, manager=self.manager) if self.manager is not None and name == self.leader else None
+
+    # What the gateway tells about the calls of the agents (a call that failed, the progress of a long one) goes to every listener of the swarm.
+    def onGatewayEvent(self, kind, agent, **details):
+        if kind == "progress" and details.get("message") and agent in self.members:
+            self.members[agent]["agent"].recordActivity(f"{details.get('tool')}: {details['message']}")
+        self.emit(kind, agent, **details)
 
     # While the swarm runs its state is also written every few seconds. A saved state that is not renewed is of a program that stopped.
     def startHeartbeat(self):
@@ -286,9 +298,12 @@ class SwarmRun:
 
     # The run is over. Its state stays saved, in the history of the missions: finished (the user can follow up), stopped by the user, or, when
     # it was cut short by an error, interrupted, so the next start finds it at once and offers to continue it.
-    def closeRun(self, ended):
+    # A round whose leader did not finish is failed, never finished (ERR-05): the user sees it, and can still follow it up.
+    def closeRun(self, ended, failed=False):
         self.heartbeat.set()
         stopProcesses(self.id)
+        if self.gateway is not None:
+            self.gateway.close()
         try:
             with self.changed:
                 state = self.describeState()
@@ -298,7 +313,7 @@ class SwarmRun:
             self.active = False
             try:
                 if state:
-                    saveSwarmState(self.id, {**state, "state": "stopped" if self.stopped else "finished" if ended else "interrupted"})
+                    saveSwarmState(self.id, {**state, "state": "stopped" if self.stopped else ("failed" if failed else "finished") if ended else "interrupted"})
             except OSError:
                 traceback.print_exc()
 
@@ -363,8 +378,8 @@ class SwarmRun:
         finally:
             for member in self.members.values():
                 agent = member["agent"]
-                agent.reviewer = agent.onConnectionLost = agent.onProgress = agent.onAnswer = agent.session = agent.team = agent.onActivity = None
+                agent.reviewer = agent.onConnectionLost = agent.onProgress = agent.leaderDesk = agent.session = agent.team = agent.onActivity = None
                 agent.resumed = False
             self.stage = None
-            self.closeRun(ended)
+            self.closeRun(ended, failed=ended and result is None and self.members.get(self.leader, {}).get("status") == "failed")
             self.emit("finished", mode=self.mode, ok=result is not None)
