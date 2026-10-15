@@ -73,9 +73,10 @@ def restoreSwarm(console, saved, models):
     for name in swarm.getAgents():
         watchCosts(console, swarm, swarm.getMember(name)["agent"])
     leader = saved["members"][saved["leader"]]
-    if saved.get("managed") and leader["recipe"]["task"] == "leader":
+    if saved.get("managed") and not (leader["model"] or {}).get("user"):
+        built = leader["recipe"]["task"] == "leader"
         catalog = LeaderCatalog(saved["mission"], leader["recipe"]["answers"].get("folder"), saved["leader"], leader["model"], keys, tokens, swarm.costs)
-        LeaderManager(swarm, catalog, ConsoleMaker(console, swarm, specs, keys, tokens, models))
+        LeaderManager(swarm, catalog, ConsoleMaker(console, swarm, specs, keys, tokens, models), watchFinishes=built)
     console.newAgent = lambda swarm: addLive(console, swarm, specs, keys, tokens, models)
     return swarm
 

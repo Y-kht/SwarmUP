@@ -56,7 +56,7 @@ def hasCredentials(info, keys):
 # What kind of question the agents ask, and the buttons that answer it. The text box stays for every question that takes words.
 # A coding agent asks for a permission (kind permission) or asks its own questions (kind form): those are answered with buttons and choices.
 PERMISSION_REPLIES = [{"label": "Allow once", "value": "once", "style": "primary"}, {"label": "Allow until the next run", "value": "run", "style": "ghost"},
-                      {"label": "Deny", "value": "deny", "style": "danger"}]
+                      {"label": "Allow for every agent until the next run", "value": "all", "style": "ghost"}, {"label": "Deny", "value": "deny", "style": "danger"}]
 
 
 def describeQuestion(text, secret=False, kind=None):
@@ -89,7 +89,7 @@ def describeQuestion(text, secret=False, kind=None):
 def describeAnswer(question, answer):
     if question["kind"] == "permission" and isinstance(answer, dict):
         detail = (question["payload"] or {}).get("detail", "")
-        words = {"once": "Allowed once", "run": "Allowed until the next run", "deny": "Denied"}.get(answer.get("decision"), "Denied")
+        words = {"once": "Allowed once", "run": "Allowed until the next run", "all": "Allowed for every agent until the next run", "deny": "Denied"}.get(answer.get("decision"), "Denied")
         return f"{words}: {detail}" + (f"\nWhy: {answer['message']}" if answer.get("message") else "")
     if question["kind"] == "proposal" and isinstance(answer, dict):
         approved = answer.get("decision") == "approve"

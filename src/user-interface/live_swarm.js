@@ -311,7 +311,7 @@ function permissionCard(question, run, inModal) {
     h('div', { class: 'small muted' }, icon('folder', 'sm'), ` In ${request.folder || 'its folder'}`, request.reason ? h('span', {}, ` · ${request.reason}`) : null),
     inModal && question.context.length ? h('div', { class: 'q-context' }, question.context.map(text => h('div', {}, pretty(text)))) : null,
     h('div', { class: 'row wrap' }, question.replies.map(reply => button(reply.label, { kind: reply.style === 'primary' ? 'primary' : reply.style === 'danger' ? 'danger-ghost' : 'ghost',
-      size: 'sm', iconName: reply.value === 'once' ? 'check' : reply.value === 'run' ? 'checkCircle' : 'x', busy: ui.busy[`answer-${question.id}`], onClick: () => send(reply.value) }))),
+      size: 'sm', iconName: reply.value === 'once' ? 'check' : ['run', 'all'].includes(reply.value) ? 'checkCircle' : 'x', busy: ui.busy[`answer-${question.id}`], onClick: () => send(reply.value) }))),
     h('input', { class: 'input', 'data-key': `q-${question.id}`, value: why, placeholder: 'If you deny it, you can tell it why or what to do instead (optional)',
       onInput: event => { ui.composer[question.id] = event.target.value; }, onKeydown: event => { if (event.key === 'Enter' && why.trim()) send('deny'); } }));
 }

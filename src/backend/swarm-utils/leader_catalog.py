@@ -69,7 +69,7 @@ def describeTasks():
     lines.append("THE SPECIALISED TASKS, only for an agent that needs exactly what one of them does:")
     for key in SPECIALISED_TASKS:
         lines += describeTask(key, TASKS[key])
-    lines.append(f"Every task also has numberOfLoops (a whole number; default: {DEFAULT_LOOPS}): how many drafts the agent may write at most before it stops.")
+    lines.append(f"Every task also has numberOfLoops (a whole number; default: {DEFAULT_LOOPS}): how many drafts the agent may write on its own (improving each one after its checks) before the user sees one.")
     lines.append("The news outlets, by group: " + "; ".join(f"{group}: {', '.join(names)}" for group, names in NEWS_OUTLETS.items()) + ".")
     lines.append("The publishers: " + ", ".join(PAPER_PUBLISHERS) + ".")
     return "\n".join(lines)

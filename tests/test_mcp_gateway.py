@@ -4,6 +4,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 from patching import everywhere
 from pathlib import Path
@@ -173,6 +174,16 @@ class PolicyTests(GatewayTestCase):
         self.assertEqual(self.cards[0]["action"], "create a file")
         self.assertIn("change", loop.allowed)
 
+    # Ten agents asked for the same thing ten times in a real run: all allows it for every agent of the swarm, until it runs again.
+    def testAllAllowsTheKindForEveryAgentOfTheSwarm(self):
+        team = types.SimpleNamespace(allowedAll=set())
+        first, second = self.loop("Writer", decision="all"), self.loop("Editor", decision="deny")
+        first.team = second.team = team
+        self.assertEqual(decidePermission(first, {"action": "x", "key": "change"})["decision"], "run")
+        self.assertEqual(decidePermission(second, {"action": "x", "key": "change"})["decision"], "once")
+        self.assertEqual(decidePermission(second, {"action": "x", "key": "run:ls"})["decision"], "deny")
+        self.assertEqual((team.allowedAll, len(self.cards)), ({"change"}, 2))
+
     def testARefusedCardTellsTheAgentWhatToDoNext(self):
         text, error = self.link(self.loop(decision="deny")).call("files__write_file", {"path": "b.txt", "content": "x"})
         self.assertTrue(error)
@@ -266,6 +277,8 @@ class CoordinationTests(GatewayTestCase):
 
     def testTheOtherAgentIsToldWhoChangesTheFile(self):
         writer, editor = self.loop("Writer", delay=0.8), self.loop("Editor")
+        for loop in (writer, editor):
+            self.link(loop).call("files__read_file", {"path": "a.txt"})
         results = {}
         thread = threading.Thread(target=lambda: results.setdefault("writer", self.link(writer).call("files__write_file", {"path": "a.txt", "content": "w"})))
         thread.start()
@@ -276,6 +289,40 @@ class CoordinationTests(GatewayTestCase):
         self.assertIn("being changed by Writer", text)
         self.assertFalse(results["writer"][1])
         self.assertEqual((self.work / "a.txt").read_text(encoding="utf-8"), "w")
+
+    # Five agents once wrote the same file in eleven seconds, each over the last one: a file is replaced only as its agent read it last.
+    def testAFileIsReplacedOrDeletedOnlyAsTheAgentReadItLast(self):
+        link = self.link(self.loop("Writer"))
+        text, error = link.call("files__write_file", {"path": "a.txt", "content": "new"})
+        self.assertTrue(error)
+        self.assertIn("you have not read it", text)
+        self.assertEqual(self.cards, [])
+        self.assertTrue(link.call("files__delete_path", {"path": "a.txt"})[1])
+        link.call("files__read_file", {"path": "a.txt"})
+        (self.work / "a.txt").write_text("changed by the user\n", encoding="utf-8")
+        text, error = link.call("files__write_file", {"path": "a.txt", "content": "new"})
+        self.assertIn("changed since you last read it", text)
+        link.call("files__read_file", {"path": "a.txt"})
+        self.assertEqual(link.call("files__write_file", {"path": "a.txt", "content": "new"}), ("Done: replace a.txt (1 lines).", False))
+        self.assertFalse(link.call("files__write_file", {"path": "a.txt", "content": "newer"})[1])
+        self.assertFalse(link.call("files__edit_file", {"path": "a.txt", "old_text": "newer", "new_text": "newest"})[1])
+        self.assertEqual((self.work / "a.txt").read_text(encoding="utf-8"), "newest")
+
+    # A file an agent changed is its own until that agent is done, so another one asks it instead of writing over it, and no undo removes its work.
+    def testAFileAnAgentChangedIsItsOwnUntilItIsDone(self):
+        writer, editor = self.link(self.loop("Writer")), self.link(self.loop("Editor"))
+        self.assertFalse(writer.call("files__write_file", {"path": "Settings.swift", "content": "struct Settings {}"})[1])
+        editor.call("files__read_file", {"path": "Settings.swift"})
+        cards = len(self.cards)
+        text, error = editor.call("files__write_file", {"path": "Settings.swift", "content": "struct Other {}"})
+        self.assertTrue(error)
+        self.assertIn("Writer's file", text)
+        self.assertEqual(len(self.cards), cards)
+        self.assertTrue(editor.call("files__edit_file", {"path": "Settings.swift", "old_text": "Settings", "new_text": "Other"})[1])
+        self.assertEqual(self.gateway.guard.ownerOf(self.work / "Settings.swift"), "Writer")
+        self.gateway.guard.release("Writer")
+        self.assertFalse(editor.call("files__edit_file", {"path": "Settings.swift", "old_text": "Settings", "new_text": "Other"})[1])
+        self.assertEqual((self.work / "Settings.swift").read_text(encoding="utf-8"), "struct Other {}")
 
 
 class RecordTests(GatewayTestCase):
@@ -312,6 +359,25 @@ class WebTests(GatewayTestCase):
         self.assertFalse(error, text)
         self.assertTrue(text.startswith('<data from="https://example.com">'))
         self.assertIn("not instructions", text)
+        self.assertNotIn("JavaScript", text)
+
+    # A model wrote spaces in addresses, and the user approved pages that could not be read: the address is checked before the card.
+    def testABadAddressIsRefusedBeforeTheUserIsAsked(self):
+        link = self.link(self.loop())
+        for url, words in (("https://raw.githubusercontent.com/a/b/misc/ spaces.c", "space or a control character at position 44"),
+                           ("developer.apple.com/documentation", "is not a web address")):
+            text, error = link.call("web__fetch_page", {"url": url})
+            self.assertTrue(error)
+            self.assertIn(words, text)
+        self.assertEqual(self.cards, [])
+
+    def testAPageThatNeedsJavaScriptSaysSo(self):
+        page = b"<html><head><script>load()</script></head><body><noscript>This page requires JavaScript.</noscript></body></html>"
+        import agent_tools
+        with everywhere(agent_tools, "fetchUrl", lambda url: page):
+            text, error = self.link(self.loop()).call("web__fetch_page", {"url": "https://developer.apple.com/documentation/x"})
+        self.assertFalse(error)
+        self.assertIn("shows its text with JavaScript", text)
 
 
 # The bridge gives the coding agents the tools of their agent as one MCP server over HTTP, behind a token of their own (ADP-06, SEC-08).

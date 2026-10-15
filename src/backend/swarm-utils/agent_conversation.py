@@ -120,13 +120,16 @@ class Conversation:
                     conversation.messages.append({"role": "tool", "id": call["id"], "name": call["name"], "content": "Not done: the program stopped before it ran.", "error": True})
         return conversation
 
-    # The messages of the other agents and of the user that the model has not read yet.
+    # The messages of the other agents and of the user that the model has not read yet. When one sender wrote several of them, the older ones
+    # are marked: an agent that started late got three versions of the same contract at once in a real run, the oldest one wrong.
     def news(self):
         inbox, users = self.loop.inbox, self.loop.userMessages
         lines = []
-        for entry in inbox[self.delivered[0]:]:
-            sender, _, message = entry.partition(": ")
-            lines.append(f"[Message from {sender}] {message}")
+        entries = [entry.partition(": ") for entry in inbox[self.delivered[0]:]]
+        latest = {sender: number for number, (sender, _, _) in enumerate(entries)}
+        for number, (sender, _, message) in enumerate(entries):
+            older = f", older: a newer message from {sender} follows, and where they differ the newer one counts" if latest[sender] != number else ""
+            lines.append(f"[Message from {sender}{older}] {message}")
         lines += [f"[Message from the user] {message}" for message in users[self.delivered[1]:]]
         self.delivered = [len(inbox), len(users)]
         return "\n".join(lines)

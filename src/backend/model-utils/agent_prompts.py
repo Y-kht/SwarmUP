@@ -217,7 +217,8 @@ For this work you can look at the files and talk with your swarm, but change not
 
 
 CONVERSATION_REVISION_PROMPT = """Write your answer again, with this change: {feedback}
-Give the whole new answer, in the same format as before."""
+Give the whole new answer, in the same format as before. It replaces your previous answer completely: it must hold your whole result for your
+task (everything you did and made, not only this change), even when nothing else changes. Do not reply to the message itself."""
 
 
 OLD_RESULT = "[This old result was taken out to keep the conversation short. Ask again if you need it.]"

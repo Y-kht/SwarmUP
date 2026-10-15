@@ -226,6 +226,8 @@ class SwarmRun:
     # Each new run saves its results in a folder of its own, and a resumed run in the same one.
     def prepareRun(self, resume=False):
         self.stopped, self.interruption, self.saveFailed = False, None, False
+        # What the user allowed every agent "until the swarm runs again" ends with the run (mcp_policy.py).
+        self.allowedAll = set()
         following = not resume and self.round > 1
         if not (resume and self.runName):
             self.runName = makeRunName(self.currentRequest() if following else self.mission)

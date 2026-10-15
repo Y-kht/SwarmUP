@@ -4,7 +4,8 @@
 # - the temp folder, the memory (with its own rules, mission_memory.py) and the workspace of SwarmUP itself (an agent without a folder) are
 #   free (the request says free);
 # - everything else is shown to the user as a card (Loop.askPermission): once, until the swarm runs again (the key of the request is
-#   remembered in loop.allowed, so the same kind of action is not asked again), or no.
+#   remembered in loop.allowed, so the same kind of action is not asked again), for every agent of the swarm until it runs again (all: the key
+#   is remembered by the swarm, in team.allowedAll; ten agents asked the same thing ten times in a real run), or no.
 # The other questions of a server go to the user as a form (Loop.askQuestions), and a server that needs a model asks the model of its agent.
 import json
 
@@ -25,12 +26,16 @@ def decidePermission(loop, request):
         return decision("deny", PLAN_REFUSAL)
     if request.get("free") or (key == "change" and request.get("place", "") == "" and not loop.folder):
         return decision("once")
-    if key in loop.allowed:
+    shared = getattr(getattr(loop, "team", None), "allowedAll", None)
+    if key in loop.allowed or (isinstance(shared, set) and key in shared):
         return decision("once")
     answer = loop.askPermission({"action": request.get("action") or "act", "detail": request.get("detail") or "", "folder": request.get("folder") or "",
                                  "reason": request.get("reason") or ""})
     chosen = answer.get("decision") if isinstance(answer, dict) else "deny"
-    if chosen == "run":
+    if chosen == "all" and isinstance(shared, set):
+        shared.add(key)
+        chosen = "run"
+    if chosen in ("run", "all"):
         loop.allowed.add(key)
         return decision("run")
     if chosen == "once":

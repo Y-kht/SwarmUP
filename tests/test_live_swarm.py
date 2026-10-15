@@ -224,7 +224,7 @@ class ModelChangeTests(LiveTeamTestCase):
         waitUntil(lambda: oldModel.unloaded, "the old model of B to free its memory")
 
 
-class ReleaseTests(unittest.TestCase):
+class FilesTestCase(unittest.TestCase):
     def setUp(self):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
@@ -232,6 +232,8 @@ class ReleaseTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+
+class ReleaseTests(FilesTestCase):
     # A worker that finished lets the memory of its local model go before the leader works, so the leader finds room on the GPUs. An API
     # model, and the models of plan mode (they execute next), are kept.
     def testAFinishedWorkerLetsItsLocalModelGo(self):
@@ -249,6 +251,53 @@ class ReleaseTests(unittest.TestCase):
             swarm.addAgent(name, loop, "role", "task")
         swarm.run()
         self.assertEqual(seen["unloaded"], (True, False))
+
+
+
+# What the user who leads a swarm reads and answers: the summary of the drafts that wait.
+class SummaryTests(FilesTestCase):
+    def makeSwarm(self, draft):
+        swarm = Swarm("Mission")
+        for name in ("Leader", "Writer", "Checker"):
+            swarm.addAgent(name, Loop(Model()), "role", "task")
+        swarm.leaderIsUser = lambda: True
+        for name in ("Writer", "Checker"):
+            swarm.members[name].update(status="working", review="ready", draft=draft, revision=1)
+        leader = swarm.getMember("Leader")["agent"]
+        leader.said = []
+        leader.notifyUser = leader.said.append
+        return swarm, leader
+
+    # In a real run the question stayed open after the user approved each agent alone, and took the next command as its answer.
+    def testTheQuestionIsWithdrawnOnceTheUserDecidedEveryDraftAlone(self):
+        swarm, leader = self.makeSwarm("A short draft")
+        asked = threading.Event()
+        def askUntil(question, stale):
+            asked.set()
+            waitUntil(stale, "the decisions of the user")
+            return ""
+        leader.askUntil = askUntil
+        result = {}
+        thread = threading.Thread(target=lambda: result.setdefault("reply", swarm.reviewRound({"Writer": 1, "Checker": 1}, None)))
+        thread.start()
+        self.assertTrue(asked.wait(5))
+        swarm.approveDraft("Writer")
+        self.assertTrue(thread.is_alive())
+        swarm.rejectDraft("Checker")
+        thread.join(5)
+        self.assertEqual(result["reply"], "")
+        self.assertEqual((swarm.members["Writer"]["review"], swarm.members["Checker"]["review"]), ("approved", "rejected"))
+        self.assertFalse(any("changed while you were reading" in line for line in leader.said))
+
+    # A user who leads reads the summary itself: every draft is cut, and its name shows how to read all of it.
+    def testTheSummaryForAUserWhoLeadsCutsEachDraft(self):
+        swarm, leader = self.makeSwarm("word " * 1000)
+        leader.askUntil = lambda question, stale: "yes"
+        swarm.reviewRound({"Writer": 1, "Checker": 1}, None)
+        summary = next(line for line in leader.said if "Summary of the results" in line)
+        self.assertIn("more characters: type Writer to read it all]", summary)
+        self.assertLess(len(summary), 2000)
+        self.assertEqual(swarm.members["Writer"]["review"], "approved")
 
 
 if __name__ == "__main__":

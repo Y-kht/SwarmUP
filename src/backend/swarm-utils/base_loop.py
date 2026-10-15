@@ -221,17 +221,25 @@ class Loop:
         with self.userLock:
             return getpass.getpass(f"{question} ")
 
+    # A question that may become useless while it waits (stale() says so): an interface that can withdraw it returns "" then.
+    def askUntil(self, question, stale):
+        return self.askUser(question)
+
     # A coding agent wants to act: run a command, change files, read outside its folder, use the web... request is
     # {"action": what it wants to do, in words, "detail": the command, file or address, "folder": where, "reason": why (may be empty)}.
-    # The answer is {"decision": "once", "run" (the same action is allowed until the swarm runs again) or "deny", "message": why it is denied}.
+    # The answer is {"decision": "once", "run" (the same action is allowed until the swarm runs again), "all" (the same, for every agent of the
+    # swarm) or "deny", "message": why it is denied}.
     def askPermission(self, request):
         with self.userLock:
             reason = f"\nWhy: {request['reason']}" if request.get("reason") else ""
             self.notifyUser(f"[{self.name}] wants to {request['action']}:\n{request['detail']}\nIn: {request.get('folder') or 'its folder'}{reason}")
-            reply = self.askUser("Type yes to allow it this time, always to allow it until the swarm runs again, or no (followed by why, if you like):").strip()
+            reply = self.askUser("Type yes to allow it this time, always to allow it until the swarm runs again, all to allow it for every agent until then, "
+                                 "or no (followed by why, if you like):").strip()
         word, _, rest = reply.partition(" ")
         if word.lower() in ("always", "run"):
             return {"decision": "run", "message": ""}
+        if word.lower() in ("all", "everyone"):
+            return {"decision": "all", "message": ""}
         if isYes(word):
             return {"decision": "once", "message": ""}
         return {"decision": "deny", "message": (rest if isNo(word) else reply).strip()}
@@ -326,7 +334,9 @@ class Loop:
         return plan
 
     # Write a draft, verify it, show it to the user, and improve it until the user approves.
-    # verify(draft) returns "" if the draft is fine, or a sentence describing the problem.
+    # verify(draft) returns "" if the draft is fine, or a sentence describing the problem. numberOfLoops counts the drafts the agent writes on its
+    # own before the user sees one: each answer of the user starts a new count, so corrections never use up an agent (in a real run, an agent
+    # that was corrected five times failed, and its good file was put back).
     # Without ask the user is not involved: the draft is returned when it passes the checks, otherwise None.
     # With a key the approved draft is remembered, and a run that is resumed gets it back instead of asking the user again.
     def reviewLoop(self, task, verify, ask=True, own=True, key=None):
@@ -338,8 +348,9 @@ class Loop:
             if key:
                 self.remember(key, draft)
             return draft
-        draft, feedback = "", ""
-        for attempt in range(1, self.numberOfLoops + 1):
+        draft, feedback, attempt = "", "", 0
+        while True:
+            attempt += 1
             prompt = task
             if feedback:
                 # In a conversation the model still has the task and its draft, so it is only told what to change.
@@ -361,6 +372,4 @@ class Loop:
                 return draft
             if isNo(reply):
                 return None
-            feedback = reply
-        self.notifyUser(f"Stopped after {self.numberOfLoops} drafts.")
-        return None
+            feedback, attempt = reply, 0

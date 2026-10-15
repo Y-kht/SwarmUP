@@ -170,6 +170,12 @@ class ToolboxTests(ConversationTestCase):
         self.assertEqual(self.asked[-1]["action"], "run a command")
         self.assertIn("Ran in", loop.actions[-1]["text"])
 
+    # A command that failed is an error of the call, so the records and the model see it ("command not found" was once recorded as a success).
+    def testACommandThatFailsIsAnErrorWithItsWholeOutput(self):
+        text, error = Box(self.chatLoop([])).run("run_command", {"command": f'"{sys.executable}" -c "import sys; print(\'no swift\'); sys.exit(127)"'})
+        self.assertTrue(error)
+        self.assertEqual(text, "The command failed. Exit code 127.\nno swift")
+
     def testPlanModeAndAgentsWithoutAFolder(self):
         loop = self.chatLoop([])
         loop.planning = True
@@ -322,13 +328,27 @@ class SwarmTests(ConversationTestCase):
         swarm.addAgent("Checker", checker, "checker", "check", waitsFor=["Writer"])
         self.assertEqual(swarm.run(), "Report")
         self.assertIn({"role": "tool", "id": "call1", "name": "team__read_result", "content": "The result of Writer:\nA text", "error": False}, leader.agent.seen[1]["messages"])
-        self.assertIn("[Message from Writer] The text is short.", leader.agent.seen[0]["messages"][0]["content"])
+        self.assertIn("[Message from Writer, older: a newer message from Writer follows, and where they differ the newer one counts] The text is short.",
+                      leader.agent.seen[0]["messages"][0]["content"])
         status = checker.agent.seen[1]["messages"][-2]["content"]
         self.assertIn("- Writer: the writer, done. Task: write Its result is ready (team__read_result).", status)
         self.assertIn("There is no agent called Nobody.", checker.agent.seen[1]["messages"][-1]["content"])
         self.assertIn({"kind": "message", "sender": "Writer", "receiver": "Leader", "direct": True}, [{key: event.get(key) for key in ("kind", "sender", "receiver", "direct")} for event in events])
         self.assertTrue(any(event["kind"] == "activity" and event["agent"] == "Checker" for event in events))
         self.assertEqual(swarm.getInfo("Writer")["activity"][0]["text"], 'team__send_message("to": "leader", "text": "The text is short.")')
+
+    # An agent once sent the same message nine times, once to each agent: all reaches every agent that can still read it.
+    def testAMessageToAllReachesEveryAgentAtWork(self):
+        swarm = Swarm("Bees")
+        for name in ("Leader", "Architect", "Coder", "Tester"):
+            swarm.addAgent(name, self.chatLoop([]), "role", "task")
+        swarm.setStatus("Tester", "done")
+        self.assertEqual(swarm.relay("Architect", "all", "The contract changed."), "Sent to Leader, Coder. They read it with their next step. Tester finished, so they cannot read it.")
+        self.assertEqual([swarm.getMember(name)["agent"].inbox for name in ("Leader", "Coder", "Tester")], [["Architect: The contract changed."]] * 2 + [[]])
+        swarm.relay("Architect", "Coder", "Version 2 of the contract.")
+        conversation = Conversation(swarm.getMember("Coder")["agent"])
+        self.assertEqual(conversation.news(), "[Message from Architect, older: a newer message from Architect follows, and where they differ the newer one counts] "
+                         "The contract changed.\n[Message from Architect] Version 2 of the contract.")
 
     def testWhatAnAgentThatDidNotFinishChangedIsPutBack(self):
         swarm = Swarm("Bees")

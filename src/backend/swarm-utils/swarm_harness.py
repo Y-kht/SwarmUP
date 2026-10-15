@@ -94,6 +94,7 @@ class Swarm(SwarmTeam, SwarmReview, SwarmRun, SwarmRounds):
         self.runName = ""
         # The gateway of the mission (mcp_gateway.py): every call of a tool of its agents goes through it, while a run works.
         self.gateway = None
+        self.allowedAll = set()
         # A mission has rounds: the first request of the user, then each follow-up. requests holds them all, {round, text, time}.
         self.round = 1
         self.requests = []

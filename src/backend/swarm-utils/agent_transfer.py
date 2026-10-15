@@ -104,10 +104,14 @@ class TransferTools:
             raise ValueError(f"{destination.name} already exists. Set overwrite to true to replace it, or copy to another name.")
         if exists and destination.path.is_dir() != origin.path.is_dir():
             raise ValueError(f"{destination.name} is a {'folder' if destination.path.is_dir() else 'file'} and {origin.name} is not: they cannot replace each other.")
+        if exists:
+            self.checkKnown(destination)
         size = describeSize(*measure(origin.path))
         with self.claim(destination):
             self.allowChange([destination], "copy", f"{origin.name} -> {destination.name} ({size})" + (", in place of what is there" if exists else ""), reason)
             copyExactly(origin.path, destination.path)
+            self.knowFile(destination)
+        self.knowCopied(origin)
         self.settleMemory(destination)
         self.noteUse(origin, "read")
         self.logChange(destination, f"Copied {origin.path} to {destination.path}.")

@@ -54,7 +54,7 @@ from swarm_harness import Swarm
 # The parts of the program, for the program below and for the tests and scripts that drive it (import swarmup_cli as cli).
 from cli_console import Console, askUntilValid, askYesNo, chooseFrom, heading, shorten
 from cli_models import chooseModel, labelLocal
-from cli_program import addLive, buildAgent, buildWithLeader, changeModel, chooseBuilder, chooseMode, chooseOrder, runSwarm, startSwarm, unloadModels
+from cli_program import addLive, buildAgent, buildWithLeader, manageBuilt, changeModel, chooseBuilder, chooseMode, chooseOrder, runSwarm, startSwarm, unloadModels
 from cli_resume import followUps, offerUnfinished, openMission
 from cli_steps import askAgentCount, askBudget, askFolder, askMission, chooseAgent, chooseFolders, chooseTask, describeAgent, fillTask
 from cli_view import TreeView, formatEvent, openAgent, renderTree, runCommand
@@ -103,6 +103,7 @@ def runProgram(console, missionId=None):
             status = swarm.getVramStatus()
             if status["needed"]:
                 console.say(f"\nVRAM the swarm is expected to need so far: {status['needed']} GB of {status['total']} GB ({status['free']} GB free now)." + (f"\n{status['message']}" if status["message"] else ""))
+        manageBuilt(console, swarm, specs, keys, tokens, models)
     console.newAgent = lambda swarm: addLive(console, swarm, specs, keys, tokens, models)
     heading(console, "Your swarm")
     console.say(f"The first agent, {swarm.getLeader()}, is the leader: it works last, and it speaks to you for the swarm.\n\n" + renderTree(swarm, console.color))
@@ -172,7 +173,7 @@ def showStatus(info, asJson):
         return
     print(describeSession({**info, **status}))
     if status.get("question"):
-        print(f"It asks you, in window {status['question']['window']}: {status['question']['text']}")
+        print(f"It asks you (question {status['question']['id']}), in window {status['question']['window']}: {status['question']['text']}")
     if status.get("tree"):
         print(f"\n{status['tree']}")
     print(f"\nWindows: {', '.join(status.get('windows') or [])}. Attach with: swarmup_cli.py attach {info['id']}")
@@ -262,6 +263,8 @@ def makeParser():
     send.add_argument("session")
     send.add_argument("text", nargs="+", help="what to type: an answer, a command, or a message")
     send.add_argument("--window", default=SWARM_WINDOW, help="swarm (the default), the name of an agent, or a window number")
+    send.add_argument("--question", type=int, default=None, help="the id of the question this line answers (status shows it): the line is refused, and "
+                      "not used, if another question waits now")
     kill = commands.add_parser("kill", help="close a session (a swarm that runs is saved, and can be continued at the next start)")
     kill.add_argument("session", nargs="?")
     kill.add_argument("--all", action="store_true", help="close every session")
@@ -328,7 +331,9 @@ def main(arguments=None):
             print(text if text is not None else f"Session {session['id']} has no window {options.window}.")
         elif command == "send":
             session = findSession(options.session, listSessions())
-            request(session, {"type": "input", "window": windowName(session, options.window), "text": " ".join(options.text)})
+            reply = request(session, {"type": "input", "window": windowName(session, options.window), "text": " ".join(options.text), "question": options.question})
+            if reply.get("type") == "error":
+                sys.exit(reply["message"])
             print(f"Sent to session {session['id']}.")
         elif command == "kill":
             sessions = listSessions()

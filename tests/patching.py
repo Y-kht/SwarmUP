@@ -11,7 +11,7 @@ FAMILIES = {
     "agent_storehouse": ["agent_storehouse", "mission_memory", "memory_cache"],
     "leader_utils": ["leader_utils", "leader_manager", "leader_parser", "leader_catalog", "leader_checks"],
     "user_interface": ["user_interface", "web_server", "session_core", "interface_views", "session_models", "session_saved", "session_steps", "session_runs", "session_mcp"],
-    "mcp_gateway": ["mcp_gateway", "mcp_kit", "mcp_policy", "mcp_records", "mcp_runtime", "mcp_external", "mcp_bridge", "skill_servers", "server_files", "server_transfer", "server_processes", "server_web", "server_memory", "server_team", "server_user", "server_leader"],
+    "mcp_gateway": ["mcp_gateway", "mcp_kit", "mcp_policy", "mcp_records", "mcp_runtime", "mcp_external", "mcp_bridge", "skill_servers", "server_files", "server_transfer", "server_processes", "server_web", "server_memory", "server_team", "server_user", "server_leader", "path_guard"],
     "swarmup_cli": ["swarmup_cli", "cli_console", "cli_view", "cli_steps", "cli_models", "cli_program", "cli_resume", "cli_hub", "cli_screen", "cli_sessions", "cli_mcp", "swarmup_mcp_server"],
 }
 MISSING = object()

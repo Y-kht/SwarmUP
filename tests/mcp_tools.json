@@ -558,10 +558,10 @@
   }
  },
  "team": {
-  "version": "1.0.0",
+  "version": "1.1.0",
   "tools": {
    "send_message": {
-    "description": "Send a message to another agent of your swarm, or to your leader (write leader as to). It reads it with its next step. Use it to give them what they need from you, or to ask them something.",
+    "description": "Send a message to another agent of your swarm, to your leader (write leader as to), or to every agent at once (write all as to). It reads it with its next step. Use it to give them what they need from you, or to ask them something. When you change what you told them, send the new version: the older one is marked as replaced.",
     "input": {
      "type": "object",
      "properties": {

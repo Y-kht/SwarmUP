@@ -29,9 +29,11 @@ SENDER = "SwarmUP"
 # joined(agent, loop) is told once that agent is in the swarm; remakeLoop(name, model) gives the loop of an agent with another model,
 # and remade(name, model, loop) is told once the swarm uses it.
 # ==============
+# watchFinishes is False for a swarm the user built: the leader is only asked when an agent or the user writes to it (in a real run, two agents
+# wrote to the leader that a file had no owner, and nobody read it until the end).
 class LeaderManager:
-    def __init__(self, swarm, catalog, maker):
-        self.swarm, self.catalog, self.maker = swarm, catalog, maker
+    def __init__(self, swarm, catalog, maker, watchFinishes=True):
+        self.swarm, self.catalog, self.maker, self.watchFinishes = swarm, catalog, maker, watchFinishes
         self.queue = queue.Queue()
         self.thread = None
         self.rounds = 0
@@ -47,7 +49,7 @@ class LeaderManager:
             self.start()
         elif kind == "finished":
             self.queue.put(("end", None))
-        elif kind == "status" and event["status"] in ("done", "failed") and agent != self.swarm.getLeader() and self.othersAtWork(agent):
+        elif kind == "status" and self.watchFinishes and event["status"] in ("done", "failed") and agent != self.swarm.getLeader() and self.othersAtWork(agent):
             self.queue.put(("event", f"{agent} {'is done' if event['status'] == 'done' else 'did not finish'}."))
         elif kind == "message" and event["sender"] == USER_NAME and event["receiver"] == self.swarm.getLeader():
             self.queue.put(("event", f"The user wrote to you: {event['message']}"))

@@ -9,6 +9,8 @@ from mission_costs import formatDollars
 from models_library import DEFAULT_CLI_MODEL, MODELS_CLI
 
 
+LEADER_MESSAGE_CHARS = 2000
+
 COMMANDS = """Commands (type them at any time while the swarm runs):
   tree                    show the tree of the swarm again
   log                     show the latest messages between the agents
@@ -58,7 +60,7 @@ def describeState(node, mode):
 
 def renderNode(swarm, node, prefix, last, enabled):
     state, color = describeState(node, swarm.getInfo(node["name"])["mode"])
-    statuses = swarm.getStatuses()
+    statuses = swarm.getStates()
     waits = f"  waits for: {', '.join(f'{other} ({statuses[other]})' for other in node['waitsFor'])}" if node["waitsFor"] else ""
     branch = "" if prefix is None else prefix + ("`-- " if last else "|-- ")
     lines = [f"{branch}{paint(node['name'], 'bold', enabled)} [{node['role']}] {describeModel(node['model'])} -> {paint(state, color, enabled)}{waits}"]
@@ -93,6 +95,9 @@ def formatEvent(event):
     if kind == "review":
         wording = {"ready": "is ready: it waits for you", "approved": "was approved", "rejected": "was rejected", "": "was asked to correct it"}
         return f"[{when}] {agent} {wording[event['review']]}"
+    if kind == "message" and event.get("direct") and event.get("toLeader"):
+        # An agent that writes to its leader often needs a decision (a file nobody owns, a blocker): it is shown whole, and marked.
+        return f"[{when}] ! {event['sender']} writes to the leader {event['receiver']}:\n    " + shorten(event["message"], LEADER_MESSAGE_CHARS)
     if kind == "message":
         return f"[{when}] {event['sender']} -> {event['receiver']}: {shorten(event['message'], 90)}"
     if kind == "scheduled":

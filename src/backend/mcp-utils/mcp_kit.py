@@ -30,6 +30,11 @@ class ToolProblem(Exception):
     pass
 
 
+# The tool did its work, and the work failed (a command that ended with an error code): the model gets the whole text, as an error.
+class ToolFailure(Exception):
+    pass
+
+
 def clip(text, limit=RESULT_CHARS):
     return text if len(text) <= limit else text[:limit] + f"\n[Cut: {len(text) - limit:,} more characters are not shown. Ask for a smaller part.]"
 
@@ -176,6 +181,8 @@ def runTool(tool, work, arguments):
         result = tool.run(work, **arguments)
     except SwarmStopped:
         return errorResult("Not done: the swarm was stopped.")
+    except ToolFailure as failure:
+        return errorResult(clip(str(failure)))
     except (ToolProblem, ValueError) as problem:
         return errorResult(f"Not done: {problem}")
     except OSError as error:

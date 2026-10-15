@@ -3,6 +3,7 @@ from cli_console import askUntilValid, askYesNo, chooseFrom, heading, shorten
 from cli_models import chooseModel
 from cli_steps import askFolder, chooseAgent
 from cli_view import TreeView, describeCosts, renderTree, runCommand, watchCosts
+from harness_utils import USER_LOCK
 from leader_catalog import LeaderCatalog
 from leader_manager import LeaderManager
 from leader_utils import designSwarm
@@ -24,6 +25,7 @@ def forTerminal(message):
 def connect(loop, console):
     loop.notifyUser = lambda message: console.say(forTerminal(message), window=loop.name)
     loop.askUser = lambda question: console.ask(question, window=loop.name)
+    loop.askUntil = lambda question, stale: console.askUntil(question, stale, window=loop.name)
     loop.askSecret = lambda question: console.askSecret(question, window=loop.name)
     loop.askLogin = lambda host: console.say(f"{host} asks for an account. Add it in the setup of the literature reviewer next time. Skipping it.")
 
@@ -40,11 +42,27 @@ def buildAgent(console, swarm, spec, info, model, waitsFor=()):
     return loop
 
 
+# The folder most agents of the swarm work in: a new agent is offered it first.
+def swarmFolder(specs):
+    folders = [spec["answers"].get("folder") for spec in specs if spec["answers"].get("folder")]
+    return max(folders, key=folders.count) if folders else None
+
+
 # An agent that joins the swarm while it runs (the command add): its task, its folder, its model, and the agents it waits for (in execute mode).
 # Every agent of the swarm is told. If it cannot join (the leader already started its final work), its model is let go.
+# The questions of the agents wait while the user answers these (the lock of the user): in a real run another question came between two of
+# them, and the next answer went to the wrong question.
 def addLive(console, swarm, specs, keys, tokens, models):
+    with USER_LOCK:
+        console.say("\nA new agent joins the swarm. The other questions wait until you have answered these.")
+        joinLive(console, swarm, specs, keys, tokens, models)
+
+
+def joinLive(console, swarm, specs, keys, tokens, models):
     number = len(swarm.getAgents()) + 1
     spec = chooseAgent(console, number, number, swarm.getAgents())
+    if swarmFolder(specs) and not spec["answers"].get("folder"):
+        spec["answers"]["folder"] = swarmFolder(specs)
     spec["answers"]["folder"] = askFolder(console, spec, number, number)
     info, model = chooseModel(console, swarm, spec, number, number, keys, tokens)
     others = [name for name in swarm.getAgents() if name != swarm.getLeader()]
@@ -100,6 +118,17 @@ class ConsoleMaker:
 
     def remade(self, name, model, loop):
         self.models[name] = loop.agent
+
+
+# A swarm the user built, whose leader is a model: the leader reads and answers what the agents write to it while the swarm runs, with its
+# tools (it can write back, or propose to add an agent). A user who leads the swarm reads these messages in window 0 instead.
+def manageBuilt(console, swarm, specs, keys, tokens, models):
+    leader = swarm.getLeader()
+    info = swarm.getInfo(leader)["model"]
+    if len(specs) < 2 or not info or info.get("user"):
+        return None
+    catalog = LeaderCatalog(swarm.mission, swarmFolder(specs), leader, info, keys, tokens, swarm.costs)
+    return LeaderManager(swarm, catalog, ConsoleMaker(console, swarm, specs, keys, tokens, models), watchFinishes=False)
 
 
 # It returns the swarm the leader built and the user approved (the leader is its first agent), or None.
