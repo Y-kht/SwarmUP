@@ -225,6 +225,17 @@ class ConversationTests(ConversationTestCase):
             self.assertEqual(loop.askAgent("Work."), "")
         self.assertEqual(loop.agent.seen[2]["messages"][-1]["content"], prompts.LAST_STEP)
 
+    def testThreeCallsThatCannotBeReadAreToldToTheLeaderAndTheUser(self):
+        swarm = Swarm("Bees")
+        leader = self.chatLoop([say("Report")])
+        worker = self.chatLoop([use({"id": f"c{number}", "name": "unknown", "arguments": {}, "problem": "this tool call is not valid JSON."}) for number in range(3)] + [say("Done")])
+        swarm.addAgent("Leader", leader, "boss", "lead")
+        swarm.addAgent("Worker", worker, "worker", "work")
+        self.assertEqual(swarm.run(), "Report")
+        self.assertEqual(swarm.getStatus("Worker"), "done")
+        self.assertTrue(any("tool calls in a row that SwarmUP could not read" in entry for entry in leader.inbox))
+        self.assertTrue(any("could not read" in said for said in worker.said))
+
     def testTheTextOfAModelThatWritesIsGivenToTheLoopWhileItWrites(self):
         class Writing(FakeChat):
             streams = True
@@ -240,6 +251,13 @@ class ConversationTests(ConversationTestCase):
         self.assertEqual(loop.askAgent("Work."), "Bees make honey.")
         self.assertEqual(seen[0], ("Bees ", False))
         self.assertEqual(seen[-1], ("Bees make honey.", True))
+
+    def testTheSameCallMadeAgainAndAgainIsNotRunAThirdTime(self):
+        loop = self.chatLoop([use(act("list_files"))] * 3 + [say("Done")])
+        self.assertEqual(loop.askAgent("Work."), "Done")
+        results = [message for message in loop.agent.seen[-1]["messages"] if message["role"] == "tool"]
+        self.assertEqual([message["error"] for message in results], [False, False, True])
+        self.assertIn("you already made this same call 2 times in this request", results[-1]["content"])
 
     def testAStoppedSwarmStopsTheConversation(self):
         loop = self.chatLoop([use(act("list_files"))])
@@ -365,6 +383,20 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(readToolCalls('{"answer": 42}'), ([], '{"answer": 42}'))
         self.assertEqual(readToolCalls(""), ([], ""))
 
+    def testAModelThatTakesOneCallInEachAnswerGetsThemOneAfterTheOther(self):
+        messages = [{"role": "user", "content": "Work."}, {"role": "assistant", "content": "I look.", "calls": [call("a", 1), call("b", 2)], "raw": None},
+                    {"role": "tool", "id": "call1", "name": "a", "content": "A"}, {"role": "tool", "id": "call2", "name": "b", "content": "B"}]
+        chat = localMessages("S", messages, [], True)
+        self.assertEqual([(item["role"], [c["function"]["name"] for c in item.get("tool_calls", [])], item["content"]) for item in chat[1:]],
+                         [("user", [], "Work."), ("assistant", ["a"], "I look."), ("tool", [], "A"), ("assistant", ["b"], ""), ("tool", [], "B")])
+
+    def testCallsWrittenOneAfterTheOtherAreAllRead(self):
+        text = '{"name": "files__read_file", "parameters": {"path": "a"}}; {"name": "team__send_message", "parameters": {"to": "Writer", "text": "hi"}}'
+        calls, rest = readToolCalls(text, [{"name": "files__read_file"}, {"name": "team__send_message"}])
+        self.assertEqual([(call["name"], call["arguments"]) for call in calls], [("files__read_file", {"path": "a"}), ("team__send_message", {"to": "Writer", "text": "hi"})])
+        self.assertEqual(rest, "")
+        self.assertEqual(readToolCalls('{"name": "x"}; not json', [{"name": "x"}])[0], [])
+
     def testClaudeIsAskedWithItsToolsAndItsCache(self):
         message = types.SimpleNamespace(content=[FakeBlock(type="text", text="I read."), FakeBlock(type="tool_use", id="t1", name="read_file", input={"path": "a"})],
                                         stop_reason="tool_use", stop_details=None, usage=types.SimpleNamespace(input_tokens=10, output_tokens=5, cache_read_input_tokens=3, cache_creation_input_tokens=0))
@@ -410,6 +442,25 @@ class ClientTests(unittest.TestCase):
         model.client.messages.stream = lambda **options: (model.cancel(), stream(**options))[1]
         with self.assertRaisesRegex(Exception, "was stopped while it wrote"):
             model.converse("System", [{"role": "user", "content": "Hi"}], [], onText=pieces.append)
+
+    def testAGptModelCallsItsToolsThroughTheResponsesApi(self):
+        output = [FakeBlock(type="reasoning", id="r1", encrypted_content="secret thinking", summary=[]),
+                  FakeBlock(type="function_call", call_id="c1", name="files__read_file", arguments='{"path": "a"}')]
+        response = types.SimpleNamespace(output=output, status="completed", usage=types.SimpleNamespace(input_tokens=10, output_tokens=5, input_tokens_details=types.SimpleNamespace(cached_tokens=4)))
+        asked = []
+        model = ApiModel("gpt", "gpt-6-luna", "key")
+        model.client = types.SimpleNamespace(responses=types.SimpleNamespace(create=lambda **options: asked.append(options) or response))
+        model.connect = lambda: types.SimpleNamespace(APIError=RuntimeError)
+        tools = [{"name": "files__read_file", "description": "Read", "parameters": {"type": "object"}}]
+        reply = model.converse("System", [{"role": "user", "content": "Work."}], tools)
+        self.assertEqual(reply["calls"], [{"id": "c1", "name": "files__read_file", "arguments": {"path": "a"}}])
+        self.assertEqual((asked[0]["instructions"], asked[0]["store"], asked[0]["tools"][0]["name"]), ("System", False, "files__read_file"))
+        history = [{"role": "user", "content": "Work."}, {"role": "assistant", "content": "", "calls": reply["calls"], "raw": reply["raw"]},
+                   {"role": "tool", "id": "c1", "name": "files__read_file", "content": "text"}]
+        model.converse("System", history, tools)
+        self.assertEqual([item.get("type") for item in asked[1]["input"]], [None, "reasoning", "function_call", "function_call_output"])
+        self.assertEqual(asked[1]["input"][-1], {"type": "function_call_output", "call_id": "c1", "output": "text"})
+        self.assertEqual((model.usage["calls"], model.usage["input"]), (2, 20))
 
     def testOpenAiCallsAreReadAndGivenBackAsTheyCame(self):
         item = FakeBlock(id="c1", type="function", function=types.SimpleNamespace(name="read_file", arguments='{"path": "a"}'), extra_content={"google": {"thought_signature": "x"}})

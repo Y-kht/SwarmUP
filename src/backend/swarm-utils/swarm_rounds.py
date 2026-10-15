@@ -29,13 +29,14 @@ class SwarmRounds:
         return next((item["text"] for item in reversed(self.requests) if item["round"] == self.round), self.mission)
 
     # The leader decides which agents the request concerns, and what each of them must do. If it cannot, every agent gets the whole request.
-    def routeFollowUp(self, request):
+    # report is the last report of the leader: the run of the new round has already cleared its result.
+    def routeFollowUp(self, request, report=None):
         names = [name for name in self.members if name != self.leader]
         if not names:
             return {}
         agents = "\n".join(f"- {name} ({self.members[name]['role']}): {self.members[name]['task']}" for name in names)
         prompt = prompts.FOLLOW_UP_ROUTE_PROMPT.format(mission=self.mission, request=request, agents=agents, example=prompts.CORRECTION_ROUTE_EXAMPLE,
-                                                       report=str(self.members[self.leader]["result"] or "none")[:4000])
+                                                       report=str(report or self.members[self.leader]["result"] or "none")[:4000])
         try:
             route = self.getMember(self.leader)["agent"].reviewLoop(prompt, lambda draft: self.checkRoute(draft, names), ask=False, own=False)
         except Exception:
@@ -48,7 +49,7 @@ class SwarmRounds:
         request = self.currentRequest()
         first = self.roundParts is None
         if first:
-            self.roundParts = self.routeFollowUp(request)
+            self.roundParts = self.routeFollowUp(request, previous.get(self.leader))
             self.record("addUserPrompt", self.round, request, kind="Follow-up")
             self.record("setMission", self.mission, self.round)
         for name, member in self.members.items():

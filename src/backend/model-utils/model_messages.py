@@ -109,9 +109,54 @@ def openAiMessages(system, messages):
 
 # A local model whose chat template knows tools gets them as such. Another one gets them in its system prompt (TEXT_TOOLS_PROMPT), writes its
 # calls in its text, and reads their results as messages of the user. Such templates often want the user and the model to speak in turn.
+# OpenAI (the GPT models): the Responses API, the only one where a GPT model that reasons can call tools. What it answered is given back
+# exactly as it came (its reasoning included, encrypted, since nothing is stored at OpenAI), and each result goes with the id of its call.
+def responsesInput(messages):
+    items = []
+    for message in messages:
+        if message["role"] == "user":
+            items.append({"role": "user", "content": message["content"]})
+        elif message["role"] == "tool":
+            items.append({"type": "function_call_output", "call_id": message["id"], "output": message["content"]})
+        elif (message.get("raw") or {}).get("responses"):
+            items += message["raw"]["responses"]
+        else:
+            if message.get("content"):
+                items.append({"role": "assistant", "content": message["content"]})
+            items += [{"type": "function_call", "call_id": call["id"], "name": call["name"], "arguments": json.dumps(call.get("arguments") or {}, ensure_ascii=False)}
+                      for call in message.get("calls") or []]
+    return items
+
+
+def readResponsesUsage(usage):
+    if usage is None:
+        return {"missing": True}
+    details = getattr(usage, "input_tokens_details", None)
+    cached = min(usage.input_tokens or 0, (getattr(details, "cached_tokens", None) or 0) if details is not None else 0)
+    return {"input": (usage.input_tokens or 0) - cached, "cachedInput": cached, "output": usage.output_tokens or 0}
+
+
+# Some chat templates (Llama) take one call in each answer of the model: an answer with several calls is given as one call, its result, the
+# next call, its result... which is what happened, one call after the other.
+def oneCallEach(messages):
+    ordered, results = [], {message["id"]: message for message in messages if message["role"] == "tool"}
+    placed = set()
+    for message in messages:
+        calls = message.get("calls") or []
+        if message["role"] == "assistant" and len(calls) > 1:
+            for number, call in enumerate(calls):
+                ordered.append({**message, "content": message.get("content") if number == 0 else "", "calls": [call]})
+                if call["id"] in results:
+                    ordered.append(results[call["id"]])
+                    placed.add(call["id"])
+        elif message["role"] != "tool" or message["id"] not in placed:
+            ordered.append(message)
+    return ordered
+
+
 def localMessages(system, messages, tools, native):
     chat = [{"role": "system", "content": system if native else f"{system}\n\n" + prompts.TEXT_TOOLS_PROMPT.format(tools=json.dumps(tools, ensure_ascii=False))}]
-    for message in messages:
+    for message in oneCallEach(messages) if native else messages:
         calls = message.get("calls") or []
         if message["role"] == "user":
             entry = {"role": "user", "content": message["content"]}
@@ -157,14 +202,24 @@ def readToolCalls(text, tools=None):
     # A small model often writes its call as JSON in a code fence (```json ... ```).
     stripped = stripFences(text.strip()) if text.strip().startswith("```") else text.strip()
     if stripped[:1] in ("[", "{"):
-        try:
-            data = json.loads(stripped)
-        except ValueError:
-            data = None
-        items = data if isinstance(data, list) else [data]
+        items = readJsonSequence(stripped)
         if items and all(isinstance(item, dict) and "name" in item for item in items) and (not names or all(item["name"] in names for item in items)):
             return [readCall(json.dumps(item)) for item in items], ""
     return readLeaderBlocks(text, names)
+
+
+# One JSON value, or several written one after the other (Llama writes {...}; {...}). A list gives its items. None if it is not only JSON.
+def readJsonSequence(text):
+    decoder, items, position = json.JSONDecoder(), [], 0
+    while position < len(text):
+        try:
+            value, position = decoder.raw_decode(text, position)
+        except ValueError:
+            return None
+        items += value if isinstance(value, list) else [value]
+        while position < len(text) and text[position] in " \t\r\n;,":
+            position += 1
+    return items
 
 
 def readLeaderBlocks(text, names):

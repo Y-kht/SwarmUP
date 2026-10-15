@@ -143,6 +143,14 @@ class ArgumentTests(GatewayTestCase):
         self.assertTrue(text.startswith("Not done:"))
         self.assertEqual(self.cards, [])
 
+    def testANumberOrABooleanWrittenAsTextIsReadAsSuch(self):
+        from mcp_gateway import coerceArguments
+        schema = {"type": "object", "properties": {"line": {"type": "integer"}, "all": {"type": "boolean"}, "size": {"type": "number"}, "path": {"type": "string"}}}
+        self.assertEqual(coerceArguments(schema, {"line": "12", "all": "True", "size": "1.5", "path": "7"}), {"line": 12, "all": True, "size": 1.5, "path": "7"})
+        self.assertEqual(coerceArguments(schema, {"line": "twelve"}), {"line": "twelve"})
+        text, error = self.link(self.loop()).call("files__read_file", {"path": "a.txt", "start_line": "1", "line_count": "5"})
+        self.assertFalse(error, text)
+
     def testAToolThatFailsGivesAResultTheModelCanUseAndNoTraceback(self):
         text, error = self.link(self.loop()).call("probe__crash", {})
         self.assertTrue(error)

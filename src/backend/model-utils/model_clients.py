@@ -14,8 +14,8 @@ import threading
 from codex_agent import CodexModel
 from coding_agents import ClaudeCodeModel
 from harness_utils import isOnline
-from model_messages import (claudeBlock, claudeMessages, explainApiError, localMessages, openAiMessages, readOpenAiUsage,  # noqa: F401
-                            readToolCalls)
+from model_messages import (claudeBlock, claudeMessages, explainApiError, localMessages, openAiMessages, readOpenAiUsage, readResponsesUsage,  # noqa: F401
+                            readToolCalls, responsesInput)
 from model_support import API_LIBRARIES, ModelConnectionError, ModelError, getApiKey, importLibrary, isDownloaded, recordCall
 from models_library import API_KEYS, isGated
 
@@ -120,6 +120,30 @@ class ApiModel:
             raw["reasoning_content"] = message.reasoning_content
         return {"text": message.content or "", "calls": calls, "raw": {"openai": raw}, "cut": choice.finish_reason == "length" and bool(calls)}
 
+    # A GPT model of OpenAI that reasons can only call tools through the Responses API. Nothing is kept at OpenAI (store is False), so the
+    # encrypted reasoning comes back with the answer, and goes with the conversation.
+    def converseResponses(self, system, messages, tools, onText=None):
+        options = {"model": self.name, "instructions": system, "input": responsesInput(messages), "store": False, "include": ["reasoning.encrypted_content"]}
+        if tools:
+            options["tools"] = [{"type": "function", "name": item["name"], "description": item["description"], "parameters": item["parameters"], "strict": False}
+                                for item in tools]
+        response = self.client.responses.create(**options)
+        self.addUsage(**readResponsesUsage(response.usage))
+        calls, texts, raw = [], [], []
+        for item in response.output or []:
+            raw.append(item.model_dump(mode="json", exclude_none=True))
+            if item.type == "function_call":
+                try:
+                    calls.append({"id": item.call_id, "name": item.name, "arguments": json.loads(item.arguments or "{}")})
+                except ValueError:
+                    calls.append({"id": item.call_id, "name": item.name, "arguments": {}, "problem": "its arguments were not valid JSON. Write them again."})
+            elif item.type == "message":
+                texts += [part.text for part in item.content or [] if getattr(part, "type", "") == "output_text"]
+                if any(getattr(part, "type", "") == "refusal" for part in item.content or []) and not texts:
+                    raise ModelError(f"{self.name} declined this request.")
+        cut = response.status == "incomplete" and bool(calls)
+        return {"text": "".join(texts), "calls": calls, "raw": {"responses": raw}, "cut": cut}
+
     def askOpenAi(self, prompt):
         response = self.client.chat.completions.create(model=self.name, messages=[{"role": "user", "content": prompt}])
         self.addUsage(**readOpenAiUsage(response.usage))
@@ -142,7 +166,8 @@ class ApiModel:
     # One step of a conversation (agent_conversation.py): {"text", "calls", "raw", "cut"}. onText receives the text while the model writes it.
     def converse(self, system, messages, tools, onText=None):
         self.stopping.clear()
-        return self.ask(lambda: (self.converseClaude if self.provider == "claude" else self.converseOpenAi)(system, messages, tools, onText))
+        talk = self.converseClaude if self.provider == "claude" else self.converseResponses if self.provider == "gpt" else self.converseOpenAi
+        return self.ask(lambda: talk(system, messages, tools, onText))
 
     def cancel(self):
         self.stopping.set()

@@ -27,6 +27,8 @@ CONTEXT_CHARS = 600000
 KEEP_RECENT = 12
 CONVERSATIONS_FOLDER = "conversations"
 BAD_CALLS = 3
+# The times a model may make exactly the same call in one request; after that it is told to use the result it has.
+SAME_CALLS = 2
 TEXT_SECONDS = 0.25
 
 
@@ -92,6 +94,7 @@ class Conversation:
         self.loop, self.own = loop, own
         self.system, self.messages, self.delivered = "", [], [0, 0]
         self.badCalls = 0
+        self.sameCalls = {}
 
     def path(self):
         return self.loop.session.folder / CONVERSATIONS_FOLDER / f"{safeName(self.loop.name)}.json"
@@ -148,9 +151,19 @@ class Conversation:
             return
         loop, team = self.loop, getattr(self.loop, "team", None)
         text = f"{loop.name} wrote {BAD_CALLS} tool calls in a row that SwarmUP could not read. Its model may be too small for its task."
-        if team is not None and team.leader != loop.name:
-            team.communicate("SwarmUP", team.leader, text)
+        if team is not None and team.leader != loop.name and team.leader in team.members:
+            team.members[team.leader]["agent"].receive("SwarmUP", text)
         loop.notifyUser(f"[{loop.name}] {text}")
+
+    # A small model can call the same tool with the same arguments again and again. The third time, the call is not run: the model is told
+    # to use the result it already has, so the request goes on instead of turning in a circle.
+    def repeated(self, call):
+        key = (call["name"], json.dumps(call.get("arguments") or {}, sort_keys=True, ensure_ascii=False))
+        self.sameCalls[key] = self.sameCalls.get(key, 0) + 1
+        if self.sameCalls[key] <= SAME_CALLS:
+            return ""
+        return (f"you already made this same call {self.sameCalls[key] - 1} times in this request, and its result is above. Use it, do something "
+                "else, or give your answer now.")
 
     # One request: the model works with its tools for MAX_STEPS steps at most, then its answer is given back.
     def ask(self, prompt):
@@ -164,7 +177,7 @@ class Conversation:
                 self.system = describeAgent(loop, readOnly, self.own)
             news = self.news()
             self.messages.append({"role": "user", "content": f"{news}\n\n{prompt}" if news else prompt})
-            reply = {"text": ""}
+            reply, self.sameCalls = {"text": ""}, {}
             for step in range(MAX_STEPS):
                 self.checkStop()
                 self.shorten(adapter)
@@ -183,7 +196,7 @@ class Conversation:
                     break
                 loop.recordActivity(", ".join(describeCall(call["name"], call.get("arguments")) for call in calls))
                 for call in calls:
-                    problem = call.get("problem") or (prompts.CUT_CALL if reply.get("cut") else "")
+                    problem = call.get("problem") or (prompts.CUT_CALL if reply.get("cut") else "") or self.repeated(call)
                     self.noteBadCall(bool(call.get("problem")))
                     text, error = (f"Not done: {problem}", True) if problem else link.call(call["name"], call.get("arguments"), readOnly)
                     self.messages.append({"role": "tool", "id": call["id"], "name": call["name"], "content": text, "error": error})

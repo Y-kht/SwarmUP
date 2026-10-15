@@ -107,6 +107,26 @@ def describeSchemaError(name, error):
     return f"{where + ': ' if where else ''}{error.message}."
 
 
+# A small model often writes a number or a yes/no as text ("1", "true"). When the text is exactly a number or a boolean that the schema asks
+# for, it is read as such: nothing is guessed, and anything else still goes back to the model.
+def coerceArguments(schema, arguments):
+    if not isinstance(arguments, dict):
+        return arguments
+    fixed = dict(arguments)
+    for key, value in arguments.items():
+        kind = ((schema.get("properties") or {}).get(key) or {}).get("type")
+        if not isinstance(value, str):
+            continue
+        text = value.strip()
+        if kind == "integer" and re.fullmatch(r"-?\d+", text):
+            fixed[key] = int(text)
+        elif kind == "number" and re.fullmatch(r"-?\d+(\.\d+)?", text):
+            fixed[key] = float(text)
+        elif kind == "boolean" and text.lower() in ("true", "false"):
+            fixed[key] = text.lower() == "true"
+    return fixed
+
+
 # GTW-03: the arguments must match the schema of the tool, or the model is told what to change, and the server never sees the call.
 def checkArguments(name, schema, arguments):
     if not isinstance(arguments, dict):
@@ -253,6 +273,7 @@ class AgentLink:
         shown = {item["name"]: item for item in self.tools(readOnly)}
         if name not in shown:
             return self.finish(server, tool, arguments, "refused", started, f"Not done: there is no tool {name} for you now. Your tools: {', '.join(shown) or 'none'}.")
+        arguments = coerceArguments(shown[name]["parameters"], arguments)
         problem = checkArguments(name, shown[name]["parameters"], arguments)
         if problem:
             return self.finish(server, tool, arguments, "error", started, f"Not done: {problem}")

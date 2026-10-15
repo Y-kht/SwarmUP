@@ -1,10 +1,12 @@
 import json
+import os
 import re
 import sys
 import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from patching import everywhere
 from pathlib import Path
 
@@ -24,7 +26,7 @@ from leader_manager import LeaderManager
 from leader_parser import isNoChange, parseOutput
 from model_messages import readToolCalls
 from leader_utils import designSwarm
-from models_library import getModelInfo
+from models_library import API_KEYS, getModelInfo
 from swarm_harness import Swarm
 from test_live_swarm import GatedLoop
 from test_saved_swarms import waitUntil
@@ -140,6 +142,10 @@ class FolderTestCase(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
         usePrices(self)
+        # The keys of the computer that runs the tests must not change what the leader is told: the tests give the keys they need.
+        keys = mock.patch.dict(os.environ, {key["variable"]: "" for key in API_KEYS.values()})
+        keys.start()
+        self.addCleanup(keys.stop)
 
 
 class ParserTests(unittest.TestCase):
