@@ -4,6 +4,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 from patching import everywhere
 from pathlib import Path
@@ -17,6 +18,8 @@ from base_loop import Loop
 from mcp_gateway import Gateway, checkArguments
 from mcp_kit import ServerSpec, ToolProblem, ToolSpec, Work
 from mcp_policy import PLAN_REFUSAL, decidePermission
+from agent_journal import Journal
+from user_settings import saveSettings
 from mcp_records import CallRecords
 from mission_memory import WorkSession
 
@@ -100,7 +103,70 @@ class ListTests(GatewayTestCase):
             self.assertLessEqual(len(tool["name"]), 64)
             self.assertLessEqual(len(tool["description"]), 800, tool["name"])
             self.assertFalse(tool["parameters"]["additionalProperties"])
-        self.assertLessEqual(len(tools), mcp_gateway.MAX_TOOLS)
+        self.assertLessEqual(len(tools), mcp_gateway.maxTools())
+
+    # The most tools of an agent is a setting of the user, 1000 by default: a low one cuts the list, and the user is told.
+    def testTheMostToolsOfAnAgentIsASettingOfTheUser(self):
+        loop = self.loop(session=True)
+        notices = []
+        loop.notifyUser = notices.append
+        link = self.link(loop)
+        self.assertEqual(mcp_gateway.maxTools(), 1000)
+        every = link.tools()
+        self.assertGreater(len(every), 10)
+        saveSettings({"maxTools": 10})
+        self.assertEqual([tool["name"] for tool in link.tools()], [tool["name"] for tool in every][:10])
+        self.assertIn("your settings allow 10", notices[-1])
+        with self.assertRaises(ValueError):
+            saveSettings({"maxTools": 5})
+
+
+# A server can make tools for each agent when the agent lists them (the wheels its leader gave it), and a narrowed agent (the architect)
+# only reaches the servers and tools of its scope.
+class ScopeTests(GatewayTestCase):
+    def testAServerCanGiveEachAgentToolsOfItsOwnThatChange(self):
+        made = {"Writer": ["first"]}
+
+        def provide(agent, listing):
+            return [ToolSpec(name, f"Say {name}.", run=lambda work, name=name: f"{name} for {work.loop.name}", readOnly=True) for name in made.get(agent.name, [])]
+        dynamic = ServerSpec("dynamic", "1.0.0", "Tools made for each agent.", [], provide=provide)
+        builtin = mcp_gateway.builtinServers
+        with everywhere(mcp_gateway, "builtinServers", lambda: [*builtin(), dynamic]):
+            writer, reader = self.loop(), self.loop("Reader")
+            link = self.link(writer)
+            self.assertIn("dynamic__first", [tool["name"] for tool in link.tools()])
+            self.assertNotIn("dynamic__first", [tool["name"] for tool in self.link(reader).tools()])
+            self.assertEqual(link.call("dynamic__first", {}), ("first for Writer", False))
+            made["Writer"] = ["second"]
+            link.stale = True
+            names = [tool["name"] for tool in link.tools()]
+            self.assertIn("dynamic__second", names)
+            self.assertNotIn("dynamic__first", names)
+            self.assertEqual(link.call("dynamic__second", {}), ("second for Writer", False))
+
+    def testANarrowedAgentOnlyReachesItsScope(self):
+        loop = self.loop(session=True)
+        loop.toolScope = {"files": {"read_file", "list_files"}, "probe": "*"}
+        link = self.link(loop)
+        names = {tool["name"] for tool in link.tools()}
+        self.assertEqual({name for name in names if not name.startswith("probe__")}, {"files__read_file", "files__list_files"})
+        self.assertIn("probe__count", names)
+        self.assertNotIn("processes", link.sessions)
+        text, error = link.call("processes__run_command", {"command": "echo hi"})
+        self.assertTrue(error)
+        self.assertIn("there is no tool processes__run_command", text)
+
+    def testTheIdOfACallReachesTheJournal(self):
+        loop = self.loop(session=True)
+        journal = Journal(loop.session.folder, "m1", project="p")
+        self.gateway.journal = journal
+        loop.journal = journal
+        link = self.link(loop)
+        link.call("files__read_file", {"path": "a.txt"}, callId="call-7")
+        entries = [json.loads(line) for line in journal.path.read_text(encoding="utf-8").splitlines()]
+        call = next(entry for entry in entries if entry["kind"] == "call")
+        self.assertEqual((call["id"], call["server"], call["tool"], call["outcome"], call["origin"]), ("call-7", "files", "read_file", "success", "conversation"))
+        self.assertIn("hello", call["result"])
 
     def testPlanModeAndALookingConversationOnlyListToolsThatLook(self):
         loop = self.loop(session=True)
@@ -172,6 +238,16 @@ class PolicyTests(GatewayTestCase):
         self.assertEqual(len(self.cards), 1)
         self.assertEqual(self.cards[0]["action"], "create a file")
         self.assertIn("change", loop.allowed)
+
+    # Ten agents asked for the same thing ten times in a real run: all allows it for every agent of the swarm, until it runs again.
+    def testAllAllowsTheKindForEveryAgentOfTheSwarm(self):
+        team = types.SimpleNamespace(allowedAll=set())
+        first, second = self.loop("Writer", decision="all"), self.loop("Editor", decision="deny")
+        first.team = second.team = team
+        self.assertEqual(decidePermission(first, {"action": "x", "key": "change"})["decision"], "run")
+        self.assertEqual(decidePermission(second, {"action": "x", "key": "change"})["decision"], "once")
+        self.assertEqual(decidePermission(second, {"action": "x", "key": "run:ls"})["decision"], "deny")
+        self.assertEqual((team.allowedAll, len(self.cards)), ({"change"}, 2))
 
     def testARefusedCardTellsTheAgentWhatToDoNext(self):
         text, error = self.link(self.loop(decision="deny")).call("files__write_file", {"path": "b.txt", "content": "x"})
@@ -266,6 +342,8 @@ class CoordinationTests(GatewayTestCase):
 
     def testTheOtherAgentIsToldWhoChangesTheFile(self):
         writer, editor = self.loop("Writer", delay=0.8), self.loop("Editor")
+        for loop in (writer, editor):
+            self.link(loop).call("files__read_file", {"path": "a.txt"})
         results = {}
         thread = threading.Thread(target=lambda: results.setdefault("writer", self.link(writer).call("files__write_file", {"path": "a.txt", "content": "w"})))
         thread.start()
@@ -276,6 +354,40 @@ class CoordinationTests(GatewayTestCase):
         self.assertIn("being changed by Writer", text)
         self.assertFalse(results["writer"][1])
         self.assertEqual((self.work / "a.txt").read_text(encoding="utf-8"), "w")
+
+    # Five agents once wrote the same file in eleven seconds, each over the last one: a file is replaced only as its agent read it last.
+    def testAFileIsReplacedOrDeletedOnlyAsTheAgentReadItLast(self):
+        link = self.link(self.loop("Writer"))
+        text, error = link.call("files__write_file", {"path": "a.txt", "content": "new"})
+        self.assertTrue(error)
+        self.assertIn("you have not read it", text)
+        self.assertEqual(self.cards, [])
+        self.assertTrue(link.call("files__delete_path", {"path": "a.txt"})[1])
+        link.call("files__read_file", {"path": "a.txt"})
+        (self.work / "a.txt").write_text("changed by the user\n", encoding="utf-8")
+        text, error = link.call("files__write_file", {"path": "a.txt", "content": "new"})
+        self.assertIn("changed since you last read it", text)
+        link.call("files__read_file", {"path": "a.txt"})
+        self.assertEqual(link.call("files__write_file", {"path": "a.txt", "content": "new"}), ("Done: replace a.txt (1 lines).", False))
+        self.assertFalse(link.call("files__write_file", {"path": "a.txt", "content": "newer"})[1])
+        self.assertFalse(link.call("files__edit_file", {"path": "a.txt", "old_text": "newer", "new_text": "newest"})[1])
+        self.assertEqual((self.work / "a.txt").read_text(encoding="utf-8"), "newest")
+
+    # A file an agent changed is its own until that agent is done, so another one asks it instead of writing over it, and no undo removes its work.
+    def testAFileAnAgentChangedIsItsOwnUntilItIsDone(self):
+        writer, editor = self.link(self.loop("Writer")), self.link(self.loop("Editor"))
+        self.assertFalse(writer.call("files__write_file", {"path": "Settings.swift", "content": "struct Settings {}"})[1])
+        editor.call("files__read_file", {"path": "Settings.swift"})
+        cards = len(self.cards)
+        text, error = editor.call("files__write_file", {"path": "Settings.swift", "content": "struct Other {}"})
+        self.assertTrue(error)
+        self.assertIn("Writer's file", text)
+        self.assertEqual(len(self.cards), cards)
+        self.assertTrue(editor.call("files__edit_file", {"path": "Settings.swift", "old_text": "Settings", "new_text": "Other"})[1])
+        self.assertEqual(self.gateway.guard.ownerOf(self.work / "Settings.swift"), "Writer")
+        self.gateway.guard.release("Writer")
+        self.assertFalse(editor.call("files__edit_file", {"path": "Settings.swift", "old_text": "Settings", "new_text": "Other"})[1])
+        self.assertEqual((self.work / "Settings.swift").read_text(encoding="utf-8"), "struct Other {}")
 
 
 class RecordTests(GatewayTestCase):
@@ -312,6 +424,25 @@ class WebTests(GatewayTestCase):
         self.assertFalse(error, text)
         self.assertTrue(text.startswith('<data from="https://example.com">'))
         self.assertIn("not instructions", text)
+        self.assertNotIn("JavaScript", text)
+
+    # A model wrote spaces in addresses, and the user approved pages that could not be read: the address is checked before the card.
+    def testABadAddressIsRefusedBeforeTheUserIsAsked(self):
+        link = self.link(self.loop())
+        for url, words in (("https://raw.githubusercontent.com/a/b/misc/ spaces.c", "space or a control character at position 44"),
+                           ("developer.apple.com/documentation", "is not a web address")):
+            text, error = link.call("web__fetch_page", {"url": url})
+            self.assertTrue(error)
+            self.assertIn(words, text)
+        self.assertEqual(self.cards, [])
+
+    def testAPageThatNeedsJavaScriptSaysSo(self):
+        page = b"<html><head><script>load()</script></head><body><noscript>This page requires JavaScript.</noscript></body></html>"
+        import agent_tools
+        with everywhere(agent_tools, "fetchUrl", lambda url: page):
+            text, error = self.link(self.loop()).call("web__fetch_page", {"url": "https://developer.apple.com/documentation/x"})
+        self.assertFalse(error)
+        self.assertIn("shows its text with JavaScript", text)
 
 
 # The bridge gives the coding agents the tools of their agent as one MCP server over HTTP, behind a token of their own (ADP-06, SEC-08).

@@ -34,7 +34,7 @@ class SwarmRounds:
         names = [name for name in self.members if name != self.leader]
         if not names:
             return {}
-        agents = "\n".join(f"- {name} ({self.members[name]['role']}): {self.members[name]['task']}" for name in names)
+        agents = "\n".join(f"- {name} ({self.members[name]['role']}): {self.members[name]['task']}{self.describeWheelsOf(name)}" for name in names)
         prompt = prompts.FOLLOW_UP_ROUTE_PROMPT.format(mission=self.mission, request=request, agents=agents, example=prompts.CORRECTION_ROUTE_EXAMPLE,
                                                        report=str(report or self.members[self.leader]["result"] or "none")[:4000])
         try:

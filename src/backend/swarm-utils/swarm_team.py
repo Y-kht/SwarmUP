@@ -13,6 +13,8 @@ from model_adapters import adapterOf
 
 # The end of the text an agent writes now, kept for its card.
 LIVE_CHARS = 4000
+# The names an agent writes to send a message to every other agent.
+BROADCAST_NAMES = ("all", "everyone", "everybody", "team", "all agents")
 
 
 # The agents of a swarm (Swarm in swarm_harness.py): who joins and who leaves, their models and the VRAM they need, who waits for whom,
@@ -27,6 +29,9 @@ class SwarmTeam:
 
     def setStatus(self, name, status):
         self.anyMember(name)["status"] = status
+        # An agent that is done or failed changes no file anymore: the files it changed are free for the others (path_guard.py).
+        if status in ("done", "failed") and getattr(self, "gateway", None) is not None:
+            self.gateway.guard.release(name)
         if name in self.members:
             self.emit("status", name, status=status)
 
@@ -138,6 +143,8 @@ class SwarmTeam:
                 model.unload()
         except Exception:
             traceback.print_exc()
+        if self.gateway is not None:
+            self.gateway.guard.release(name)
         self.departed.pop(name, None)
         self.emit("retired", name)
 
@@ -238,6 +245,10 @@ class SwarmTeam:
     def getStatuses(self):
         return {name: member["status"] for name, member in self.members.items()}
 
+    # The states the tree shows: an agent whose draft waits for the user is ready, not working.
+    def getStates(self):
+        return {name: "ready" if member["review"] == "ready" else member["status"] for name, member in list(self.members.items())}
+
     def getStatus(self, name):
         return self.getMember(name)["status"]
 
@@ -289,11 +300,13 @@ class SwarmTeam:
             return self.leader
         return next((name for name in list(self.members) if name.lower() == written.lower()), None)
 
-    # An agent writes to another one (or to the leader), which reads it with its next step. It gives back what the agent is told.
+    # An agent writes to another one (or to the leader, or to all of them), which reads it with its next step. It gives back what the agent is told.
     def relay(self, sender, receiver, text):
         target, text = self.findName(receiver), str(text).strip()
         if not text:
             raise ValueError("The message is empty.")
+        if target is None and str(receiver).strip().lower() in BROADCAST_NAMES:
+            return self.broadcast(sender, text)
         if target is None:
             gone = any(item["name"].lower() == str(receiver).strip().lower() for item in self.removed)
             raise ValueError(f"{receiver} left the swarm." if gone else f"There is no agent called {receiver}. The agents: {', '.join(self.members)}.")
@@ -305,15 +318,30 @@ class SwarmTeam:
         self.logMessage(sender, target, text, direct=True)
         return f"Sent to {target}. It reads it with its next step."
 
+    # One message to every agent that can still read it (in a real run, an agent sent the same message nine times, once to each).
+    def broadcast(self, sender, text):
+        readers = [name for name, member in list(self.members.items()) if name != sender and member["status"] not in ("done", "failed")]
+        for name in readers:
+            self.members[name]["agent"].receive(sender, text)
+            self.logMessage(sender, name, text, direct=True)
+        finished = [name for name in self.members if name != sender and name not in readers]
+        return (f"Sent to {', '.join(readers)}. They read it with their next step." if readers else "Nobody can read it: every other agent has finished.") + \
+            (f" {', '.join(finished)} finished, so they cannot read it." if finished and readers else "")
+
     def describeTeamFor(self, name):
         lines = [f"You are {name}. The leader is {self.leader}: it works last, and receives the result of every agent."]
         for other, member in list(self.members.items()):
             waits = f" It waits for {', '.join(member['waitsFor'])}." if member["waitsFor"] and other != self.leader else ""
             ready = " Its result is ready (team__read_result)." if member["result"] is not None and other != name else ""
             lines.append(f"- {other}{' (leader)' if other == self.leader else ''}{' (you)' if other == name else ''}: the {member['role']}, {member['status']}. "
-                         f"Task: {member['task']}{waits}{ready}")
+                         f"Task: {member['task']}{waits}{ready}{self.describeWheelsOf(other)}")
         lines += [f"- {item['name']} left the swarm." for item in self.removed]
         return "\n".join(lines)
+
+    # The wheels an agent has, so the leader gives a part of the work that a wheel does to the agent that has it.
+    def describeWheelsOf(self, name):
+        wheels = getattr(self.members[name]["agent"], "wheels", None) if name in self.members else None
+        return f" Its wheels: {', '.join(wheels)}." if wheels else ""
 
     def resultOf(self, written):
         target = self.findName(written)

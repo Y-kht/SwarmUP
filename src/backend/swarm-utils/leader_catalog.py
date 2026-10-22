@@ -9,6 +9,7 @@ from gpu_check import checkVram, readGpus
 from harness_utils import USER_NAME, listRules
 from internet_cache import describeCached
 from leader_checks import LeaderChecks, canJoin, showValue
+from leader_wheels import describeWheelsFor, projectOfFolder
 from mission_costs import MissionCosts, formatDollars
 from model_support import ModelError, findMissingPackages, getApiKey
 from models_library import API_KEYS, MODELS_API, MODELS_LOCAL, RECOMMENDED_API, RECOMMENDED_LOCAL, getModelInfo, getVram
@@ -69,7 +70,7 @@ def describeTasks():
     lines.append("THE SPECIALISED TASKS, only for an agent that needs exactly what one of them does:")
     for key in SPECIALISED_TASKS:
         lines += describeTask(key, TASKS[key])
-    lines.append(f"Every task also has numberOfLoops (a whole number; default: {DEFAULT_LOOPS}): how many drafts the agent may write at most before it stops.")
+    lines.append(f"Every task also has numberOfLoops (a whole number; default: {DEFAULT_LOOPS}): how many drafts the agent may write on its own (improving each one after its checks) before the user sees one.")
     lines.append("The news outlets, by group: " + "; ".join(f"{group}: {', '.join(names)}" for group, names in NEWS_OUTLETS.items()) + ".")
     lines.append("The publishers: " + ", ".join(PAPER_PUBLISHERS) + ".")
     return "\n".join(lines)
@@ -216,7 +217,8 @@ class LeaderCatalog(LeaderChecks):
         taken = self.leaderModel["vram"] if self.leaderModel else 0.0
         return prompts.LEADER_BUILD_PROMPT.format(rules=self.rules(), mission=self.mission, folder=self.describeFolder(),
                                                   tasks=describeTasks(), models=self.describeModels(taken, self.moneyLeft(self.leaderTeam())),
-                                                  costs=self.describeCosts(self.leaderTeam()), most=self.maxAgents)
+                                                  costs=self.describeCosts(self.leaderTeam()), most=self.maxAgents,
+                                                  wheels=describeWheelsFor(projectOfFolder(self.folder), self.mission))
 
     def describePossible(self, swarm):
         leader, members = swarm.getLeader(), list(swarm.members.items())
@@ -233,4 +235,4 @@ class LeaderCatalog(LeaderChecks):
         return prompts.LEADER_SUPERVISE_PROMPT.format(rules=self.rules(), mission=self.mission, folder=self.describeFolder(), progress=swarm.describeProgress(),
                                                       events="\n".join(f"- {event}" for event in events), possible=self.describePossible(swarm), tasks=describeTasks(),
                                                       models=self.describeModels(swarm.getNeededVram(), self.moneyLeft(team)), decisions=decisions,
-                                                      costs=self.describeCosts(team))
+                                                      costs=self.describeCosts(team), wheels=describeWheelsFor(swarm.project or projectOfFolder(self.folder), self.mission))

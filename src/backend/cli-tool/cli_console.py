@@ -58,6 +58,24 @@ class Console:
             self.pending = None
             return pending["answer"]
 
+    # A question that is withdrawn ("" is the answer) once stale() says it is not needed anymore.
+    def askUntil(self, question, stale, window=None):
+        if not (self.pumping and self.interactive):
+            return self.ask(question, window)
+        with self.questions:
+            if self.closed:
+                return ""
+            pending = {"text": question, "event": threading.Event(), "answer": ""}
+            with self.output:
+                self.write(question)
+                self.pending = pending
+            while not pending["event"].wait(0.5):
+                if stale():
+                    self.write("(This question is withdrawn: you already decided everything it asked about.)")
+                    break
+            self.pending = None
+            return pending["answer"]
+
     def askSecret(self, question, window=None):
         if self.pumping:
             self.say("(A secret cannot be typed while the swarm runs in this test. Give it in the setup. This question is skipped.)")

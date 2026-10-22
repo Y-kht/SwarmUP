@@ -42,6 +42,7 @@ function viewRun() {
         !run.running && run.state !== 'reopened' ? resultsCard(run) : null,
         joiningCard(),
         costCard(),
+        architectCard(run),
         h('div', { class: 'card' }, h('div', { class: 'card-head' }, icon('activity'), h('h3', { class: 'grow' }, 'The swarm'), graphLegend()),
           h('div', { class: 'card-body', style: { padding: '8px 12px' } }, flowGraph(nodes, run.stages, run.leader, { mode: run.mode, selected: selectedName, onSelect: name => { ui.selected = name; render(); } }))),
         selected ? agentDetail(run, selected) : null),
@@ -311,7 +312,7 @@ function permissionCard(question, run, inModal) {
     h('div', { class: 'small muted' }, icon('folder', 'sm'), ` In ${request.folder || 'its folder'}`, request.reason ? h('span', {}, ` · ${request.reason}`) : null),
     inModal && question.context.length ? h('div', { class: 'q-context' }, question.context.map(text => h('div', {}, pretty(text)))) : null,
     h('div', { class: 'row wrap' }, question.replies.map(reply => button(reply.label, { kind: reply.style === 'primary' ? 'primary' : reply.style === 'danger' ? 'danger-ghost' : 'ghost',
-      size: 'sm', iconName: reply.value === 'once' ? 'check' : reply.value === 'run' ? 'checkCircle' : 'x', busy: ui.busy[`answer-${question.id}`], onClick: () => send(reply.value) }))),
+      size: 'sm', iconName: reply.value === 'once' ? 'check' : ['run', 'all', 'always'].includes(reply.value) ? 'checkCircle' : 'x', busy: ui.busy[`answer-${question.id}`], onClick: () => send(reply.value) }))),
     h('input', { class: 'input', 'data-key': `q-${question.id}`, value: why, placeholder: 'If you deny it, you can tell it why or what to do instead (optional)',
       onInput: event => { ui.composer[question.id] = event.target.value; }, onKeydown: event => { if (event.key === 'Enter' && why.trim()) send('deny'); } }));
 }
@@ -350,6 +351,7 @@ function proposedAgent(agent, number = null) {
       h('div', { class: 'small' }, agent.description),
       h('div', { class: 'small muted' }, icon(agent.waitsFor.length ? 'clock' : 'zap', 'sm'), agent.waitsFor.length ? ` Waits for ${agent.waitsFor.join(', ')} and receives their results` : ' Starts right away'),
       agent.why ? h('div', { class: 'small why' }, icon('crown', 'sm'), h('span', {}, agent.why)) : null,
+      agent.wheels?.length ? h('div', { class: 'small muted' }, icon('zap', 'sm'), ` Its wheels: ${agent.wheels.join(', ')}`) : null,
       agent.settings.length ? h('dl', { class: 'kv small' }, agent.settings.map(item => [h('dt', {}, item.label), h('dd', {}, item.value)])) : null,
       agent.needs.length ? h('div', { class: 'small needs' }, icon('key', 'sm'), h('span', {}, `You will be asked for: ${agent.needs.join('; ')}.`)) : null));
 }

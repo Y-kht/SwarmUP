@@ -95,6 +95,46 @@ class HubTests(unittest.TestCase):
             self.assertEqual(hub.route("Writer", typed), command, typed)
         self.assertEqual(hub.route(SWARM_WINDOW, "approve Writer"), "approve Writer")
 
+    # In a real run "correct AppShell ..." was typed a moment after a question appeared, and became its answer: a command for an agent never is.
+    def testACommandForAnAgentRunsEvenWhileAQuestionWaits(self):
+        hub = makeHub()
+        hub.swarm = makeSwarm()
+        hub.commands = lambda window, line: hub.ran.append((window, line))
+        result, thread = answerLater(hub, lambda: hub.waitForAnswer("Leader", "Do you approve?"))
+        for typed in ("correct Writer use the new file", "approve writer", "msg Writer hello", "cost"):
+            hub.input(SWARM_WINDOW, typed)
+        waitUntil(lambda: len(hub.ran) == 4, "the commands")
+        self.assertEqual([line for window, line in hub.ran], ["correct Writer use the new file", "approve writer", "msg Writer hello", "cost"])
+        self.assertTrue(thread.is_alive())
+        hub.input(SWARM_WINDOW, "correct the summary please")
+        thread.join(5)
+        self.assertEqual(result["answer"], "correct the summary please")
+
+    # A script or an AI agent names the question it answers: the line is refused when another question waits by then.
+    def testALineForAQuestionThatIsNotWaitingAnymoreIsRefused(self):
+        hub = makeHub()
+        result, thread = answerLater(hub, lambda: hub.waitForAnswer(SWARM_WINDOW, "Your choice?"))
+        number = hub.question["id"]
+        problem = hub.input(SWARM_WINDOW, "2", questionId=number + 1)
+        self.assertIn(f"Question {number + 1} is not waiting anymore", problem)
+        self.assertIn(f"question {number} in the window swarm: Your choice?", problem)
+        self.assertTrue(thread.is_alive())
+        self.assertIsNone(hub.input(SWARM_WINDOW, "approve Writer", questionId=number))
+        thread.join(5)
+        self.assertEqual(result["answer"], "approve Writer")
+        self.assertIn("no question", hub.input(SWARM_WINDOW, "2", questionId=number))
+
+    def testAQuestionIsWithdrawnWhenItIsNotNeededAnymore(self):
+        hub = makeHub()
+        needed = threading.Event()
+        result, thread = answerLater(hub, lambda: hub.waitForAnswer("Leader", "Do you approve?", stale=needed.is_set))
+        needed.set()
+        thread.join(5)
+        self.assertEqual(result["answer"], "")
+        self.assertIsNone(hub.question)
+        self.assertIn("withdrawn", list(hub.windows["Leader"].lines)[-1])
+        self.assertIn("[Leader] (This question is withdrawn", list(hub.windows[SWARM_WINDOW].lines)[-1])
+
     def testCommandsWaitForTheRunAndKillEndsTheSession(self):
         hub = makeHub()
         hub.input(SWARM_WINDOW, "cost")
@@ -125,6 +165,21 @@ class HubTests(unittest.TestCase):
         swarm.removeAgent("Writer", "not needed")
         hub.follow(swarm, [])
         self.assertTrue(hub.windows["Writer"].left)
+
+    # Two agents once wrote to the leader that a file had no owner, as one cut line among hundreds: a message to the leader is shown whole and marked.
+    # The tree shows an agent whose draft waits as ready, also in the line of the agent that waits for it.
+    def testAMessageToTheLeaderIsShownWholeAndAReadyAgentIsReadyInTheTree(self):
+        hub, swarm = makeHub(), makeSwarm()
+        swarm.addAgent("Checker", Loop(FakeAgent()), "checker", "check", waitsFor=["Writer"])
+        swarm.members["Writer"].update(status="working", review="ready", draft="Bees.")
+        text = "Config/Settings.swift has no owner. " * 20
+        hub.follow(swarm, [{"kind": "message", "agent": "Leader", "sender": "Writer", "receiver": "Leader", "message": text, "direct": True, "toLeader": True,
+                            "time": "10:00:01"}])
+        lines = list(hub.windows[SWARM_WINDOW].lines)
+        self.assertEqual(lines[0], "[10:00:01] ! Writer writes to the leader Leader:")
+        self.assertEqual(lines[1], "    " + text.strip())
+        self.assertEqual(list(hub.windows["Leader"].lines), lines)
+        self.assertIn("waits for: Writer (ready)", hub.windows[SWARM_WINDOW].panel)
 
     def testTheScrollbackIsBounded(self):
         with mock.patch.object(cli_hub, "SCROLLBACK", 3):
@@ -178,6 +233,14 @@ class SocketTests(unittest.TestCase):
     def testAScriptTypesALineWithoutAttaching(self):
         result, thread = answerLater(self.hub, lambda: self.hub.waitForAnswer(SWARM_WINDOW, "Your choice?"))
         self.assertEqual(request(self.info, {"type": "input", "window": SWARM_WINDOW, "text": "3"}), {"type": "ok"})
+        thread.join(5)
+        self.assertEqual(result["answer"], "3")
+
+    def testAScriptLineForAnotherQuestionIsRefused(self):
+        result, thread = answerLater(self.hub, lambda: self.hub.waitForAnswer(SWARM_WINDOW, "Your choice?"))
+        reply = request(self.info, {"type": "input", "window": SWARM_WINDOW, "text": "3", "question": 999})
+        self.assertEqual(reply["type"], "error")
+        self.assertEqual(request(self.info, {"type": "input", "window": SWARM_WINDOW, "text": "3", "question": self.hub.question["id"]}), {"type": "ok"})
         thread.join(5)
         self.assertEqual(result["answer"], "3")
 
@@ -296,6 +359,19 @@ class SessionTests(unittest.TestCase):
             findSession(None, [])
         self.assertEqual(listSessions(), [])
         self.assertFalse(sessionPath("s1").exists())
+
+    # Two threads of a daemon once wrote the file of the session together: it held two objects, and the session looked gone while it ran.
+    def testThreadsThatWriteTheSessionTogetherLeaveAFileThatCanBeRead(self):
+        threads = [threading.Thread(target=lambda number=number: [writeSession({"id": "s1", "pid": os.getpid(), "port": 9, "token": "t", "n": number})
+                                                                  for _ in range(50)]) for number in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(cli_sessions.readSession(sessionPath("s1"))["token"], "t")
+        self.assertEqual(list(sessionPath("s1").parent.glob("*.tmp")), [])
+        sessionPath("s1").write_text(json.dumps({"id": "s1", "port": 9, "token": "t"}) + '{"id": "s1"}', encoding="utf-8")
+        self.assertEqual(cli_sessions.readSession(sessionPath("s1"))["port"], 9)
 
 
 # A real session: a daemon started from this test, which goes on after the command that started it ended, answers a terminal, and is killed.

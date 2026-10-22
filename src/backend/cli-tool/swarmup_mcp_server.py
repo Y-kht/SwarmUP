@@ -86,11 +86,15 @@ def read_window(session: str, window: str = SWARM_WINDOW, lines: int = 120) -> s
     return text if text is not None else f"Session {info['id']} has no window {window}."
 
 
-@server.tool(description="Type one line in a window of a session, as a person does: an answer to its question, a decision on a card (yes, always, no), "
-             "a correction, a follow-up, or a command. As the leader, a line that starts with / calls one of your tools.", annotations=ACTS)
-def send_line(session: str, text: str, window: str = SWARM_WINDOW) -> str:
+@server.tool(description="Type one line in a window of a session, as a person does: an answer to its question, a decision on a card (yes, always, all, "
+             "no), a correction, a follow-up, or a command. As the leader, a line that starts with / calls one of your tools. To answer a question, give "
+             "its id (session_status shows it): the line is then refused if another question waits by then, so it never answers the wrong one.",
+             annotations=ACTS)
+def send_line(session: str, text: str, window: str = SWARM_WINDOW, question: int | None = None) -> str:
     info = sessionOf(session)
-    request(info, {"type": "input", "window": window, "text": text})
+    reply = request(info, {"type": "input", "window": window, "text": text, "question": question})
+    if reply.get("type") == "error":
+        raise ValueError(reply["message"])
     return f"Typed in {window} of session {info['id']}. Read the window again to see what follows."
 
 

@@ -11,7 +11,7 @@ from interface_views import FormError, USER_ERRORS, catalog
 
 # The pages of the window: src/user-interface.
 INTERFACE_FOLDER = Path(__file__).resolve().parents[2] / "user-interface"
-ASSETS = {"style.css": "text/css; charset=utf-8", "views.css": "text/css; charset=utf-8", "icons.js": "text/javascript; charset=utf-8",
+ASSETS = {"style.css": "text/css; charset=utf-8", "views.css": "text/css; charset=utf-8", "icons.js": "text/javascript; charset=utf-8", "architect_view.js": "text/javascript; charset=utf-8",
           "page_tools.js": "text/javascript; charset=utf-8",
           "page_frame.js": "text/javascript; charset=utf-8",
           "step_agents.js": "text/javascript; charset=utf-8",

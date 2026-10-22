@@ -8,7 +8,9 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
+import uuid
 from pathlib import Path
 
 import harness_utils
@@ -21,6 +23,8 @@ REQUEST_SECONDS = 3
 LOG_TAIL = 2000
 ENTRY = Path(__file__).resolve().parent / "swarmup_cli.py"
 SESSION_ID = re.compile(r"s(\d+)")
+# The threads of a daemon write its file one at a time.
+WRITE_LOCK = threading.Lock()
 
 
 def sessionsFolder():
@@ -36,14 +40,20 @@ def logPath(sessionId):
 
 
 # The file is written under another name and renamed, so it is never read half written. It holds the token, so only the user can read it.
+# Each write has a temporary file of its own: two threads that wrote the same one at once left a file that could not be read, and the session
+# looked gone while it still ran.
 def writeSession(info):
     sessionsFolder().mkdir(parents=True, exist_ok=True)
     path = sessionPath(info["id"])
-    temporary = path.with_suffix(".tmp")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as file:
-        json.dump(info, file, ensure_ascii=False)
-    os.replace(temporary, path)
+    temporary = path.with_name(f"{path.stem}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+    with WRITE_LOCK:
+        try:
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as file:
+                json.dump(info, file, ensure_ascii=False)
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def removeSession(sessionId):
@@ -52,7 +62,8 @@ def removeSession(sessionId):
 
 def readSession(path):
     try:
-        info = json.loads(Path(path).read_text(encoding="utf-8"))
+        text = Path(path).read_text(encoding="utf-8")
+        info, _ = json.JSONDecoder().raw_decode(text.strip())
     except (OSError, ValueError):
         return None
     return info if isinstance(info, dict) and info.get("port") and info.get("token") else None

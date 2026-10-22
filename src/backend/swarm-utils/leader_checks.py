@@ -7,6 +7,7 @@ from pathlib import Path
 
 from gpu_check import checkVram
 from leader_parser import ACTION_KEYS, letters, normalizeKeys, squash
+from leader_wheels import checkWheels, projectOfFolder
 from mission_costs import formatDollars
 from models_library import API_KEYS, DEFAULT_CLI_MODEL, MODELS_API, MODELS_CLI, MODELS_LOCAL, getModelInfo, isGated
 from sources_library import ALL_NEWS_OUTLETS, PAPER_PUBLISHERS
@@ -116,7 +117,7 @@ def describeAgent(agent):
     return {"name": agent["name"], "task": agent["task"], "label": TASKS[agent["task"]]["label"], "role": TASKS[agent["task"]]["role"], "model": modelLabel(info),
             "price": agent.get("price", ""),
             "modelKind": "cli" if info.get("cli") else "local" if info["local"] else "api", "waitsFor": agent["waitsFor"], "settings": settings, "why": agent["why"],
-            "needs": needs, "description": agent["description"]}
+            "needs": needs, "description": agent["description"], "wheels": list(agent.get("wheels") or [])}
 
 
 def describeAgentText(shown, number=None):
@@ -124,6 +125,7 @@ def describeAgentText(shown, number=None):
     price = f", {shown['price']}" if shown.get("price") else ""
     lines = [f"{f'{number}. ' if number else ''}{shown['name']}: {shown['label']}, with {shown['model']}{price}. {waits}", f"   What it does: {shown['description']}"]
     lines += [f"   Why: {shown['why']}"] if shown["why"] else []
+    lines += [f"   Its wheels: {', '.join(shown['wheels'])}"] if shown.get("wheels") else []
     lines += [f"   {item['label']}: {item['value']}" for item in shown["settings"]]
     lines += [f"   You will be asked for: {'; '.join(shown['needs'])}"] if shown["needs"] else []
     return "\n".join(lines)
@@ -335,9 +337,11 @@ class LeaderChecks:
             description = self.describe(task, answers, missing)
         else:
             values = {}
+        wheels, problems = checkWheels(keys.get("wheels"), projectOfFolder(self.folder))
+        errors += problems
         return {"name": name, "task": task, "model": info, "waitsFor": waits, "values": values, "answers": answers, "needs": missing, "key": needs.get("key"),
                 "token": needs.get("token"), "why": str(keys.get("why") or "").strip(), "description": description, "errors": errors,
-                "price": self.describePrice(info) if info else ""}
+                "price": self.describePrice(info) if info else "", "wheels": wheels}
 
     # The answers of the task from the values. The settings the leader did not give, and that are needed (a password, the address of the user),
     # are what the user must give: the fields of missing. A value the leader gave that is wrong is an error for the leader.

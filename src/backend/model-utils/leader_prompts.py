@@ -48,6 +48,9 @@ removed or changed an agent: only the user can do that, by approving the proposa
 4. leader__change_model: the model of an agent that has not started yet.
 {{"name": "Writer", "model": "claude-opus-5-5", "why": "The article needs deeper reasoning than planned."}}
 
+5. leader__give_wheels: the wheels of an agent, while the swarm works (find them with leader__find_wheels).
+{{"agent": "Coder", "wheels": ["run_unit_tests"], "why": "Coder runs the tests of this project at every change."}}
+
 One call for each change. The names of the models above are only examples: use the names of the list of models below.
 
 THE FIELDS
@@ -60,6 +63,9 @@ THE FIELDS
   API key, and never invent an email address, a phone number or a file: leave such a setting out, and SwarmUP asks the user for it. Write the paths of files
   relative to the folder of the mission.
 - why: one or two sentences for the user that say how this change helps the mission.
+- wheels: the wheels its task needs, by name, from the wheels of the project (listed below), or [] for none. A wheel is a script the architect of
+  SwarmUP wrote from what agents of this project did again and again: it does in one call steps that took them many, and much reasoning. An agent
+  gets only the wheels you give it, as tools: give each agent the few wheels its own task needs, never all of them.
 
 RULES
 - Use only the tasks, the models and the settings of the lists. Never invent one.
@@ -86,6 +92,9 @@ THE TASKS AN AGENT CAN HAVE
 
 THE MODELS YOU CAN CHOOSE
 {models}
+
+THE WHEELS OF THIS PROJECT
+{wheels}
 
 THE COST OF THE MISSION
 {costs}
@@ -131,6 +140,9 @@ THE TASKS AN AGENT CAN HAVE
 THE MODELS YOU CAN CHOOSE NOW
 {models}
 
+THE WHEELS OF THIS PROJECT
+{wheels}
+
 THE COST OF THE MISSION
 {costs}
 
@@ -143,7 +155,8 @@ Decide if the swarm needs a change now. Propose one only when it clearly helps t
 - an agent is not needed anymore, or does the same work as another: remove it;
 - an agent finished, nobody waits for it anymore, and its local model holds memory of the GPUs that is needed: remove it;
 - an agent that has not started has a model that does not fit its task: change its model;
-- the budget runs low: remove the agents that are not needed, or give an agent that has not started a cheaper model.
+- the budget runs low: remove the agents that are not needed, or give an agent that has not started a cheaper model;
+- a wheel fits the work an agent still has to do (the architect may have just written it): give it to that agent.
 Most of the time no change is needed. Then reply exactly: NO CHANGE
 Otherwise call one tool for each change. The result of each call tells you what the user decided."""
 

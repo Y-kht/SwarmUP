@@ -175,11 +175,16 @@ class ReviewLoopTests(LoopTestCase):
         self.assertEqual(loop.reviewLoop("task", lambda draft: "a problem"), "still bad")
         self.assertIn("Warning, the automatic checks found a problem: a problem", loop.said)
 
-    def testStopsAfterTheMaximumNumberOfDrafts(self):
-        loop = self.makeLoop(["1", "2", "3"], ["change", "change", "change"], numberOfLoops=3)
-        self.assertIsNone(loop.reviewLoop("task", lambda draft: ""))
-        self.assertEqual(len(loop.agent.prompts), 3)
-        self.assertIn("Stopped after 3 drafts.", loop.said)
+    # In a real run an agent that was corrected five times failed, and its good file was put back: only the drafts of the checks are counted.
+    def testTheCorrectionsOfTheUserNeverUseUpTheDrafts(self):
+        loop = self.makeLoop(["1", "2", "3", "4"], ["change", "change", "change", "yes"], numberOfLoops=2)
+        self.assertEqual(loop.reviewLoop("task", lambda draft: ""), "4")
+        self.assertEqual(len(loop.agent.prompts), 4)
+
+    def testTheChecksImproveADraftAtMostNumberOfLoopsTimesBeforeTheUserSeesIt(self):
+        loop = self.makeLoop(["1", "2", "3", "4", "5"], ["change", "yes"], numberOfLoops=2)
+        self.assertEqual(loop.reviewLoop("task", lambda draft: "too short"), "4")
+        self.assertEqual(len(loop.agent.prompts), 4)
 
     def testRulesAndMessagesFromOtherAgentsAreInThePrompt(self):
         loop = self.makeLoop(["draft"], ["yes"], rulesFile="EMAIL_RULES.md")

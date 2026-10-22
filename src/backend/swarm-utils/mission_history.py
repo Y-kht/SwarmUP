@@ -5,6 +5,7 @@
 # run in the background are stopped. What the agents saved in the folders of the user (swarmup-results) is the user's, and stays.
 import json
 import os
+import traceback
 from datetime import datetime
 
 from background_processes import stopProcesses
@@ -67,6 +68,11 @@ def deleteMission(missionId):
     stopProcesses(missionId, temp=tempFolder(missionId))
     clearSwarmState(missionId)
     clearSession(missionId)
+    try:
+        from pattern_miner import forgetMission
+        forgetMission(missionId)
+    except Exception:
+        traceback.print_exc()
 
 
 def describeMission(mission):

@@ -5,7 +5,7 @@ from mcp_kit import ResourceSpec, ServerSpec, ToolSpec
 from mcp_records import describeRecords
 
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 
 def isLeader(agent):
@@ -28,8 +28,9 @@ def teamResources(agent):
 
 
 TOOLS = [
-    ToolSpec("send_message", "Send a message to another agent of your swarm, or to your leader (write leader as to). It reads it with its next step. "
-             "Use it to give them what they need from you, or to ask them something.", {"to": {"type": "string"}, "text": {"type": "string"}}, ["to", "text"],
+    ToolSpec("send_message", "Send a message to another agent of your swarm, to your leader (write leader as to), or to every agent at once (write all "
+             "as to). It reads it with its next step. Use it to give them what they need from you, or to ask them something. When you change what you "
+             "told them, send the new version: the older one is marked as replaced.", {"to": {"type": "string"}, "text": {"type": "string"}}, ["to", "text"],
              run=lambda work, to, text: work.loop.team.relay(work.loop.name, to, text), readOnly=True, when=hasTeam),
     ToolSpec("read_team", "See the agents of your swarm: their roles, their tasks, where they stand, and whose result is ready.",
              run=lambda work: work.loop.team.describeTeamFor(work.loop.name), readOnly=True, idempotent=True, when=hasTeam),

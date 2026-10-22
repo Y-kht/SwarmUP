@@ -217,7 +217,8 @@ For this work you can look at the files and talk with your swarm, but change not
 
 
 CONVERSATION_REVISION_PROMPT = """Write your answer again, with this change: {feedback}
-Give the whole new answer, in the same format as before."""
+Give the whole new answer, in the same format as before. It replaces your previous answer completely: it must hold your whole result for your
+task (everything you did and made, not only this change), even when nothing else changes. Do not reply to the message itself."""
 
 
 OLD_RESULT = "[This old result was taken out to keep the conversation short. Ask again if you need it.]"
@@ -247,6 +248,12 @@ Reply with the plan only."""
 
 APPROVED_PLAN_PROMPT = """Your plan, approved by the user. Follow it, unless the messages above change it:
 {plan}"""
+
+
+# The wheels the leader gave an agent (wheel_store.py). Their descriptions come with the tools themselves.
+WHEELS_AGENT_PROMPT = """YOUR WHEELS. Your leader gave you wheels for this task: {wheels}. A wheel is a script the architect of SwarmUP wrote from the earlier
+work of agents: it does in one call the steps agents did by hand before, and its description says what it does. When a wheel fits a step, use
+it instead of doing the step by hand. If a wheel fails or does not fit, do the step by hand and say so in your answer, so the architect fixes it."""
 
 
 PLAN_SUMMARY_PROMPT = """You are the leader of a swarm of agents working on this mission: {mission}

@@ -375,5 +375,21 @@ class CodexTests(FolderTestCase):
         self.assertFalse((self.folder / "made.txt").exists())
 
 
+
+# The commands Codex runs itself never reach the gateway: they go to the journal of the mission, so the architect learns from them too.
+class CodexJournalTests(FolderTestCase):
+    def testTheCommandsCodexRunsItselfAreWrittenInTheJournal(self):
+        model = CodexModel(DEFAULT_CLI_MODEL)
+        loop = ScriptedLoop(self.folder)
+        notes = []
+        loop.note = lambda kind, **fields: notes.append((kind, fields))
+        model.attach(loop)
+        model.turn = {"thread": "t1", "done": threading.Event(), "messages": [], "files": {}, "usage": None, "result": None}
+        model.notice("item/completed", {"threadId": "t1", "item": {"type": "commandExecution", "command": "bash -lc 'make test'", "exitCode": 2,
+                                                                   "aggregatedOutput": "make: *** [test] Error 2", "durationMs": 1500}})
+        model.notice("item/completed", {"threadId": "other", "item": {"type": "commandExecution", "command": "ls", "exitCode": 0}})
+        self.assertEqual(notes, [("cmd", {"command": "make test", "exit": 2, "output": "make: *** [test] Error 2", "seconds": 1.5})])
+
+
 if __name__ == "__main__":
     unittest.main()

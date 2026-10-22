@@ -154,7 +154,8 @@ function helpModal() {
 // The settings of the user, kept on this computer (agent-files/settings.json) for every mission.
 function settingsModal(modal) {
   const save = async () => {
-    const data = await act('saveSettings', { maxAgents: modal.maxAgents }, { busy: 'saveSettings', form: modal });
+    const data = await act('saveSettings', { maxAgents: modal.maxAgents, maxTools: modal.maxTools, architectShare: modal.architectShare, architectDollars: modal.architectDollars },
+      { busy: 'saveSettings', form: modal });
     if (data) { closeModal(); toast('Your settings are saved.', 'success'); } else render();
   };
   return modalFrame({ size: 'wide', iconEl: h('span', { class: 'task-icon lg', style: { '--task': '#5B4CF0', '--task-soft': '#5B4CF026' } }, icon('settings', 'lg')), title: 'Settings',
@@ -165,6 +166,7 @@ function settingsModal(modal) {
         value: modal.maxAgents, onInput: event => { modal.maxAgents = event.target.value; }, onKeydown: event => { if (event.key === 'Enter') save(); } }),
       modal.errors.maxAgents ? h('div', { class: 'field-error' }, icon('alert'), modal.errors.maxAgents) :
         h('div', { class: 'field-help' }, icon('info'), `When the leader builds the swarm or adds agents while it runs, it never goes beyond this. The default is 10, and it can be 1 to ${store.state.maxAgentsLimit}. You can always add agents yourself.`)),
+      ...architectSettings(modal),
       mcpSection(modal)),
     foot: [h('div', { class: 'spacer' }), button('Cancel', { kind: 'ghost', onClick: closeModal }), button('Save', { kind: 'primary', iconName: 'check', busy: ui.busy.saveSettings, onClick: save })] });
 }

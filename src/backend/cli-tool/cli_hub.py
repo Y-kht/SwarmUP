@@ -4,7 +4,8 @@
 # what it says, its messages, its drafts and its result). The hub keeps the windows, routes what the user types, and serves the terminals
 # (cli_screen.py) on a socket of this computer only (127.0.0.1), which needs the token of the session.
 # Messages are JSON, one per line. A terminal first sends {"token", "type"}: attach (then input, kill or detach), status, capture, input (one line
-# typed in a window, without attaching, for scripts) or kill.
+# typed in a window, without attaching, for scripts: with "question", the id of the question it answers, it is refused if that question is
+# not the one that waits) or kill.
 # The hub sends hello (everything a terminal shows), lines, panel, windows, question, state and bye.
 import hmac
 import json
@@ -31,6 +32,10 @@ FLUSH_SECONDS = 0.5
 AGENT_WORDS = ("approve", "reject", "start")
 AGENT_TEXT_WORDS = ("correct", "remove", "msg")
 SWARM_WORDS = ("help", "?", "tree", "log", "cost", "add", "stop", "kill", "quit")
+# The commands that are never an answer to a question: while a question waits they still run (a real run lost a correction this way).
+ALWAYS_COMMANDS = ("cost", "add", "stop")
+# How often a question that can become useless checks if it still is needed.
+STALE_SECONDS = 0.5
 AGENT_EVENTS = ("activity", "status", "review", "scheduled", "model", "connectionLost", "joined", "removed", "call")
 # The end of the text an agent writes now, shown on the panel of its window while it writes.
 LIVE_SHOWN = 300
@@ -127,7 +132,8 @@ class Hub:
 
     # Only one question waits at a time (the console asks them one after the other). It is shown in its window and in window 0, and it is
     # answered from either of them.
-    def waitForAnswer(self, name, text, secret=False):
+    # stale() says when the question is not needed anymore (the user already decided everything it asks about): it is then withdrawn, with "".
+    def waitForAnswer(self, name, text, secret=False, stale=None):
         with self.lock:
             window = self.window(name)
             self.questionNumber += 1
@@ -138,11 +144,22 @@ class Hub:
                 self.append(SWARM_WINDOW, [f"? [{window.name}] {text}"])
             self.broadcast(self.describeQuestion())
         self.changed()
-        question["event"].wait()
+        withdrawn = False
+        while not question["event"].wait(STALE_SECONDS if stale else None):
+            if stale():
+                withdrawn = True
+                break
         with self.lock:
             if self.question is question:
                 self.question = None
-            self.append(window.name, [f"> {'*' * len(question['answer']) if secret else question['answer']}"])
+            if withdrawn:
+                question["answer"] = ""
+                note = "(This question is withdrawn: you already decided everything it asked about.)"
+                self.append(window.name, [note])
+                if window.name != SWARM_WINDOW:
+                    self.append(SWARM_WINDOW, [f"[{window.name}] {note}"])
+            else:
+                self.append(window.name, [f"> {'*' * len(question['answer']) if secret else question['answer']}"])
             self.broadcast(self.describeQuestion())
         self.changed()
         return question["answer"]
@@ -160,7 +177,7 @@ class Hub:
         if text.strip().lower() in META_WORDS:
             return text.strip()
         if name == SWARM_WINDOW or name not in self.windows or (self.question and self.question["window"] == name):
-            return None if self.question else text
+            return text if not self.question or self.isCommand(word, rest, text) else None
         if word in AGENT_WORDS:
             return f"{word} {name}"
         if word in ("show", ""):
@@ -171,17 +188,35 @@ class Hub:
             return text.strip()
         return f"msg {name} {text.strip()}"
 
-    def input(self, name, text):
+    # A command for an agent ("correct Writer shorter", "approve Writer") or for the swarm (cost, add, stop) is never an answer: it runs.
+    def isCommand(self, word, rest, text):
+        if text.strip().lower() in ALWAYS_COMMANDS:
+            return True
+        agents = self.swarm.getAgents() if self.swarm is not None else []
+        target = rest.split(maxsplit=1)[0].lower() if rest.strip() else ""
+        return word in AGENT_WORDS + AGENT_TEXT_WORDS and any(agent.lower() == target for agent in agents)
+
+    # What the user typed. questionId is the id of the question it answers (for scripts and AI agents): the line answers that question, or nothing.
+    # It gives a message for the user when the line was refused, None otherwise.
+    def input(self, name, text, questionId=None):
         text = str(text)
         with self.lock:
             name = name if name in self.windows else SWARM_WINDOW
-            command, question = self.route(name, text), self.question
+            question = self.question
+            if questionId is not None:
+                if question is None or str(question["id"]) != str(questionId):
+                    now = f"question {question['id']} in the window {question['window']}: {question['text']}" if question else "no question"
+                    return f"Question {questionId} is not waiting anymore, so the line was not used. Now waiting: {now}"
+                command = None
+            else:
+                command = self.route(name, text)
             if command is None and question is not None:
                 question["answer"] = text
                 question["event"].set()
-                return
+                return None
         if command is not None and command.strip():
             self.work.put((name, command))
+        return None
 
     def runCommands(self):
         while True:
@@ -217,7 +252,7 @@ class Hub:
     # swarm is read before the lock of the hub is taken, so an agent that speaks while the swarm is busy never waits for this.
     def follow(self, swarm, events):
         names = swarm.getAgents()
-        lines = [line for line in (formatEvent(event) for event in events) if line]
+        lines = [part for line in (formatEvent(event) for event in events) if line for part in line.split("\n")]
         perAgent = [item for event in events for item in self.readEvent(swarm, event, names)]
         panels = [(SWARM_WINDOW, f"{renderTree(swarm)}\n{self.describeCost(swarm)}")] + [(name, self.describeAgent(swarm, name)) for name in names]
         removed = {item["name"] for item in swarm.removed} - set(names)
@@ -241,7 +276,7 @@ class Hub:
     def readEvent(self, swarm, event, names):
         kind, agent, line = event["kind"], event.get("agent"), formatEvent(event)
         if kind == "message":
-            return [(name, [line]) for name in (event["sender"], event["receiver"]) if name in names]
+            return [(name, line.split("\n")) for name in (event["sender"], event["receiver"]) if name in names]
         if kind not in AGENT_EVENTS or agent not in names:
             return []
         added = [line] if line else []
@@ -377,12 +412,15 @@ class HubConsole(Console):
     def askSecret(self, question, window=None):
         return self.waitFor(question, window, True)
 
-    def waitFor(self, question, window, secret):
+    def waitFor(self, question, window, secret, stale=None):
         target = self.target(window)
         with self.questions:
             if self.closed:
                 return ""
-            return self.hub.waitForAnswer(target, question.strip(), secret)
+            return self.hub.waitForAnswer(target, question.strip(), secret, stale)
+
+    def askUntil(self, question, stale, window=None):
+        return self.waitFor(question, window, False, stale)
 
     def startPump(self):
         self.pumping, self.closed = True, False
@@ -425,8 +463,8 @@ class SessionHandler(socketserver.StreamRequestHandler):
         elif kind == "capture":
             self.reply({"type": "capture", "text": hub.capture(request.get("window"), int(request.get("lines") or CAPTURE_LINES))})
         elif kind == "input":
-            hub.input(request.get("window"), request.get("text", ""))
-            self.reply({"type": "ok"})
+            problem = hub.input(request.get("window"), request.get("text", ""), request.get("question"))
+            self.reply({"type": "error", "message": problem} if problem else {"type": "ok"})
         elif kind == "kill":
             self.reply({"type": "ok"})
             hub.kill()

@@ -29,9 +29,11 @@ SENDER = "SwarmUP"
 # joined(agent, loop) is told once that agent is in the swarm; remakeLoop(name, model) gives the loop of an agent with another model,
 # and remade(name, model, loop) is told once the swarm uses it.
 # ==============
+# watchFinishes is False for a swarm the user built: the leader is only asked when an agent or the user writes to it (in a real run, two agents
+# wrote to the leader that a file had no owner, and nobody read it until the end).
 class LeaderManager:
-    def __init__(self, swarm, catalog, maker):
-        self.swarm, self.catalog, self.maker = swarm, catalog, maker
+    def __init__(self, swarm, catalog, maker, watchFinishes=True):
+        self.swarm, self.catalog, self.maker, self.watchFinishes = swarm, catalog, maker, watchFinishes
         self.queue = queue.Queue()
         self.thread = None
         self.rounds = 0
@@ -47,12 +49,16 @@ class LeaderManager:
             self.start()
         elif kind == "finished":
             self.queue.put(("end", None))
-        elif kind == "status" and event["status"] in ("done", "failed") and agent != self.swarm.getLeader() and self.othersAtWork(agent):
+        elif kind == "status" and self.watchFinishes and event["status"] in ("done", "failed") and agent != self.swarm.getLeader() and self.othersAtWork(agent):
             self.queue.put(("event", f"{agent} {'is done' if event['status'] == 'done' else 'did not finish'}."))
         elif kind == "message" and event["sender"] == USER_NAME and event["receiver"] == self.swarm.getLeader():
             self.queue.put(("event", f"The user wrote to you: {event['message']}"))
         elif kind == "message" and event.get("direct") and event["receiver"] == self.swarm.getLeader():
             self.queue.put(("event", f"{event['sender']} wrote to you: {event['message']}"))
+        # A wheel the architect just wrote may save work to an agent that still works: the leader decides whether to give it.
+        elif kind == "wheel" and event.get("action") in ("saved", "updated") and self.othersAtWork(""):
+            self.queue.put(("event", f"The architect {event['action']} the wheel {event.get('name')}: {event.get('summary') or ''} Give it to an agent that still works "
+                                     "and needs it (leader__give_wheels), or change nothing."))
 
     # When the last agent finishes, the leader starts its own work at once: nothing is left to change, so the leader is not asked (it costs tokens).
     def othersAtWork(self, agent):
@@ -163,6 +169,7 @@ class LeaderManager:
         if not askMissing([agent], self.catalog, leader):
             raise ValueError(f"{agent['name']} still misses what only you can give")
         agent["answers"]["folder"] = str(self.catalog.folder) if self.catalog.folder else None
+        agent["answers"]["wheels"] = list(agent.get("wheels") or [])
         loop = self.maker.makeLoop(agent)
         recipe = {"task": agent["task"], "answers": publicAnswers(agent["task"], agent["answers"])}
         try:

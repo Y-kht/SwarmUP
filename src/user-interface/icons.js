@@ -90,6 +90,7 @@ const TASK_STYLE = {
   coder: { icon: 'code', color: '#F97316' },
   worker: { icon: 'terminal', color: '#14B8A6' },
   leader: { icon: 'crown', color: '#F4A62A' },
+  architect: { icon: 'layers', color: '#0E9F8E' },
 };
 
 const LOGO = '<svg viewBox="0 0 64 64" aria-hidden="true"><defs><linearGradient id="lg-a" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#7C6CFF"/>' +

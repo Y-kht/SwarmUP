@@ -498,7 +498,7 @@ class CodingAgentTests(SessionTestCase):
         self.assertEqual((model["cli"], model["label"]), ("codex", "Codex · its default model"))
         self.act("start", mode="execute")
         question = self.waitForQuestion("permission")
-        self.assertEqual((question["payload"]["detail"], [reply["value"] for reply in question["replies"]]), ("npm test", ["once", "run", "deny"]))
+        self.assertEqual((question["payload"]["detail"], [reply["value"] for reply in question["replies"]]), ("npm test", ["once", "run", "all", "deny"]))
         with self.assertRaises(ValueError):
             self.act("answer", id=question["id"], answer="yes")
         self.act("answer", id=question["id"], answer={"decision": "run", "message": ""})

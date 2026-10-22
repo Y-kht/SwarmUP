@@ -1,8 +1,11 @@
-# The swarm of the command line: its agents, its order, its run, and the leader that builds it.
+# The swarm of the command line: its agents, its order, its run, the leader that builds it, and its architect.
+from architect_loop import pickArchitect
+from architect_manager import attachArchitect
 from cli_console import askUntilValid, askYesNo, chooseFrom, heading, shorten
 from cli_models import chooseModel
 from cli_steps import askFolder, chooseAgent
-from cli_view import TreeView, describeCosts, renderTree, runCommand, watchCosts
+from cli_view import TreeView, describeCosts, describeModel, renderTree, runCommand, watchCosts
+from harness_utils import ARCHITECT_NAME, USER_LOCK
 from leader_catalog import LeaderCatalog
 from leader_manager import LeaderManager
 from leader_utils import designSwarm
@@ -24,6 +27,7 @@ def forTerminal(message):
 def connect(loop, console):
     loop.notifyUser = lambda message: console.say(forTerminal(message), window=loop.name)
     loop.askUser = lambda question: console.ask(question, window=loop.name)
+    loop.askUntil = lambda question, stale: console.askUntil(question, stale, window=loop.name)
     loop.askSecret = lambda question: console.askSecret(question, window=loop.name)
     loop.askLogin = lambda host: console.say(f"{host} asks for an account. Add it in the setup of the literature reviewer next time. Skipping it.")
 
@@ -40,11 +44,27 @@ def buildAgent(console, swarm, spec, info, model, waitsFor=()):
     return loop
 
 
+# The folder most agents of the swarm work in: a new agent is offered it first.
+def swarmFolder(specs):
+    folders = [spec["answers"].get("folder") for spec in specs if spec["answers"].get("folder")]
+    return max(folders, key=folders.count) if folders else None
+
+
 # An agent that joins the swarm while it runs (the command add): its task, its folder, its model, and the agents it waits for (in execute mode).
 # Every agent of the swarm is told. If it cannot join (the leader already started its final work), its model is let go.
+# The questions of the agents wait while the user answers these (the lock of the user): in a real run another question came between two of
+# them, and the next answer went to the wrong question.
 def addLive(console, swarm, specs, keys, tokens, models):
+    with USER_LOCK:
+        console.say("\nA new agent joins the swarm. The other questions wait until you have answered these.")
+        joinLive(console, swarm, specs, keys, tokens, models)
+
+
+def joinLive(console, swarm, specs, keys, tokens, models):
     number = len(swarm.getAgents()) + 1
     spec = chooseAgent(console, number, number, swarm.getAgents())
+    if swarmFolder(specs) and not spec["answers"].get("folder"):
+        spec["answers"]["folder"] = swarmFolder(specs)
     spec["answers"]["folder"] = askFolder(console, spec, number, number)
     info, model = chooseModel(console, swarm, spec, number, number, keys, tokens)
     others = [name for name in swarm.getAgents() if name != swarm.getLeader()]
@@ -102,6 +122,17 @@ class ConsoleMaker:
         self.models[name] = loop.agent
 
 
+# A swarm the user built, whose leader is a model: the leader reads and answers what the agents write to it while the swarm runs, with its
+# tools (it can write back, or propose to add an agent). A user who leads the swarm reads these messages in window 0 instead.
+def manageBuilt(console, swarm, specs, keys, tokens, models):
+    leader = swarm.getLeader()
+    info = swarm.getInfo(leader)["model"]
+    if len(specs) < 2 or not info or info.get("user"):
+        return None
+    catalog = LeaderCatalog(swarm.mission, swarmFolder(specs), leader, info, keys, tokens, swarm.costs)
+    return LeaderManager(swarm, catalog, ConsoleMaker(console, swarm, specs, keys, tokens, models), watchFinishes=False)
+
+
 # It returns the swarm the leader built and the user approved (the leader is its first agent), or None.
 def buildWithLeader(console, mission, specs, keys, tokens, models, costs):
     heading(console, "Step 1: the leader and the folder of the mission")
@@ -114,6 +145,7 @@ def buildWithLeader(console, mission, specs, keys, tokens, models, costs):
     info, model = chooseModel(console, swarm, leader, 1, 1, keys, tokens)
     models[leader["name"]] = model
     costs.track(leader["name"], info, model)
+    choice, architectModel = chooseArchitect(console, swarm, [(leader["name"], info)], keys, tokens)
     loop = buildLoop("leader", model, leader["answers"])
     connect(loop, console)
     watchCosts(console, swarm, loop)
@@ -139,7 +171,52 @@ def buildWithLeader(console, mission, specs, keys, tokens, models, costs):
     for agent in agents:
         swarm.setWaitsFor(agent["name"], agent["waitsFor"])
     LeaderManager(swarm, catalog, ConsoleMaker(console, swarm, specs, keys, tokens, models))
+    startArchitect(console, swarm, choice, architectModel, keys, tokens)
     return swarm
+
+
+# ==============
+# The architect of the swarm (architect_manager.py): it learns in the background from what the agents repeat, and writes wheels. The user
+# chooses its model: the same as an agent of the swarm (the leader first), or another one.
+# ==============
+ARCHITECT_INFO = ("The architect works in the background of every swarm: it reads what the agents do, and turns what they repeat into wheels, scripts that do "
+                  "those steps at once, which the leader gives to the agents of the next swarms. It never asks you anything; you approve each new wheel once, "
+                  "the first time an agent runs it.")
+
+
+# candidates: [(name, info)] of the agents whose model the architect could share, the leader first. It gives (the choice, the client made now).
+def chooseArchitect(console, swarm, candidates, keys, tokens):
+    console.say(f"\n--- The architect ---\n{ARCHITECT_INFO}")
+    usable = [(name, info) for name, info in candidates if info and not info.get("user") and info.get("cli") != "codex"]
+    if usable:
+        name, info = usable[0]
+        if askYesNo(console, f"The architect: use the same model as {name} ({describeModel(info)})?", True):
+            return {"same": name}, None
+    elif not askYesNo(console, "The architect: no agent has a model it can use. Choose one for it? (no: this time it only counts what the agents repeat)", True):
+        return None, None
+    info, model = chooseModel(console, swarm, {"task": "architect", "name": ARCHITECT_NAME, "answers": {}}, 0, 0, keys, tokens, replacing=ARCHITECT_NAME)
+    if info.get("user") or info.get("cli") == "codex":
+        console.say("The architect needs a model of its own: this time it only counts what the agents repeat.")
+        return None, None
+    return info, model
+
+
+def startArchitect(console, swarm, choice, model, keys, tokens):
+    def makeClient(info):
+        return model if model is not None and info is choice else createModel(info, keys, token=tokens.get(info["name"]), report=console.say)
+    return attachArchitect(swarm, choice, makeClient, lambda text: console.say(text, window=ARCHITECT_NAME))
+
+
+def describeArchitect(swarm):
+    architect = swarm.architect
+    info = pickArchitect(swarm, architect.choice)[0] if architect else None
+    return f"The architect uses {info['name']}." if info else "The architect has no model: it only counts what the agents repeat."
+
+
+# The architect stops before the models are let go: a pass would load a local model again.
+def closeArchitect(swarm):
+    if swarm is not None and swarm.architect is not None:
+        swarm.architect.close()
 
 
 def chooseOrder(console, swarm):

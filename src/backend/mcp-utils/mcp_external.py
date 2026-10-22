@@ -20,7 +20,7 @@ from mcp_kit import NAME_SEPARATOR
 CONFIG_FILE = "mcp-servers.json"
 LOGS_FOLDER = "mcp-logs"
 NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,30}$")
-RESERVED = ("files", "transfer", "processes", "web", "memory", "team", "user", "leader", "swarmup")
+RESERVED = ("files", "transfer", "processes", "web", "memory", "team", "user", "leader", "swarmup", "wheels", "architect")
 INSTRUCTION_WORDS = re.compile(r"\b(ignore (all |the )?(previous|above|prior)|disregard|system prompt|you must|do not tell|don't tell|before using any other tool|"
                                r"instead of the|always call|override)\b", re.I)
 SECRET_WORDS = re.compile(r"\b(password|api[ _-]?key|secret|token|credential|private key|ssh)\b", re.I)

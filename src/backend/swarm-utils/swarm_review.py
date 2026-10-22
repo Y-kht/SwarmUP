@@ -13,6 +13,14 @@ REMOVED_MESSAGE = "This agent was removed from the swarm before it finished."
 
 APPROVALS = ("yes", "y", "ok", "approve", "approved its draft.")
 
+# A user who leads the swarm reads the summary itself: each draft is shown up to this length (the whole draft is one command away).
+SHOWN_DRAFT_CHARS = 600
+
+
+def clipDraft(text, limit, name):
+    text = str(text)
+    return text if limit is None or len(text) <= limit else f"{text[:limit].rstrip()} [... {len(text) - limit:,} more characters: type {name} to read it all]"
+
 
 # Whether what the user wrote in a round (its part of USER_PROMPTS.md) says more than the mission and approvals.
 def hasFeedback(written):
@@ -29,7 +37,7 @@ class SwarmReview:
     # direct is True for a message an agent chose to write (send_message), and not a result that SwarmUP delivers.
     def logMessage(self, sender, receiver, message, direct=False):
         self.messages.append({"time": f"{datetime.now():%H:%M:%S}", "sender": sender, "receiver": receiver, "message": message})
-        self.emit("message", receiver, sender=sender, receiver=receiver, message=message, direct=direct)
+        self.emit("message", receiver, sender=sender, receiver=receiver, message=message, direct=direct, toLeader=receiver == self.leader)
 
     def communicate(self, sender, receiver, message):
         self.getMember(sender)
@@ -49,6 +57,8 @@ class SwarmReview:
         member["agent"].receiveFromUser(message)
         self.logMessage(USER_NAME, name, message)
         self.record("addUserPrompt", self.round, message, name)
+        if self.journal is not None:
+            self.journal.add("user", name, to=name, text=message[:1500], whileReady=member["review"] == "ready")
         self.askCorrection(member)
 
     # Gives the answer of the user to the agent that waits for it. It must be called with self.changed held.
@@ -107,7 +117,7 @@ class SwarmReview:
     def describeDrafts(self, names):
         return "\n".join(f"- {name} ({self.members[name]['role']}): {self.members[name]['draft']}" for name in names)
 
-    def describeMember(self, name, member):
+    def describeMember(self, name, member, limit=None):
         approved = " and approved by the user" if member["review"] == "approved" else ""
         if member.get("sitsOut"):
             state = "has no part in this round, and keeps its last result"
@@ -119,18 +129,18 @@ class SwarmReview:
             state = f"failed ({member['error']})"
         elif member["review"] == "ready":
             warning = f" (WARNING, the automatic checks found a problem: {member['problem']})" if member["problem"] else ""
-            state = f"waiting for the user{warning}: {member['draft']}"
+            state = f"waiting for the user{warning}: {clipDraft(member['draft'], limit, name)}"
         elif member["status"] == "done":
             state = f"done{approved}: {str(member['result'])[:SUMMARY_LENGTH]}"
         elif member["review"] == "approved":
-            state = f"approved by the user, now at work: {member['draft']}"
+            state = f"approved by the user, now at work: {clipDraft(member['draft'], limit, name)}"
         else:
             state = "writing its draft" if member["status"] == "working" else "has not started yet"
         return f"- {name} ({member['role']}): {state}"
 
     # Where every agent stands. The leader writes its summary from it, so what the user approved on its own is echoed in the summary.
-    def describeProgress(self):
-        lines = [self.describeMember(name, member) for name, member in list(self.members.items())]
+    def describeProgress(self, limit=None):
+        lines = [self.describeMember(name, member, limit) for name, member in list(self.members.items())]
         lines += [f"- {item['name']} ({item['role']}): removed from the swarm when it was {item['status']}. Why: {item['reason'] or 'not given'}" for item in list(self.removed)]
         return "\n".join(lines)
 
@@ -154,7 +164,7 @@ class SwarmReview:
     # A swarm of one agent has nothing to summarise: the user reads the draft itself, instead of a summary of it.
     def writeSummary(self, request):
         leader = self.getMember(self.leader)
-        progress = self.describeProgress()
+        progress = self.describeProgress(SHOWN_DRAFT_CHARS if self.leaderIsUser() else None)
         started = [name for name, member in self.members.items() if member["status"] != "waiting"]
         template = prompts.PLAN_SUMMARY_PROMPT if leader["mode"] == "plan" else prompts.EXECUTION_SUMMARY_PROMPT
         summary = None
@@ -198,6 +208,8 @@ class SwarmReview:
     # If no agent is concerned the correction is about the summary itself, and it is returned to write the summary again.
     def correctWithLeader(self, names, comment, what):
         route = self.routeCorrection(names, comment)
+        if self.journal is not None:
+            self.journal.add("route", self.leader, comment=str(comment)[:1500], what=what, route={name: str(text)[:800] for name, text in route.items()})
         self.getMember(self.leader)["agent"].notifyUser(f"Asking {', '.join(route)} to correct their {what}." if route else "No agent is concerned, so only the summary is changed.")
         for name, instruction in route.items():
             self.communicate(self.leader, name, f"The user asked for a correction: {comment}\nWhat to change in your {what}: {instruction}")
@@ -236,8 +248,12 @@ class SwarmReview:
             for name in shown:
                 if name in self.members and self.members[name]["problem"]:
                     leader.notifyUser(f"Warning for {name}: the automatic checks found a problem with its draft: {self.members[name]['problem']}")
-            reply = leader.askUser("Do you approve? Type yes to approve, no to reject, or write what you want changed:" if len(self.members) == 1 else
-                                   "Do you approve? Type yes to approve all of them, no to reject all of them, the name of an agent to look at it alone, or write what you want changed:")
+            # The question is withdrawn once the user decided every draft it is about, one by one (it stayed open in a real run, and took the next command).
+            stale = lambda: not any(name in self.members and self.members[name]["review"] == "ready" and self.members[name]["revision"] == shown[name] for name in shown)
+            reply = leader.askUntil("Do you approve? Type yes to approve, no to reject, or write what you want changed:" if len(self.members) == 1 else
+                                    "Do you approve? Type yes to approve all of them, no to reject all of them, the name of an agent to look at it alone, or write what you want changed:", stale)
+        if not reply.strip() and stale():
+            return ""
         answered = isYes(reply) or isNo(reply)
         self.record("addUserPrompt", self.round, reply, f"the summary of the {what}s", kind="Answer to")
         with self.changed:

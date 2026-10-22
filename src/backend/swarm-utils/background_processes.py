@@ -13,6 +13,8 @@ import threading
 import time
 from datetime import datetime
 
+from mcp_kit import ToolFailure
+
 
 COMMAND_SECONDS = 120
 MAX_COMMAND_SECONDS = 600
@@ -138,7 +140,11 @@ class ProcessTools:
         if code is None:
             return f"The command ran for more than {seconds} seconds and was stopped. Run a long command with background."
         self.loop.logAction(f"Ran in {folder}: {command}")
-        return f"Exit code {code}.\n" + (output[-RESULT_CHARS:] if output else "(it printed nothing)")
+        text = f"Exit code {code}.\n" + (output[-RESULT_CHARS:] if output else "(it printed nothing)")
+        if code != 0:
+            # A command that failed is an error of the call, so the records and the model see it (a real run recorded "command not found" as a success).
+            raise ToolFailure(f"The command failed. {text}")
+        return text
 
     # Waits for a command and says every few seconds that it still runs. A stop of the swarm stops it at once, with everything it started.
     def runInForeground(self, command, folder, seconds):

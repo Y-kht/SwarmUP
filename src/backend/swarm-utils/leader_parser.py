@@ -45,6 +45,7 @@ KEY_ALIASES = {
     "why": ("why", "reason", "justification", "rationale", "because", "motivation", "explanation", "purpose"),
     "agents": ("agents", "team", "members", "swarm", "workers"),
     "role": ("role", "description", "responsibility", "type", "kind"),
+    "wheels": ("wheels", "wheel", "givewheels", "scripts", "tools"),
 }
 KEY_NAMES = {alias: key for key, aliases in KEY_ALIASES.items() for alias in aliases}
 # The keys that say which change an object is, when it is not inside a tag: {"action": "remove_agent", "name": ...}.
@@ -346,7 +347,7 @@ def isNoChange(text):
 # means, with its arguments, and a block that cannot be read is a call with its problem. Nothing outside the adapters reads such blocks.
 # ==============
 BLOCK_TOOLS = {"build": "leader__propose_swarm", "add": "leader__add_agent", "remove": "leader__remove_agent", "model": "leader__change_model"}
-AGENT_KEYS = ("name", "task", "model", "bits", "waits_for", "settings", "why", "role")
+AGENT_KEYS = ("name", "task", "model", "bits", "waits_for", "settings", "why", "role", "wheels")
 
 
 def cleanAgent(data):

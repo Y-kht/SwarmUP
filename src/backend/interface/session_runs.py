@@ -99,8 +99,9 @@ class SessionRuns:
     def leaderCatalog(self, leader):
         return LeaderCatalog(self.mission, leader["answers"].get("folder"), leader["name"], leader["model"], self.keys, self.tokens, self.costs, loadSettings()["maxAgents"])
 
+    # The leader of a swarm it built manages it. The leader of a swarm the user built is asked only when an agent or the user writes to it.
     def manage(self, swarm, leader):
-        LeaderManager(swarm, self.leaderCatalog(leader), self)
+        LeaderManager(swarm, self.leaderCatalog(leader), self, watchFinishes=leader["task"] == "leader")
 
     # What the manager of the leader needs: the loop of a new agent, or of an agent with another model (LeaderManager in leader_manager.py).
     def makeLoop(self, agent):
@@ -181,8 +182,9 @@ class SessionRuns:
         for spec in self.specs[1:]:
             swarm.setWaitsFor(spec["name"], spec["waitsFor"])
         swarm.addListener(self.onEvent)
-        if leader:
-            self.manage(swarm, leader)
+        if leader or len(self.specs) > 1:
+            self.manage(swarm, leader or self.specs[0])
+        self.attachTheArchitect(swarm)
         return swarm
 
     # A model of the steps that has no client yet (the leader chose it before its API key was given) gets one now.
@@ -334,6 +336,7 @@ class SessionRuns:
         self.refreshUnfinished()
 
     def unloadModels(self):
-        for spec in self.specs:
+        self.closeTheArchitect()
+        for spec in [*self.specs, self.architectSpec]:
             if hasattr(spec["client"], "unload"):
                 spec["client"].unload()

@@ -95,6 +95,7 @@ function taskIcon(task, size = '') {
 
 function taskOf(key) {
   if (key === 'leader') return store.catalog.leaderTask;
+  if (key === 'architect') return { label: 'Architect', role: 'architect', info: 'It turns what the agents repeat into wheels.' };
   return store.catalog.tasks.find(task => task.key === key) || { label: key, role: key, info: '' };
 }
 

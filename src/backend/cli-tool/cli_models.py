@@ -338,10 +338,33 @@ def testConnection(console, model):
         console.say(f"It did not work: {error}")
 
 
+# The agent before this one and its model: building a swarm of ten agents with one model took about sixty answers, so it is offered first.
+def previousModel(swarm, replacing=None):
+    for name in reversed(swarm.getAgents()):
+        info = swarm.getInfo(name)["model"] if name != replacing else None
+        if info and not info.get("user"):
+            return name, info
+    return None, None
+
+
+# The same model again, without its questions: the key, the price and the test were already given. None when it cannot be used here.
+def reuseModel(console, swarm, info, keys, tokens, replacing=None):
+    check = swarm.checkModel(info, replacing)
+    if info.get("local") and check["message"]:
+        console.say(f"{info['name']} cannot be used again here: {check['message']}")
+        return None
+    if info.get("cli"):
+        return info, createModel(info, keys, report=console.say)
+    return info, (createModel(info, token=tokens.get(info["name"]), report=console.say) if info.get("local") else createModel(info, keys))
+
+
 def chooseModel(console, swarm, spec, number, total, keys, tokens, replacing=None):
     task = spec["task"]
     status = checkVram(swarm.getNeededVram(replacing), readGpus())
-    console.say(f"\n--- Model of agent {number} of {total}: {spec['name']} ({getTask(task)['role']}) ---\n{describeAgent(spec)}")
+    if task == "architect":
+        console.say("\n--- The model of the architect ---\nIt reads the work of the agents and writes code: a capable model is worth it, and it spends at most its share of the budget.")
+    else:
+        console.say(f"\n--- Model of agent {number} of {total}: {spec['name']} ({getTask(task)['role']}) ---\n{describeAgent(spec)}")
     if task == "leader":
         console.say("This leader builds the swarm, follows it, and proposes changes to you: it must plan well and follow a strict format, so a capable model is worth it.")
     elif number == 1:
@@ -349,6 +372,11 @@ def chooseModel(console, swarm, spec, number, total, keys, tokens, replacing=Non
                     "A capable model is worth it here.")
     if status["needed"]:
         console.say(f"VRAM of the swarm so far: {status['needed']} GB of {status['total']} GB ({status['free']} GB free now).")
+    other, previous = previousModel(swarm, replacing)
+    if previous and replacing is None and askYesNo(console, f"Use the same model as {other} ({describeModel(previous)})?", True):
+        reused = reuseModel(console, swarm, previous, keys, tokens, replacing)
+        if reused:
+            return reused
     while True:
         kind = chooseKind(console, swarm, number, replacing, leader=number == 1 and task != "leader")
         if kind == "user":

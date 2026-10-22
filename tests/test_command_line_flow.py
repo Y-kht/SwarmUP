@@ -36,6 +36,15 @@ class Script:
         self.answers, self.secrets, self.said, self.log = list(answers), list(secrets), [], []
 
     def read(self, prompt):
+        # The architect uses the model of the leader, unless the test answers it (with an answer that starts with "architect:").
+        if prompt.startswith("The architect"):
+            answer = self.answers.pop(0)[len("architect:"):] if self.answers and str(self.answers[0]).startswith("architect:") else "y"
+            self.log.append((prompt, answer))
+            return answer
+        # The offer of the model of the agent before is declined, unless the test answers it (with a yes or a no first in its answers).
+        if prompt.startswith("Use the same model as") and not (self.answers and str(self.answers[0]).strip().lower() in ("y", "yes", "n", "no")):
+            self.log.append((prompt, "n"))
+            return "n"
         if not self.answers:
             raise AssertionError(f"The program asked something that the test did not expect: {prompt!r}\nSaid so far:\n{self.text()[-1500:]}")
         answer = self.answers.pop(0)
@@ -916,6 +925,38 @@ class LocalModelTests(ModelFlowCase):
         self.assertIn("VRAM the swarm is expected to need: 48.0 GB.", script.text())
         self.assertIn("VRAM of the swarm so far: 19.2 GB of 51.6 GB", script.text())
 
+# What a real run of ten agents showed in the swarm of the command line.
+class LiveSwarmTests(ModelFlowCase):
+    # Another question once came between two questions of the new agent, and the next answer went to the wrong one: the dialog holds the user.
+    def testTheQuestionsOfANewAgentAreNotInterrupted(self):
+        import cli_program
+        seen = {}
+        def joinLive(console, swarm, specs, keys, tokens, models):
+            other = threading.Thread(target=lambda: seen.setdefault("other", harness_utils.USER_LOCK.acquire(timeout=0.2)))
+            other.start()
+            other.join()
+        with everywhere(cli_program, "joinLive", joinLive):
+            cli_program.addLive(Script().console(), self.swarm, [], {}, {}, {})
+        self.assertFalse(seen["other"])
+        self.assertEqual(cli_program.swarmFolder([{"answers": {"folder": "/a"}}, {"answers": {"folder": "/b"}}, {"answers": {"folder": "/b"}}, {"answers": {}}]), "/b")
+
+    def testTheModelLeaderOfASwarmTheUserBuiltReadsWhatIsWrittenToIt(self):
+        import cli_models
+        import cli_program
+        cli.os.environ.update(OPENAI_API_KEY="sk-o")
+        specs = [self.spec("Leader"), self.spec("Writer")]
+        for spec in specs:
+            cli.buildAgent(Script().console(), self.swarm, spec, getModelInfo("gpt-6-luna"), FakeModel("gpt-6-luna"))
+        manager = cli_program.manageBuilt(Script().console(), self.swarm, specs, {}, {}, {})
+        self.assertIs(self.swarm.manager, manager)
+        self.assertFalse(manager.watchFinishes)
+        self.assertTrue(self.swarm.describeState()["managed"])
+        swarm = Swarm("Mission")
+        swarm.addAgent("Leader", Loop(FakeModel("me")), "boss", "lead", model=dict(cli_models.USER_LEADER))
+        swarm.addAgent("Writer", Loop(FakeModel("x")), "writer", "write")
+        self.assertIsNone(cli_program.manageBuilt(Script().console(), swarm, specs, {}, {}, {}))
+
+
 class ApiModelTests(ModelFlowCase):
     def testPricesCanBeAskedBeforeChoosingAndTheKeyIsAskedOnce(self):
         script = Script(["2", "p 2", "p 1,3", "p all", "p 9", "1", "y", "y"], ["sk-ant"])
@@ -938,6 +979,21 @@ class ApiModelTests(ModelFlowCase):
         script = Script(["2", "1", "n", "n"])
         self.choose(script, "Writer2", 2)
         self.assertNotIn("Create one at", script.text())
+
+    # Ten agents with one model took about sixty answers in a real run: the model of the agent before is offered first, without its questions.
+    def testTheModelOfTheAgentBeforeIsOfferedWithoutItsQuestions(self):
+        cli.os.environ.update(OPENAI_API_KEY="sk-o")
+        script = Script(["2", "2", "n", "n"])
+        info, model = self.choose(script)
+        cli.buildAgent(script.console(), self.swarm, self.spec("Writer"), info, model)
+        script = Script(["y"])
+        again, other = self.choose(script, "Writer2", 2)
+        self.assertEqual((again["name"], script.prompts()), ("gpt-6-luna", ["Use the same model as Writer (gpt-6-luna, API)? (Y/n) "]))
+        self.assertIsNot(other, model)
+        self.assertEqual([name for name, *rest in self.created], ["gpt-6-luna", "gpt-6-luna"])
+        script = Script(["n", "2", "1", "y", "n", "n"], ["sk-ant"])
+        self.assertEqual(self.choose(script, "Writer3", 3)[0]["name"], "claude-sonnet-5-5")
+        self.assertEqual(self.choose(Script(["2", "1", "n", "n"]), "Writer", 1, replacing="Writer")[0]["name"], "claude-sonnet-5-5")
 
     def testTheBudgetLeftHidesTheModelsThatCostMoreAndAnAgentCountsWhatItSetAside(self):
         self.swarm.costs.setBudget(20)

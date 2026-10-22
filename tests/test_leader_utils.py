@@ -1,5 +1,6 @@
 import json
 import os
+import queue
 import re
 import sys
 import tempfile
@@ -641,6 +642,17 @@ class ManagerTests(FolderTestCase):
         prompt = model.prompts[[index for index, kind in enumerate(model.kinds()) if kind == "supervise"][1]]
         self.assertIn("- The user wrote to you: Please also translate it into French.", prompt)
         self.assertIn("[Message from the user] Please also translate it into French.", prompt)
+
+    # In a swarm the user built, two agents wrote to the leader that a file had no owner, and nobody read it until the end: the leader is asked
+    # when an agent or the user writes to it, but not each time an agent finishes, since the user chose the agents.
+    def testTheLeaderOfASwarmTheUserBuiltIsAskedOnlyWhenSomeoneWritesToIt(self):
+        swarm, leader = self.build(LeaderModel())
+        self.manager.watchFinishes = False
+        self.manager.queue = queue.Queue()
+        self.manager.onEvent({"kind": "status", "agent": "Checker", "status": "done"})
+        self.assertTrue(self.manager.queue.empty())
+        self.manager.onEvent({"kind": "message", "agent": "Leader", "sender": "Writer", "receiver": "Leader", "message": "Nobody owns Settings.swift.", "direct": True})
+        self.assertEqual(self.manager.queue.get_nowait(), ("event", "Writer wrote to you: Nobody owns Settings.swift."))
 
     def testTheManagerIsSavedWithTheSwarm(self):
         swarm, leader = self.build(LeaderModel())

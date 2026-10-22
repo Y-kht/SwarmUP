@@ -11,6 +11,7 @@
 # and {"role": "tool", "id", "name", "content": text, "error": True if the tool failed}.
 # An adapter gives back {"text", "calls", "raw", "cut": True if the answer was cut before its calls were complete}.
 import contextlib
+import hashlib
 import json
 import time
 
@@ -35,6 +36,8 @@ TEXT_SECONDS = 0.25
 # What the agent knows of itself for the whole conversation: who it is, where it works and how, its rules, its approved plan, and the memory
 # (its notes included) with the temp folder.
 def describeAgent(loop, readOnly, own):
+    if hasattr(loop, "systemPrompt"):
+        return loop.systemPrompt()
     root = agentWorkspace(loop)
     workplace = prompts.FOLDER_WORKPLACE.format(folder=root, tree=describeTree(root)) if loop.folder else prompts.SCRATCH_WORKPLACE.format(folder=root)
     parts = [prompts.AGENT_SYSTEM_PROMPT.format(name=loop.name, task=loop.describeTask() or "the requests of SwarmUP below.", workplace=workplace)]
@@ -44,6 +47,8 @@ def describeAgent(loop, readOnly, own):
         parts.append(f"THE RULES OF YOUR TASK. Follow them strictly:\n{loop.rules}")
     if own and loop.approvedPlan:
         parts.append(prompts.APPROVED_PLAN_PROMPT.format(plan=loop.approvedPlan))
+    if own and loop.wheels:
+        parts.append(prompts.WHEELS_AGENT_PROMPT.format(wheels=", ".join(f"wheels__{name}" for name in loop.wheels)))
     if loop.session:
         parts.append(describeMemory(loop.session.memory, loop.name))
     return "\n\n".join(parts)
@@ -84,8 +89,24 @@ def adapterOptions(adapter, loop, link, readOnly, live):
     if getattr(adapter, "streams", False):
         options["onText"] = live.add
     if getattr(adapter, "runsTools", False) and link is not None:
-        options["runTool"] = lambda name, arguments: link.call(name, arguments, readOnly)
+        options["runTool"] = lambda name, arguments: link.call(name, arguments, readOnly, origin="bridge")
     return options
+
+
+def hashOf(text):
+    return hashlib.sha1(str(text).encode("utf-8", "replace")).hexdigest()[:12]
+
+
+def usageOf(loop):
+    records = ((getattr(loop.agent, "usage", None) or {}).get("records")) or []
+    return len(records), records
+
+
+# The tokens of the model calls made since mark (the records of the usage of the client, model_support.recordCall).
+def tokensSince(loop, mark):
+    count, records = usageOf(loop)
+    added = records[mark:count] if count >= mark else []
+    return {"in": sum(record.get("input") or 0 for record in added), "out": sum(record.get("output") or 0 for record in added)}
 
 
 class Conversation:
@@ -120,13 +141,16 @@ class Conversation:
                     conversation.messages.append({"role": "tool", "id": call["id"], "name": call["name"], "content": "Not done: the program stopped before it ran.", "error": True})
         return conversation
 
-    # The messages of the other agents and of the user that the model has not read yet.
+    # The messages of the other agents and of the user that the model has not read yet. When one sender wrote several of them, the older ones
+    # are marked: an agent that started late got three versions of the same contract at once in a real run, the oldest one wrong.
     def news(self):
         inbox, users = self.loop.inbox, self.loop.userMessages
         lines = []
-        for entry in inbox[self.delivered[0]:]:
-            sender, _, message = entry.partition(": ")
-            lines.append(f"[Message from {sender}] {message}")
+        entries = [entry.partition(": ") for entry in inbox[self.delivered[0]:]]
+        latest = {sender: number for number, (sender, _, _) in enumerate(entries)}
+        for number, (sender, _, message) in enumerate(entries):
+            older = f", older: a newer message from {sender} follows, and where they differ the newer one counts" if latest[sender] != number else ""
+            lines.append(f"[Message from {sender}{older}] {message}")
         lines += [f"[Message from the user] {message}" for message in users[self.delivered[1]:]]
         self.delivered = [len(inbox), len(users)]
         return "\n".join(lines)
@@ -165,9 +189,10 @@ class Conversation:
         return (f"you already made this same call {self.sameCalls[key] - 1} times in this request, and its result is above. Use it, do something "
                 "else, or give your answer now.")
 
-    # One request: the model works with its tools for MAX_STEPS steps at most, then its answer is given back.
+    # One request: the model works with its tools for MAX_STEPS steps at most (a loop can have fewer), then its answer is given back.
     def ask(self, prompt):
         loop, readOnly = self.loop, not self.own
+        steps = getattr(loop, "maxSteps", MAX_STEPS)
         adapter = adapterOf(loop.agent)
         self.checkStop()
         with linkOf(loop) as link:
@@ -177,8 +202,10 @@ class Conversation:
                 self.system = describeAgent(loop, readOnly, self.own)
             news = self.news()
             self.messages.append({"role": "user", "content": f"{news}\n\n{prompt}" if news else prompt})
+            loop.note("request", own=self.own, look=readOnly, prompt=clipText(prompt, 1500, 500), promptHash=hashOf(prompt), systemHash=hashOf(self.system),
+                      news=clipText(news, 1500))
             reply, self.sameCalls = {"text": ""}, {}
-            for step in range(MAX_STEPS):
+            for step in range(steps):
                 self.checkStop()
                 self.shorten(adapter)
                 tools = link.tools(readOnly)
@@ -186,11 +213,16 @@ class Conversation:
                     adapter.attach(loop)
                 live = LiveText(loop)
                 options = adapterOptions(adapter, loop, link, readOnly, live)
+                started, mark = time.time(), usageOf(loop)[0]
                 try:
                     reply = loop.callModel(lambda: adapter.converse(self.system, self.messages, tools, **options), self.own)
                 finally:
                     live.end()
                 calls = reply.get("calls") or []
+                text = reply.get("text") or ""
+                loop.note("step", own=self.own, n=step + 1, text=clipText(text, 2000, 1000), length=len(text), cut=bool(reply.get("cut")),
+                          seconds=round(time.time() - started, 3), tokens=tokensSince(loop, mark),
+                          calls=[{"id": call.get("id"), "name": call.get("name"), "args": clipArguments(call.get("arguments"))} for call in calls])
                 self.messages.append({"role": "assistant", "content": reply.get("text") or "", "calls": calls, "raw": reply.get("raw")})
                 if not calls:
                     break
@@ -198,16 +230,30 @@ class Conversation:
                 for call in calls:
                     problem = call.get("problem") or (prompts.CUT_CALL if reply.get("cut") else "") or self.repeated(call)
                     self.noteBadCall(bool(call.get("problem")))
-                    text, error = (f"Not done: {problem}", True) if problem else link.call(call["name"], call.get("arguments"), readOnly)
+                    if problem:
+                        why = "parse" if call.get("problem") else "cut" if reply.get("cut") else "repeated"
+                        loop.note("bad", id=call.get("id"), name=call.get("name"), why=why, problem=clipText(problem, 600), args=clipArguments(call.get("arguments")))
+                    text, error = (f"Not done: {problem}", True) if problem else link.call(call["name"], call.get("arguments"), readOnly, callId=call.get("id"))
                     self.messages.append({"role": "tool", "id": call["id"], "name": call["name"], "content": text, "error": error})
                 news = self.news()
-                if step == MAX_STEPS - 2:
+                if step == steps - 2:
                     news = f"{news}\n\n{prompts.LAST_STEP}" if news else prompts.LAST_STEP
                 if news:
                     self.messages.append({"role": "user", "content": news})
                 self.save()
         self.save()
         return reply.get("text") or ""
+
+
+def clipText(text, head, tail=0):
+    text = "" if text is None else str(text)
+    return text if len(text) <= head + tail else text[:head] + f" [... {len(text) - head - tail:,} characters ...] " + (text[-tail:] if tail else "")
+
+
+def clipArguments(arguments):
+    if not isinstance(arguments, dict):
+        return clipText(arguments, 300)
+    return {key: clipText(value, 300) if isinstance(value, str) else value for key, value in arguments.items()}
 
 
 def describeCall(name, arguments):
@@ -230,10 +276,12 @@ def answerOnce(loop, prompt, own):
         adapter.attach(loop)
     live = LiveText(loop)
     options = adapterOptions(adapter, loop, None, True, live)
+    started = time.time()
     try:
         reply = loop.callModel(lambda: adapter.converse("", [{"role": "user", "content": prompt}], [], **options), own)
     finally:
         live.end()
+    loop.note("answer", own=own, prompt=clipText(prompt, 600), reply=clipText(reply.get("text"), 1200), seconds=round(time.time() - started, 3))
     return reply.get("text") or ""
 
 

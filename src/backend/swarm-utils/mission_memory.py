@@ -324,9 +324,9 @@ class MissionMemory:
     def mission(self):
         return readJson(self.state / "mission.json", {})
 
-    def setMission(self, mission, round):
+    def setMission(self, mission, round, project=None):
         with folderLock(self.folder):
-            writeJson(self.state / "mission.json", {**self.mission(), "mission": mission, "round": round})
+            writeJson(self.state / "mission.json", {**self.mission(), "mission": mission, "round": round, **({"project": project} if project else {})})
             self.writeIndex(False)
 
     def writeIndex(self, long):

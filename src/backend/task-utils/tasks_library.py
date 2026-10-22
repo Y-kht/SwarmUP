@@ -5,7 +5,7 @@ from pathlib import Path
 
 from checking_loops import CoderLoop, MathCheckLoop, WorkerLoop
 from general_loop import GeneralLoop
-from harness_utils import PHONE_PATTERN, USER_NAME, listRules
+from harness_utils import ARCHITECT_NAME, PHONE_PATTERN, USER_NAME, listRules
 from message_loops import CalendarLoop, EMAIL_PATTERN, EmailLoop, NewsLoop, nextOccurrence
 from sources_library import EMAIL_PROVIDERS, MESSAGING_APPS
 from writing_loops import AuthorLoop, DocumentFormatLoop, LeaderLoop, LiteratureSurveyLoop, PAPER_SEARCHES
@@ -221,7 +221,20 @@ LEADER_TASK = {
             "it can propose to add or remove agents, always with a reason, and nothing changes before you approve. At the end it writes the final report.",
     "fields": [{"key": "mission", "ask": "What must the swarm achieve?", "kind": "text", "required": True}],
 }
-HIDDEN_TASKS = {"leader": LEADER_TASK}
+# The task of the architect of every swarm (architect_manager.py): nobody chooses it for an agent, the swarm has it in the background.
+def architectLoop(model):
+    from architect_loop import ArchitectLoop
+    return ArchitectLoop(model)
+
+
+ARCHITECT_TASK = {
+    "label": "Architect of the swarm", "name": "Architect", "role": "architect", "recommend": "leading",
+    "build": lambda model, answers: architectLoop(model),
+    "folder": "The folder of the project, which it only reads.",
+    "info": "The architect reads what the agents do, and turns what they repeat into wheels for the next swarms.",
+    "fields": [],
+}
+HIDDEN_TASKS = {"leader": LEADER_TASK, "architect": ARCHITECT_TASK}
 
 # The questions every agent has, asked at the end as an option.
 ADVANCED_FIELDS = [{"key": "numberOfLoops", "ask": "How many drafts may the agent write at most before it stops?", "kind": "number", "default": DEFAULT_LOOPS,
@@ -275,6 +288,7 @@ def restoreAnswers(key, saved, secrets=None):
 def buildLoop(key, model, answers):
     loop = getTask(key)["build"](model, answers)
     loop.setFolder(answers.get("folder"))
+    loop.wheels = [str(name) for name in answers.get("wheels") or []]
     return loop
 
 
@@ -411,6 +425,8 @@ def checkAgentName(name, taken=()):
         return "A name starts with a letter and has only letters, digits, dots, hyphens and underscores."
     if name.lower() == USER_NAME.lower():
         return f"{USER_NAME} is the name of the user, choose another name."
+    if name.lower() == ARCHITECT_NAME.lower():
+        return f"{ARCHITECT_NAME} is the name of the architect of every swarm, choose another name."
     if name.lower() in (other.lower() for other in taken):
         return f"There is already an agent called {name}."
     return ""

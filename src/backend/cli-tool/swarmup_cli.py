@@ -46,6 +46,7 @@ from pathlib import Path
 sys.path[:0] = [str(folder) for folder in sorted(Path(__file__).resolve().parents[1].iterdir()) if folder.is_dir() and not folder.name.startswith(("_", "."))]
 from cli_hub import SWARM_WINDOW, Hub, HubConsole, startServer
 from cli_mcp import addMcpArguments, runMcp, showCalls
+from cli_patterns import addPatternArguments, runArchitectCommand
 from cli_screen import attach
 from cli_sessions import findSession, killSession, listSessions, logPath, newSessionId, removeSession, request, startDaemon, writeSession
 from internet_cache import keepFresh
@@ -54,9 +55,12 @@ from swarm_harness import Swarm
 # The parts of the program, for the program below and for the tests and scripts that drive it (import swarmup_cli as cli).
 from cli_console import Console, askUntilValid, askYesNo, chooseFrom, heading, shorten
 from cli_models import chooseModel, labelLocal
-from cli_program import addLive, buildAgent, buildWithLeader, changeModel, chooseBuilder, chooseMode, chooseOrder, runSwarm, startSwarm, unloadModels
+from cli_program import (addLive, buildAgent, buildWithLeader, chooseArchitect, closeArchitect, manageBuilt, changeModel, chooseBuilder, chooseMode, chooseOrder,
+                         runSwarm, startArchitect, startSwarm, swarmFolder, unloadModels)
+from leader_wheels import projectOfFolder
+from wheel_store import catalogFor
 from cli_resume import followUps, offerUnfinished, openMission
-from cli_steps import askAgentCount, askBudget, askFolder, askMission, chooseAgent, chooseFolders, chooseTask, describeAgent, fillTask
+from cli_steps import askAgentCount, askBudget, askFolder, askMission, chooseAgent, chooseFolders, chooseTask, chooseWheels, describeAgent, fillTask
 from cli_view import TreeView, formatEvent, openAgent, renderTree, runCommand
 from mission_history import deleteMission, describeMission, listMissions
 from model_support import ModelError
@@ -103,6 +107,13 @@ def runProgram(console, missionId=None):
             status = swarm.getVramStatus()
             if status["needed"]:
                 console.say(f"\nVRAM the swarm is expected to need so far: {status['needed']} GB of {status['total']} GB ({status['free']} GB free now)." + (f"\n{status['message']}" if status["message"] else ""))
+        if catalogFor(projectOfFolder(swarmFolder(specs))):
+            heading(console, "Step 4: the wheels of each agent")
+            chooseWheels(console, swarm, specs)
+        manageBuilt(console, swarm, specs, keys, tokens, models)
+        members = [swarm.getLeader(), *[name for name in swarm.getAgents() if name != swarm.getLeader()]]
+        choice, model = chooseArchitect(console, swarm, [(name, swarm.getInfo(name)["model"]) for name in members], keys, tokens)
+        startArchitect(console, swarm, choice, model, keys, tokens)
     console.newAgent = lambda swarm: addLive(console, swarm, specs, keys, tokens, models)
     heading(console, "Your swarm")
     console.say(f"The first agent, {swarm.getLeader()}, is the leader: it works last, and it speaks to you for the swarm.\n\n" + renderTree(swarm, console.color))
@@ -125,6 +136,7 @@ def runProgram(console, missionId=None):
                 continue
             followUps(console, swarm, models)
             break
+    closeArchitect(swarm)
     unloadModels(models)
     console.say("\nBye.")
 
@@ -172,7 +184,7 @@ def showStatus(info, asJson):
         return
     print(describeSession({**info, **status}))
     if status.get("question"):
-        print(f"It asks you, in window {status['question']['window']}: {status['question']['text']}")
+        print(f"It asks you (question {status['question']['id']}), in window {status['question']['window']}: {status['question']['text']}")
     if status.get("tree"):
         print(f"\n{status['tree']}")
     print(f"\nWindows: {', '.join(status.get('windows') or [])}. Attach with: swarmup_cli.py attach {info['id']}")
@@ -262,6 +274,8 @@ def makeParser():
     send.add_argument("session")
     send.add_argument("text", nargs="+", help="what to type: an answer, a command, or a message")
     send.add_argument("--window", default=SWARM_WINDOW, help="swarm (the default), the name of an agent, or a window number")
+    send.add_argument("--question", type=int, default=None, help="the id of the question this line answers (status shows it): the line is refused, and "
+                      "not used, if another question waits now")
     kill = commands.add_parser("kill", help="close a session (a swarm that runs is saved, and can be continued at the next start)")
     kill.add_argument("session", nargs="?")
     kill.add_argument("--all", action="store_true", help="close every session")
@@ -276,6 +290,7 @@ def makeParser():
     deleting.add_argument("missions", nargs="+", help="their numbers in the history, or their ids")
     deleting.add_argument("--yes", action="store_true", help="do not ask for a confirmation")
     addMcpArguments(commands)
+    addPatternArguments(commands)
     commands.add_parser("mcp-serve", help="run SwarmUP as an MCP server on stdio, so another AI agent can start, lead and follow its swarms")
     serving = commands.add_parser("serve")
     serving.add_argument("--session", required=True)
@@ -310,6 +325,8 @@ def main(arguments=None):
             deleteMissions(options.missions, options.yes)
         elif command == "mcp":
             runMcp(options)
+        elif command in ("patterns", "wheels"):
+            runArchitectCommand(options)
         elif command == "calls":
             showCalls(findMission(options.mission, listMissions()), options.agent, options.server, options.lines)
         elif command == "mcp-serve":
@@ -328,7 +345,9 @@ def main(arguments=None):
             print(text if text is not None else f"Session {session['id']} has no window {options.window}.")
         elif command == "send":
             session = findSession(options.session, listSessions())
-            request(session, {"type": "input", "window": windowName(session, options.window), "text": " ".join(options.text)})
+            reply = request(session, {"type": "input", "window": windowName(session, options.window), "text": " ".join(options.text), "question": options.question})
+            if reply.get("type") == "error":
+                sys.exit(reply["message"])
             print(f"Sent to session {session['id']}.")
         elif command == "kill":
             sessions = listSessions()
