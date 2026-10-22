@@ -36,6 +36,11 @@ class Script:
         self.answers, self.secrets, self.said, self.log = list(answers), list(secrets), [], []
 
     def read(self, prompt):
+        # The architect uses the model of the leader, unless the test answers it (with an answer that starts with "architect:").
+        if prompt.startswith("The architect"):
+            answer = self.answers.pop(0)[len("architect:"):] if self.answers and str(self.answers[0]).startswith("architect:") else "y"
+            self.log.append((prompt, answer))
+            return answer
         # The offer of the model of the agent before is declined, unless the test answers it (with a yes or a no first in its answers).
         if prompt.startswith("Use the same model as") and not (self.answers and str(self.answers[0]).strip().lower() in ("y", "yes", "n", "no")):
             self.log.append((prompt, "n"))

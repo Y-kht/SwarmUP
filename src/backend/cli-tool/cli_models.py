@@ -361,7 +361,10 @@ def reuseModel(console, swarm, info, keys, tokens, replacing=None):
 def chooseModel(console, swarm, spec, number, total, keys, tokens, replacing=None):
     task = spec["task"]
     status = checkVram(swarm.getNeededVram(replacing), readGpus())
-    console.say(f"\n--- Model of agent {number} of {total}: {spec['name']} ({getTask(task)['role']}) ---\n{describeAgent(spec)}")
+    if task == "architect":
+        console.say("\n--- The model of the architect ---\nIt reads the work of the agents and writes code: a capable model is worth it, and it spends at most its share of the budget.")
+    else:
+        console.say(f"\n--- Model of agent {number} of {total}: {spec['name']} ({getTask(task)['role']}) ---\n{describeAgent(spec)}")
     if task == "leader":
         console.say("This leader builds the swarm, follows it, and proposes changes to you: it must plan well and follow a strict format, so a capable model is worth it.")
     elif number == 1:

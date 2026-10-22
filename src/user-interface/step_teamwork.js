@@ -51,6 +51,7 @@ function viewTeamwork() {
               class: ['pill sm', on && 'selected'], onClick: () => toggleWait(agent.name, other.name) }, h('span', { class: 'check' }, on ? icon('check') : null), other.name); }) :
               h('span', { class: 'small faint' }, 'Nobody else to wait for.')));
         }), ui.errors.order ? callout('danger', 'alert', ui.errors.order) : null)) : null,
+      wheelsCard(),
       h('div', { class: 'card enter-2' }, h('div', { class: 'card-head' }, icon('activity'), h('h3', { class: 'grow' }, 'The plan of your swarm'), graphLegend()),
         h('div', { class: 'card-body' }, flowGraph(builderNodes(), builderStages(), agents[0]?.name, { builder: true })))),
     footer: footer({ onClick: () => go('models') }, { label: 'Continue to the launch', disabled: leaderBusy || !!ui.errors.order, onClick: () => go('launch') }),

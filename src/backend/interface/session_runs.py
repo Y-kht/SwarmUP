@@ -184,6 +184,7 @@ class SessionRuns:
         swarm.addListener(self.onEvent)
         if leader or len(self.specs) > 1:
             self.manage(swarm, leader or self.specs[0])
+        self.attachTheArchitect(swarm)
         return swarm
 
     # A model of the steps that has no client yet (the leader chose it before its API key was given) gets one now.
@@ -335,6 +336,7 @@ class SessionRuns:
         self.refreshUnfinished()
 
     def unloadModels(self):
-        for spec in self.specs:
+        self.closeTheArchitect()
+        for spec in [*self.specs, self.architectSpec]:
             if hasattr(spec["client"], "unload"):
                 spec["client"].unload()

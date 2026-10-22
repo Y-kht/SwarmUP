@@ -7,6 +7,8 @@ from messengers import MessagingError, checkMessenger, findTelegramChats
 from mission_costs import checkBudget
 from sources_library import ALL_NEWS_OUTLETS, MESSAGING_APPS, NEWS_OUTLETS, PAPER_PUBLISHERS
 from tasks_library import ADVANCED_FIELDS, SPECIALISED_TASKS, TASKS, answerKey, buildLoop, checkAgentName, describeLoop, getDefault, getHelp, getTask, isAsked, messengerSettings, parseAnswer, parseChoices, suggestFolder, suggestName
+from leader_wheels import projectOfFolder
+from wheel_store import catalogFor
 from writing_loops import findPublishers
 
 
@@ -269,6 +271,24 @@ def askFolder(console, spec, number, total):
         return value, ""
     shown = f" [{suggestion}]" if suggestion else ""
     return askUntilValid(console, f"Folder of {spec['name']}{shown} (a path, Enter = {'the one in brackets' if suggestion else 'no folder'}, none = no folder):", parse)
+
+
+# The wheels of each agent of a swarm the user builds, when the project has some: scripts the architect wrote from what agents repeated.
+def chooseWheels(console, swarm, specs):
+    folders = [spec["answers"].get("folder") for spec in specs if spec["answers"].get("folder")]
+    catalog = catalogFor(projectOfFolder(max(folders, key=folders.count) if folders else None))
+    if not catalog:
+        return False
+    names = list(catalog)
+    console.say("Your project has wheels: scripts the architect wrote from what agents of this project did again and again. An agent gets only the wheels "
+                "you give it, as tools.\n" + "\n".join(f"  {name}: {entry.get('summary') or ''}" for name, entry in catalog.items()))
+    for spec in specs:
+        chosen = chooseFrom(console, f"\nWhich wheels must {spec['name']} use?", names, one=False, none=True, default=[], hint="Your choices (numbers like 1,3; Enter or none = none):")
+        member = swarm.getMember(spec["name"])
+        member["agent"].wheels = spec["answers"]["wheels"] = list(chosen)
+        if member.get("recipe") is not None:
+            member["recipe"]["answers"]["wheels"] = list(chosen)
+    return True
 
 
 # One folder for the swarm: every agent works in it. An agent whose file is somewhere else (a document to format...) is asked its own folder,

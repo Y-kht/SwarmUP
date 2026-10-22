@@ -38,6 +38,8 @@ USER_AGENT = "Mozilla/5.0 (compatible; HarnessForGood/1.0)"
 YES_WORDS = ("yes", "y", "ok", "okay", "approve")
 NO_WORDS = ("no", "n", "cancel", "stop")
 USER_NAME = "User"
+# The name of the architect of every swarm (architect_manager.py), which no agent may take.
+ARCHITECT_NAME = "Architect"
 
 PHONE_PATTERN = r"\+\d{6,15}"
 

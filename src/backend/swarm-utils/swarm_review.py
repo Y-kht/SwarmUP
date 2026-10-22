@@ -57,6 +57,8 @@ class SwarmReview:
         member["agent"].receiveFromUser(message)
         self.logMessage(USER_NAME, name, message)
         self.record("addUserPrompt", self.round, message, name)
+        if self.journal is not None:
+            self.journal.add("user", name, to=name, text=message[:1500], whileReady=member["review"] == "ready")
         self.askCorrection(member)
 
     # Gives the answer of the user to the agent that waits for it. It must be called with self.changed held.
@@ -206,6 +208,8 @@ class SwarmReview:
     # If no agent is concerned the correction is about the summary itself, and it is returned to write the summary again.
     def correctWithLeader(self, names, comment, what):
         route = self.routeCorrection(names, comment)
+        if self.journal is not None:
+            self.journal.add("route", self.leader, comment=str(comment)[:1500], what=what, route={name: str(text)[:800] for name, text in route.items()})
         self.getMember(self.leader)["agent"].notifyUser(f"Asking {', '.join(route)} to correct their {what}." if route else "No agent is concerned, so only the summary is changed.")
         for name, instruction in route.items():
             self.communicate(self.leader, name, f"The user asked for a correction: {comment}\nWhat to change in your {what}: {instruction}")

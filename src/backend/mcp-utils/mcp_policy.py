@@ -19,28 +19,54 @@ def decision(value, message=""):
     return {"decision": value, "message": message}
 
 
-# request: {action, detail, folder, reason, key, place, free, readOnly}. The answer: {"decision": once|run|deny, "message"}.
+# request: {action, detail, folder, reason, key, place, free, readOnly, pin}. The answer: {"decision": once|run|deny, "message"}.
 def decidePermission(loop, request):
-    key = request.get("key") or "change"
+    answer, how = judgePermission(loop, request)
+    note = getattr(loop, "note", None)
+    if note is not None:
+        note("permission", key=str(request.get("key") or "change")[:500], action=request.get("action") or "", detail=str(request.get("detail") or "")[:500],
+             pin=request.get("pin"), decision=answer["decision"], how=how, message=answer["message"][:500])
+    return answer
+
+
+def judgePermission(loop, request):
+    key, pin = request.get("key") or "change", request.get("pin")
     if loop.planning and not request.get("readOnly"):
-        return decision("deny", PLAN_REFUSAL)
+        return decision("deny", PLAN_REFUSAL), "plan"
     if request.get("free") or (key == "change" and request.get("place", "") == "" and not loop.folder):
-        return decision("once")
+        return decision("once"), "free"
     shared = getattr(getattr(loop, "team", None), "allowedAll", None)
-    if key in loop.allowed or (isinstance(shared, set) and key in shared):
-        return decision("once")
-    answer = loop.askPermission({"action": request.get("action") or "act", "detail": request.get("detail") or "", "folder": request.get("folder") or "",
-                                 "reason": request.get("reason") or ""})
+    if key in loop.allowed:
+        return decision("once"), "remembered"
+    if isinstance(shared, set) and key in shared:
+        return decision("once"), "shared"
+    if pin and pinApproved(pin):
+        return decision("once"), "pinned"
+    card = {"action": request.get("action") or "act", "detail": request.get("detail") or "", "folder": request.get("folder") or "", "reason": request.get("reason") or ""}
+    answer = loop.askPermission({**card, "pin": pin} if pin else card)
     chosen = answer.get("decision") if isinstance(answer, dict) else "deny"
+    if chosen == "always" and pin:
+        approvePin(pin, getattr(loop, "name", ""))
+        chosen = "run"
     if chosen == "all" and isinstance(shared, set):
         shared.add(key)
         chosen = "run"
-    if chosen in ("run", "all"):
+    if chosen in ("run", "all", "always"):
         loop.allowed.add(key)
-        return decision("run")
+        return decision("run"), "asked"
     if chosen == "once":
-        return decision("once")
-    return decision("deny", str(answer.get("message") or "") if isinstance(answer, dict) else "")
+        return decision("once"), "asked"
+    return decision("deny", str(answer.get("message") or "") if isinstance(answer, dict) else ""), "asked"
+
+
+def pinApproved(pin):
+    import wheel_store
+    return wheel_store.isApproved(pin)
+
+
+def approvePin(pin, agent):
+    import wheel_store
+    wheel_store.approve(pin, f"while {agent} ran it")
 
 
 # A form of an external server (its requested schema) as questions of SwarmUP, and the answers as the content the server asked for.

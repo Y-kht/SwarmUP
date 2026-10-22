@@ -1,9 +1,11 @@
-# The swarm of the command line: its agents, its order, its run, and the leader that builds it.
+# The swarm of the command line: its agents, its order, its run, the leader that builds it, and its architect.
+from architect_loop import pickArchitect
+from architect_manager import attachArchitect
 from cli_console import askUntilValid, askYesNo, chooseFrom, heading, shorten
 from cli_models import chooseModel
 from cli_steps import askFolder, chooseAgent
-from cli_view import TreeView, describeCosts, renderTree, runCommand, watchCosts
-from harness_utils import USER_LOCK
+from cli_view import TreeView, describeCosts, describeModel, renderTree, runCommand, watchCosts
+from harness_utils import ARCHITECT_NAME, USER_LOCK
 from leader_catalog import LeaderCatalog
 from leader_manager import LeaderManager
 from leader_utils import designSwarm
@@ -143,6 +145,7 @@ def buildWithLeader(console, mission, specs, keys, tokens, models, costs):
     info, model = chooseModel(console, swarm, leader, 1, 1, keys, tokens)
     models[leader["name"]] = model
     costs.track(leader["name"], info, model)
+    choice, architectModel = chooseArchitect(console, swarm, [(leader["name"], info)], keys, tokens)
     loop = buildLoop("leader", model, leader["answers"])
     connect(loop, console)
     watchCosts(console, swarm, loop)
@@ -168,7 +171,52 @@ def buildWithLeader(console, mission, specs, keys, tokens, models, costs):
     for agent in agents:
         swarm.setWaitsFor(agent["name"], agent["waitsFor"])
     LeaderManager(swarm, catalog, ConsoleMaker(console, swarm, specs, keys, tokens, models))
+    startArchitect(console, swarm, choice, architectModel, keys, tokens)
     return swarm
+
+
+# ==============
+# The architect of the swarm (architect_manager.py): it learns in the background from what the agents repeat, and writes wheels. The user
+# chooses its model: the same as an agent of the swarm (the leader first), or another one.
+# ==============
+ARCHITECT_INFO = ("The architect works in the background of every swarm: it reads what the agents do, and turns what they repeat into wheels, scripts that do "
+                  "those steps at once, which the leader gives to the agents of the next swarms. It never asks you anything; you approve each new wheel once, "
+                  "the first time an agent runs it.")
+
+
+# candidates: [(name, info)] of the agents whose model the architect could share, the leader first. It gives (the choice, the client made now).
+def chooseArchitect(console, swarm, candidates, keys, tokens):
+    console.say(f"\n--- The architect ---\n{ARCHITECT_INFO}")
+    usable = [(name, info) for name, info in candidates if info and not info.get("user") and info.get("cli") != "codex"]
+    if usable:
+        name, info = usable[0]
+        if askYesNo(console, f"The architect: use the same model as {name} ({describeModel(info)})?", True):
+            return {"same": name}, None
+    elif not askYesNo(console, "The architect: no agent has a model it can use. Choose one for it? (no: this time it only counts what the agents repeat)", True):
+        return None, None
+    info, model = chooseModel(console, swarm, {"task": "architect", "name": ARCHITECT_NAME, "answers": {}}, 0, 0, keys, tokens, replacing=ARCHITECT_NAME)
+    if info.get("user") or info.get("cli") == "codex":
+        console.say("The architect needs a model of its own: this time it only counts what the agents repeat.")
+        return None, None
+    return info, model
+
+
+def startArchitect(console, swarm, choice, model, keys, tokens):
+    def makeClient(info):
+        return model if model is not None and info is choice else createModel(info, keys, token=tokens.get(info["name"]), report=console.say)
+    return attachArchitect(swarm, choice, makeClient, lambda text: console.say(text, window=ARCHITECT_NAME))
+
+
+def describeArchitect(swarm):
+    architect = swarm.architect
+    info = pickArchitect(swarm, architect.choice)[0] if architect else None
+    return f"The architect uses {info['name']}." if info else "The architect has no model: it only counts what the agents repeat."
+
+
+# The architect stops before the models are let go: a pass would load a local model again.
+def closeArchitect(swarm):
+    if swarm is not None and swarm.architect is not None:
+        swarm.architect.close()
 
 
 def chooseOrder(console, swarm):

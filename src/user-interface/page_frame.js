@@ -137,7 +137,8 @@ function renderSidebar() {
       h('div', { class: 'theme-switch', role: 'group', 'aria-label': 'Theme' },
         [['auto', 'monitor', 'Like the system'], ['light', 'sun', 'Light'], ['dark', 'moon', 'Dark']].map(([value, iconName, label]) =>
           h('button', { class: theme === value && 'active', title: `${label} theme`, 'aria-label': `${label} theme`, onClick: () => setTheme(value) }, icon(iconName, 'sm')))),
-      h('button', { class: 'nav-item', onClick: () => openModal({ type: 'settings', maxAgents: String(state.settings.maxAgents), errors: {}, error: '' }) }, h('span', { class: 'nav-step' }, icon('settings', 'sm')), 'Settings'),
+      h('button', { class: 'nav-item', onClick: () => openModal({ type: 'settings', maxAgents: String(state.settings.maxAgents), maxTools: String(state.settings.maxTools), architectShare: String(state.settings.architectShare),
+        architectDollars: String(state.settings.architectDollars), errors: {}, error: '' }) }, h('span', { class: 'nav-step' }, icon('settings', 'sm')), 'Settings'),
       h('button', { class: 'nav-item', onClick: () => openModal({ type: 'help' }) }, h('span', { class: 'nav-step' }, icon('help', 'sm')), 'How SwarmUP works'),
       h('button', { class: 'nav-item', onClick: () => openModal({ type: 'quit' }) }, h('span', { class: 'nav-step' }, icon('power', 'sm')), 'Quit SwarmUP')));
 }

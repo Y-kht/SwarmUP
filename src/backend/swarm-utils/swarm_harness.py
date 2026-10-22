@@ -17,7 +17,7 @@ from swarm_team import SwarmTeam
 
 # What is saved of an agent of a swarm, apart from its loop and the lists.
 # The events that pass at once (the text an agent writes, the progress of a call, a call that failed): the state is not saved for them.
-PASSING_EVENTS = ("text", "progress", "call")
+PASSING_EVENTS = ("text", "progress", "call", "architect")
 SAVED_FIELDS = ("role", "task", "boss", "model", "recipe", "status", "result", "error", "mode", "review", "draft", "problem", "revision", "started", "sitsOut")
 
 
@@ -95,6 +95,11 @@ class Swarm(SwarmTeam, SwarmReview, SwarmRun, SwarmRounds):
         # The gateway of the mission (mcp_gateway.py): every call of a tool of its agents goes through it, while a run works.
         self.gateway = None
         self.allowedAll = set()
+        # The journal of the mission (agent_journal.py), its project (project_identity.py), and its architect (architect_manager.py), which
+        # learns from the journal in the background and writes wheels.
+        self.journal = None
+        self.project = None
+        self.architect = None
         # A mission has rounds: the first request of the user, then each follow-up. requests holds them all, {round, text, time}.
         self.round = 1
         self.requests = []
@@ -132,7 +137,8 @@ class Swarm(SwarmTeam, SwarmReview, SwarmRun, SwarmRounds):
                 "state": "paused" if self.interruption else "running", "heartbeat": datetime.now().timestamp(), "pid": os.getpid(),
                 "savedAt": f"{datetime.now():%Y-%m-%d %H:%M:%S}", "summary": self.summary, "messages": list(self.messages), "members": members,
                 "removed": list(self.removed), "managed": self.manager is not None, "costs": self.costs.state(), "runName": self.runName,
-                "round": self.round, "requests": list(self.requests), "roundParts": self.roundParts}
+                "round": self.round, "requests": list(self.requests), "roundParts": self.roundParts, "project": self.project,
+                "architect": self.architect.describeState() if self.architect is not None else None}
 
     # Writes the state to the disk. Whatever goes wrong, the swarm goes on, and the user is told once that the work cannot be continued after a stop.
     # The user is told from another thread, because speaking to the user can wait for a long time, and the locks of the swarm may be held here.
@@ -181,6 +187,7 @@ class Swarm(SwarmTeam, SwarmReview, SwarmRun, SwarmRounds):
         swarm.removed = list(saved.get("removed", []))
         swarm.runName = saved.get("runName", "")
         swarm.round, swarm.requests, swarm.roundParts = saved.get("round", 1), list(saved.get("requests", [])), saved.get("roundParts")
+        swarm.project = saved.get("project")
         swarm.costs.restore(saved.get("costs") or {})
         for name, data in saved["members"].items():
             agent = makeAgent(name, data)

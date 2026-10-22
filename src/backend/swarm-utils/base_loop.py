@@ -56,6 +56,12 @@ class Loop:
         self.onActivity = None
         # The text the model writes now, while it writes it (onText(text, done)).
         self.onText = None
+        # The wheels the leader gave the agent for its task (wheel_store.py): scripts of the architect, offered as tools by the wheels server.
+        self.wheels = []
+        # The journal of the mission (agent_journal.py), set by the swarm while it runs, and what the agent may reach when it is narrowed
+        # ({server: "*" or tool names}, see inScope in mcp_gateway.py; None is everything its role allows).
+        self.journal = None
+        self.toolScope = None
         # What the loop says and asks is never mixed with what another loop says and asks to the same user. A window with several missions gives
         # each of them its own lock, so a question of one mission never waits for the answer to another.
         self.userLock = USER_LOCK
@@ -81,6 +87,11 @@ class Loop:
         self.userMessages = list(state.get("userMessages", []))
         self.approvedPlan = state.get("approvedPlan", "")
         self.roundRequest = state.get("roundRequest", "")
+
+    # Writes what the agent did in the journal of the mission, for the miner of patterns. Nothing happens outside a swarm.
+    def note(self, kind, **fields):
+        if self.journal is not None:
+            self.journal.add(kind, self.name, loop=self, **fields)
 
     def saveProgress(self):
         if self.onProgress:
@@ -228,14 +239,18 @@ class Loop:
     # A coding agent wants to act: run a command, change files, read outside its folder, use the web... request is
     # {"action": what it wants to do, in words, "detail": the command, file or address, "folder": where, "reason": why (may be empty)}.
     # The answer is {"decision": "once", "run" (the same action is allowed until the swarm runs again), "all" (the same, for every agent of the
-    # swarm) or "deny", "message": why it is denied}.
+    # swarm), "always" (only for a wheel, whose request has a pin: this version of the wheel is allowed from now on) or "deny", "message": why it
+    # is denied}.
     def askPermission(self, request):
         with self.userLock:
             reason = f"\nWhy: {request['reason']}" if request.get("reason") else ""
             self.notifyUser(f"[{self.name}] wants to {request['action']}:\n{request['detail']}\nIn: {request.get('folder') or 'its folder'}{reason}")
-            reply = self.askUser("Type yes to allow it this time, always to allow it until the swarm runs again, all to allow it for every agent until then, "
-                                 "or no (followed by why, if you like):").strip()
+            forever = ", forever to allow this version of the wheel from now on, in every swarm" if request.get("pin") else ""
+            reply = self.askUser("Type yes to allow it this time, always to allow it until the swarm runs again, all to allow it for every agent until then"
+                                 f"{forever}, or no (followed by why, if you like):").strip()
         word, _, rest = reply.partition(" ")
+        if word.lower() == "forever" and request.get("pin"):
+            return {"decision": "always", "message": ""}
         if word.lower() in ("always", "run"):
             return {"decision": "run", "message": ""}
         if word.lower() in ("all", "everyone"):
@@ -360,12 +375,14 @@ class Loop:
             messagesBefore = len(self.userMessages)
             draft = self.askAgent(prompt, own)
             problem = verify(draft) or self.checkNewMessages(messagesBefore)
+            self.note("draft", own=own, attempt=attempt, problem=str(problem or "")[:1500], length=len(draft or ""), planning=self.planning)
             if problem and attempt < self.numberOfLoops:
                 feedback = problem
                 continue
             if not ask:
                 return None if problem else draft
             reply = self.askApproval(draft, problem)
+            self.note("review", reply="approved" if isYes(reply) else "rejected" if isNo(reply) else "correction", text="" if isYes(reply) or isNo(reply) else str(reply)[:1500])
             if isYes(reply):
                 if key:
                     self.remember(key, draft)

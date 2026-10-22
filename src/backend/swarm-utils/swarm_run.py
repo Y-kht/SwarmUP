@@ -4,11 +4,13 @@ import traceback
 from datetime import datetime
 from functools import partial
 
+from agent_journal import Journal, clip
 from agent_storehouse import makeRunName
 from background_processes import stopProcesses
 from harness_utils import STATE_LOCK, STOPPED_MESSAGE, SwarmStopped
 from mcp_gateway import Gateway
 from mission_memory import WorkSession
+from project_identity import projectOf, registerMission
 from server_leader import LeaderDesk
 from saved_swarms import saveSwarmState
 
@@ -173,6 +175,9 @@ class SwarmRun:
             self.record("addOutput", self.round, name, member["result"])
             if name == self.leader:
                 self.record("addProgress", self.round, "The final report of the leader", member["result"])
+        if self.journal is not None:
+            text = member["result"] if member["result"] is not None else member["error"]
+            self.journal.add("result", name, mode=member["mode"], ok=member["result"] is not None, text=clip(text, 1500), length=len(str(text or "")))
 
     # A worker that finished in execute mode needs its model no more in this run: a model on the GPUs lets its memory go for the agents that
     # still work (the leader works last). It loads again if a later round needs it.
@@ -236,7 +241,8 @@ class SwarmRun:
         if self.gateway is None:
             self.gateway = Gateway(self.id, onEvent=self.onGatewayEvent)
         self.gateway.setFolder(self.session.folder)
-        self.record("setMission", self.mission, self.round)
+        self.openJournal()
+        self.record("setMission", self.mission, self.round, project=self.project)
         if not any(request["round"] == self.round for request in self.requests):
             self.requests.append({"round": self.round, "text": self.mission, "time": f"{datetime.now():%Y-%m-%d %H:%M:%S}"})
             self.record("addUserPrompt", self.round, self.mission, kind="The mission")
@@ -262,6 +268,7 @@ class SwarmRun:
             self.startRound(previous)
         self.active = True
         self.startHeartbeat()
+        self.journal.add("run", mode=self.mode, resume=resume, following=following, agents=[self.describeForJournal(name) for name in self.members])
         self.emit("run", mode=self.mode)
         if not resume and not following:
             for name in self.members:
@@ -280,8 +287,32 @@ class SwarmRun:
         agent.name, agent.reviewer, agent.session = name, partial(self.waitForReview, name), self.session
         agent.team, agent.allowed, agent.onActivity, agent.gateway = self, set(), partial(self.noteActivity, name), self.gateway
         agent.onText = partial(self.noteText, name)
+        agent.journal = self.journal
         agent.onConnectionLost, agent.onProgress = partial(self.waitForResume, name), self.checkpoint
         agent.leaderDesk = LeaderDesk(self.manager.catalog, manager=self.manager) if self.manager is not None and name == self.leader else None
+
+    # The journal of the mission (agent_journal.py): every run of the mission writes in the same one, which the miner of its project reads.
+    def openJournal(self):
+        self.project, root = projectOf(self)
+        if self.journal is None or self.journal.path.parent != self.session.folder:
+            self.journal = Journal(self.session.folder, self.id, onProblem=self.tellJournalProblem)
+            self.journal.watch(self)
+        self.journal.project, self.journal.run, self.journal.round = self.project, self.runName, self.round
+        self.gateway.journal = self.journal
+        try:
+            registerMission(self.project, root, self.id, self.journal.path)
+        except Exception:
+            traceback.print_exc()
+
+    def tellJournalProblem(self, text):
+        if self.leader in self.members:
+            threading.Thread(target=self.members[self.leader]["agent"].notifyUser, args=(text,), daemon=True).start()
+
+    def describeForJournal(self, name):
+        member, agent = self.members[name], self.members[name]["agent"]
+        return {"name": name, "task": clip(member["task"], 600), "role": member["role"], "kind": (member.get("recipe") or {}).get("task"),
+                "model": (member["model"] or {}).get("name"), "folder": str(agent.folder) if agent.folder else None, "wheels": list(agent.wheels),
+                "leader": name == self.leader}
 
     # What the gateway tells about the calls of the agents (a call that failed, the progress of a long one) goes to every listener of the swarm.
     def onGatewayEvent(self, kind, agent, **details):
@@ -303,6 +334,8 @@ class SwarmRun:
     # A round whose leader did not finish is failed, never finished (ERR-05): the user sees it, and can still follow it up.
     def closeRun(self, ended, failed=False):
         self.heartbeat.set()
+        if self.journal is not None:
+            self.journal.add("end", state="stopped" if self.stopped else ("failed" if failed else "finished") if ended else "interrupted")
         stopProcesses(self.id)
         if self.gateway is not None:
             self.gateway.close()
@@ -380,7 +413,7 @@ class SwarmRun:
         finally:
             for member in self.members.values():
                 agent = member["agent"]
-                agent.reviewer = agent.onConnectionLost = agent.onProgress = agent.leaderDesk = agent.session = agent.team = agent.onActivity = None
+                agent.reviewer = agent.onConnectionLost = agent.onProgress = agent.leaderDesk = agent.session = agent.team = agent.onActivity = agent.journal = None
                 agent.resumed = False
             self.stage = None
             self.closeRun(ended, failed=ended and result is None and self.members.get(self.leader, {}).get("status") == "failed")

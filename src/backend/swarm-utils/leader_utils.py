@@ -150,6 +150,7 @@ def proposeUntilApproved(leader, catalog, desk):
                 raise ValueError("Some agents still miss what only you can give (a password, an address, an API key...), so the swarm cannot be made.")
             for agent in agents:
                 agent["answers"]["folder"] = str(catalog.folder) if catalog.folder else None
+                agent["answers"]["wheels"] = list(agent.get("wheels") or [])
             return agents
         request = str(answer.get("message") or "").strip() if isinstance(answer, dict) else ""
         if not request:

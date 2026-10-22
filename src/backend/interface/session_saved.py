@@ -113,6 +113,8 @@ class SessionSaved:
         if saved.get("managed") and self.specs:
             self.buildMode = "leader" if self.leaderSpec() else self.buildMode
             self.manage(swarm, self.leaderSpec() or self.specs[0])
+        state = saved.get("architect") or {}
+        self.attachTheArchitect(swarm, state["choice"] if "choice" in state else {"same": saved["leader"]}, state)
         self.order = "custom" if any(spec["waitsFor"] for spec in rebuilt) else "together"
         self.cancelling = None
         if following:

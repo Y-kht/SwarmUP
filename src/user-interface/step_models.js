@@ -40,7 +40,7 @@ function viewModels() {
         state.costs.spent ? badge(`${dollars(state.costs.spent)} spent so far`, 'info') : null),
         state.costs.budget ? budgetMeter(state.costs) : h('div', { class: 'row small' }, h('span', { class: 'muted grow' }, 'No budget: every model can be chosen, and the cost is still counted while the swarm runs.'),
           h('button', { class: 'link-btn', type: 'button', onClick: () => go('mission') }, 'Set a budget'))),
-      h('div', { class: 'agent-rows' }, agents.map(agent => modelRow(agent))),
+      h('div', { class: 'agent-rows' }, agents.map(agent => modelRow(agent)), agents.length ? architectRow(state.architect) : null),
       providers.length ? h('div', { class: 'card pad' }, h('div', { class: 'row', style: { marginBottom: '10px' } }, icon('key'), h('h3', {}, 'API keys')),
         h('div', { class: 'stack tight' }, providers.map(provider => { const key = state.keys[provider]; return h('div', { class: 'row small' }, icon('lock', 'sm'), h('b', {}, key.company),
           h('span', { class: 'muted' }, key.source === 'environment' ? `read from ${key.variable}` : key.source === 'typed' ? 'given by you, kept in memory only' : 'missing')); }),

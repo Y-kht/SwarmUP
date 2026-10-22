@@ -4,7 +4,7 @@
 from base_loop import Loop
 from cli_console import askUntilValid, chooseFrom, heading, shorten
 from cli_models import UserLeader, prepareApi, prepareLocal, signInCodex
-from cli_program import ConsoleMaker, addLive, chooseMode, connect, startSwarm, unloadModels
+from cli_program import ConsoleMaker, addLive, chooseMode, closeArchitect, connect, startArchitect, startSwarm, unloadModels
 from cli_steps import askAccounts, askField
 from cli_view import renderTree, watchCosts
 from codex_agent import readCodexAccount
@@ -77,8 +77,17 @@ def restoreSwarm(console, saved, models):
         built = leader["recipe"]["task"] == "leader"
         catalog = LeaderCatalog(saved["mission"], leader["recipe"]["answers"].get("folder"), saved["leader"], leader["model"], keys, tokens, swarm.costs)
         LeaderManager(swarm, catalog, ConsoleMaker(console, swarm, specs, keys, tokens, models), watchFinishes=built)
+    restoreArchitect(console, swarm, saved, keys, tokens)
     console.newAgent = lambda swarm: addLive(console, swarm, specs, keys, tokens, models)
     return swarm
+
+
+# The architect of a saved mission, on the model the user chose for it (a mission saved before the architect existed: the model of its leader).
+def restoreArchitect(console, swarm, saved, keys, tokens):
+    state = saved.get("architect") or {}
+    architect = startArchitect(console, swarm, state["choice"] if "choice" in state else {"same": saved["leader"]}, None, keys, tokens)
+    architect.restoreState(state)
+    return architect
 
 
 def resumeSaved(console, saved):
@@ -89,6 +98,7 @@ def resumeSaved(console, saved):
         return False
     startSwarm(console, swarm, swarm.getMode(), models, resume=True)
     followUps(console, swarm, models)
+    closeArchitect(swarm)
     unloadModels(models)
     return True
 
@@ -126,6 +136,7 @@ def followUpSaved(console, saved):
     swarm.followUp(askRequest(console))
     startSwarm(console, swarm, chooseMode(console), models)
     followUps(console, swarm, models)
+    closeArchitect(swarm)
     unloadModels(models)
     return True
 

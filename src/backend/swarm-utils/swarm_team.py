@@ -334,9 +334,14 @@ class SwarmTeam:
             waits = f" It waits for {', '.join(member['waitsFor'])}." if member["waitsFor"] and other != self.leader else ""
             ready = " Its result is ready (team__read_result)." if member["result"] is not None and other != name else ""
             lines.append(f"- {other}{' (leader)' if other == self.leader else ''}{' (you)' if other == name else ''}: the {member['role']}, {member['status']}. "
-                         f"Task: {member['task']}{waits}{ready}")
+                         f"Task: {member['task']}{waits}{ready}{self.describeWheelsOf(other)}")
         lines += [f"- {item['name']} left the swarm." for item in self.removed]
         return "\n".join(lines)
+
+    # The wheels an agent has, so the leader gives a part of the work that a wheel does to the agent that has it.
+    def describeWheelsOf(self, name):
+        wheels = getattr(self.members[name]["agent"], "wheels", None) if name in self.members else None
+        return f" Its wheels: {', '.join(wheels)}." if wheels else ""
 
     def resultOf(self, written):
         target = self.findName(written)

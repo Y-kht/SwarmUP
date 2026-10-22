@@ -57,12 +57,15 @@ def hasCredentials(info, keys):
 # A coding agent asks for a permission (kind permission) or asks its own questions (kind form): those are answered with buttons and choices.
 PERMISSION_REPLIES = [{"label": "Allow once", "value": "once", "style": "primary"}, {"label": "Allow until the next run", "value": "run", "style": "ghost"},
                       {"label": "Allow for every agent until the next run", "value": "all", "style": "ghost"}, {"label": "Deny", "value": "deny", "style": "danger"}]
+# A wheel (a script of the architect) can also be allowed always: this version of it, in every swarm, until it changes.
+ALWAYS_REPLY = {"label": "Always allow this version of the wheel", "value": "always", "style": "ghost"}
 
 
-def describeQuestion(text, secret=False, kind=None):
+def describeQuestion(text, secret=False, kind=None, payload=None):
     low = text.strip().lower()
     if kind == "permission":
-        return "permission", PERMISSION_REPLIES
+        pinned = isinstance(payload, dict) and payload.get("pin")
+        return "permission", [*PERMISSION_REPLIES[:1], ALWAYS_REPLY, *PERMISSION_REPLIES[1:]] if pinned else PERMISSION_REPLIES
     if kind == "proposal":
         return "proposal", []
     if kind == "form":
@@ -89,7 +92,8 @@ def describeQuestion(text, secret=False, kind=None):
 def describeAnswer(question, answer):
     if question["kind"] == "permission" and isinstance(answer, dict):
         detail = (question["payload"] or {}).get("detail", "")
-        words = {"once": "Allowed once", "run": "Allowed until the next run", "all": "Allowed for every agent until the next run", "deny": "Denied"}.get(answer.get("decision"), "Denied")
+        words = {"once": "Allowed once", "run": "Allowed until the next run", "all": "Allowed for every agent until the next run",
+                 "always": "Allowed always (this version of the wheel)", "deny": "Denied"}.get(answer.get("decision"), "Denied")
         return f"{words}: {detail}" + (f"\nWhy: {answer['message']}" if answer.get("message") else "")
     if question["kind"] == "proposal" and isinstance(answer, dict):
         approved = answer.get("decision") == "approve"
@@ -136,6 +140,23 @@ def formatEvent(event):
     # A call that took too long, and what a server outside SwarmUP must tell the user (a tool that changed, a server that did not start).
     if kind == "call" and (event.get("outcome") == "timeout" or not event.get("tool")):
         return f"{agent}: {event.get('note')}", "warning"
+    if kind == "architect" and event.get("state") == "working":
+        return f"The architect looks at what the agents repeat ({event.get('text') or 'a pass'}).", "info"
+    if kind == "wheel":
+        return formatWheel(event)
+    return None, None
+
+
+# What the architect and the leader did with the wheels (architect_manager.py, leader_wheels.py).
+def formatWheel(event):
+    action = event.get("action")
+    if action == "given":
+        wheels = event.get("wheels") or []
+        return (f"{event['agent']} got the wheels {', '.join(wheels)}." if wheels else f"{event['agent']} has no wheel now.") + (f" Why: {event['why']}" if event.get("why") else ""), "info"
+    if action in ("saved", "updated"):
+        return f"The architect {action} the wheel {event.get('name')} (v{event.get('version')}): {event.get('summary') or ''}", "success"
+    if action == "retired":
+        return f"The architect retired the wheel {event.get('name')}.", "info"
     return None, None
 
 

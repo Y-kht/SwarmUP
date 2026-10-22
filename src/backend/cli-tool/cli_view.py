@@ -5,8 +5,10 @@ import time
 
 from cli_console import paint, shorten
 from harness_utils import isYes
+from leader_wheels import giveWheels, projectOfFolder
 from mission_costs import formatDollars
 from models_library import DEFAULT_CLI_MODEL, MODELS_CLI
+from wheel_store import catalogFor
 
 
 LEADER_MESSAGE_CHARS = 2000
@@ -23,6 +25,8 @@ COMMANDS = """Commands (type them at any time while the swarm runs):
   add                     add an agent to the swarm while it runs (every agent is told)
   remove <agent> <why>    remove an agent from the swarm (it stops, its model frees its memory, every agent is told)
   cost                    what the mission spent so far, agent by agent, and what is left of its budget
+  wheels                  the wheels of the project: scripts the architect wrote from what agents repeated
+  wheels <agent> <names>  give an agent these wheels (names separated by commas; none takes them away)
   stop                    stop the swarm for good, after the leader lists what it already did (what is not finished is put back)
   quit                    leave the program: the swarm is saved, and the next start offers to continue it
 When the leader asks a question, type yes, no, the name of an agent to look at it alone, or what you want changed."""
@@ -120,6 +124,23 @@ def formatEvent(event):
         return f"[{when}] {agent}: {event.get('note')}"
     if kind == "activity":
         return f"[{when}] {agent}: {shorten(event['text'], 110)}"
+    if kind == "architect" and event.get("state") == "working":
+        return f"[{when}] The architect looks at what the agents repeat ({event.get('text') or 'a pass'})"
+    if kind == "wheel":
+        return formatWheel(event, when)
+    return None
+
+
+# What the architect and the leader did with the wheels (architect_manager.py, leader_wheels.py).
+def formatWheel(event, when):
+    action = event.get("action")
+    if action == "given":
+        wheels = event.get("wheels") or []
+        return f"[{when}] {event['agent']} " + (f"got the wheels {', '.join(wheels)}" if wheels else "has no wheel now") + (f". Why: {event['why']}" if event.get("why") else "")
+    if action in ("saved", "updated"):
+        return f"[{when}] The architect {action} the wheel {event.get('name')} (v{event.get('version')}): {shorten(event.get('summary') or '', 160)}"
+    if action == "retired":
+        return f"[{when}] The architect retired the wheel {event.get('name')}"
     return None
 
 
@@ -235,6 +256,8 @@ def runCommand(console, swarm, line):
         console.say(renderTree(swarm, console.color))
     elif word == "cost":
         console.say(describeCosts(swarm))
+    elif word == "wheels":
+        console.say(runWheelsCommand(swarm, words[1:]))
     elif word == "log":
         console.say("\n".join(f"[{message['time']}] {message['sender']} -> {message['receiver']}: {shorten(message['message'], 120)}"
                               for message in swarm.getMessages()[-15:]) or "No messages yet.")
@@ -264,6 +287,22 @@ def runCommand(console, swarm, line):
         runCommand(console, swarm, f"msg {name.strip()} {text.strip()}")
     else:
         console.say("I do not know this command. Type help.")
+
+
+# The wheels of the project, or wheels given to an agent while the swarm runs (leader_wheels.py).
+def runWheelsCommand(swarm, words):
+    if not words:
+        catalog = catalogFor(swarm.project or projectOfFolder(next((member["agent"].folder for member in swarm.members.values() if member["agent"].folder), None)))
+        return "\n".join(f"- {name}: {entry.get('summary') or ''}" for name, entry in catalog.items()) or "This project has no wheel yet."
+    name = findAgent(swarm, words[0])
+    if not name:
+        return f"Write the name of an agent after wheels. The agents are: {', '.join(swarm.getAgents())}."
+    wanted = [] if len(words) < 2 or words[1].strip().lower() == "none" else words[1]
+    try:
+        given = giveWheels(swarm, name, wanted, "given by the user")
+    except ValueError as error:
+        return str(error)
+    return f"{name} now has the wheels {', '.join(given)}." if given else f"{name} has no wheel now."
 
 
 def describeCosts(swarm):

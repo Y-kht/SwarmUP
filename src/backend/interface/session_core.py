@@ -17,10 +17,11 @@ from models_library import API_KEYS
 from session_mcp import SessionMcp
 from session_models import SessionModels
 from session_runs import SessionRuns
+from session_architect import ARCHITECT_ID, SessionArchitect
 from session_saved import SessionSaved
 from session_steps import SessionSteps
 from tasks_library import DEFAULT_LOOPS, getTask, suggestFolder
-from user_settings import MAX_AGENTS_LIMIT, loadSettings, saveSettings
+from user_settings import DEFAULT_SETTINGS, MAX_AGENTS_LIMIT, MAX_TOOLS_LIMIT, SettingError, loadSettings, saveSettings
 
 
 POLL_SECONDS = 20
@@ -31,7 +32,7 @@ CONTEXT_LIMIT = 6
 # or answer the swarm, so they never wait behind a slow one.
 FREE_ACTIONS = ("checkEmail", "checkMessenger", "findChats", "searchPublishers", "browse", "pickPath", "lookupModel", "price", "testModel", "modelCatalog", "answer",
                 "approve", "reject", "correct", "message", "startNow", "openLink", "openFolder", "refreshUnfinished", "quit", "taskForm",
-                "codexAccount", "calls", "mcpServers", "mcpInspect")
+                "codexAccount", "calls", "mcpServers", "mcpInspect", "wheels")
 
 
 # ==============
@@ -41,7 +42,7 @@ FREE_ACTIONS = ("checkEmail", "checkMessenger", "findChats", "searchPublishers",
 # Rule for the locks: the lock of the session is never held while calling a method of the Swarm that takes its own lock,
 # because the Swarm calls the listener of the session with its lock held.
 # ==============
-class Session(SessionSteps, SessionModels, SessionRuns, SessionSaved, SessionMcp):
+class Session(SessionSteps, SessionModels, SessionRuns, SessionSaved, SessionMcp, SessionArchitect):
     # A window with several missions (Desk in session_desk.py) gives every tab the same keys and tokens, and onTouch, called after each change.
     def __init__(self, keys=None, tokens=None, onTouch=None):
         self.token = secrets.token_urlsafe(24)
@@ -75,7 +76,7 @@ class Session(SessionSteps, SessionModels, SessionRuns, SessionSaved, SessionMcp
             "setMode", "start", "execute", "answer", "approve", "reject", "correct", "message", "startNow", "prepareStop", "stop", "clearJob", "newSwarm",
             "resumeForm", "resume", "prepareCancel", "abandon", "refreshUnfinished", "openLink", "codexAccount", "codexSignIn", "codexCancel", "joinLive",
             "removeLive", "setBuildMode", "buildWithLeader", "setBudget", "saveSettings", "quit", "addAgents", "setSwarmFolder", "followUp", "calls", "mcpServers",
-            "mcpAdd", "mcpInspect", "mcpApprove", "mcpRemove")}
+            "mcpAdd", "mcpInspect", "mcpApprove", "mcpRemove", "setArchitect", "wheels", "setWheels")}
 
     def reset(self):
         self.mission = ""
@@ -88,6 +89,7 @@ class Session(SessionSteps, SessionModels, SessionRuns, SessionSaved, SessionMcp
         self.order = "together"
         self.runInfo = {}
         self.trash = None
+        self.resetArchitect()
 
     def touch(self):
         with self.changed:
@@ -117,7 +119,7 @@ class Session(SessionSteps, SessionModels, SessionRuns, SessionSaved, SessionMcp
 
     # payload is what a coding agent asks: the permission it wants (kind permission), or its questions (kind form). The answer is then a dictionary.
     def ask(self, name, text, secret=False, kind=None, payload=None):
-        kind, replies = describeQuestion(text, secret, kind)
+        kind, replies = describeQuestion(text, secret, kind, payload)
         shown = self.readyRevisions() if kind == "review" else {}
         if kind == "review" and not shown:
             return "yes"
@@ -230,7 +232,9 @@ class Session(SessionSteps, SessionModels, SessionRuns, SessionSaved, SessionMcp
 
     def saveSettings(self, payload):
         try:
-            return {"settings": saveSettings({"maxAgents": payload.get("maxAgents")})}
+            return {"settings": saveSettings({key: payload[key] for key in DEFAULT_SETTINGS if key in payload})}
+        except SettingError as error:
+            raise FormError({error.key: str(error)}, str(error)) from None
         except (ValueError, OSError) as error:
             raise FormError({"maxAgents": str(error)}, str(error)) from None
 
@@ -279,6 +283,8 @@ class Session(SessionSteps, SessionModels, SessionRuns, SessionSaved, SessionMcp
 
     # ---------- The state that the browser draws. ----------
     def findSpec(self, agentId):
+        if agentId == ARCHITECT_ID:
+            return self.architectSpec
         spec = next((spec for spec in self.specs if spec["id"] == agentId), None)
         if spec is None:
             raise ValueError("This agent does not exist anymore.")
@@ -290,7 +296,7 @@ class Session(SessionSteps, SessionModels, SessionRuns, SessionSaved, SessionMcp
                 "folder": answers.get("folder"), "folderNote": task["folder"], "suggestion": suggestFolder(answers), "model": describeModel(spec["model"]),
                 "missing": spec["missing"], "isLeader": index == 0, "waitsFor": spec["waitsFor"], "loops": answers.get("numberOfLoops", DEFAULT_LOOPS),
                 "tested": spec.get("tested", ""), "pending": bool(spec.get("pending")), "builder": spec["task"] == "leader", "why": spec.get("why", ""),
-                "prompt": answers.get("prompt", ""), "rules": answers.get("rules") or []}
+                "prompt": answers.get("prompt", ""), "rules": answers.get("rules") or [], "wheels": answers.get("wheels") or []}
 
     def describeKeys(self):
         return {provider: {"company": details["company"], "variable": details["variable"], "page": details["page"],
@@ -332,7 +338,7 @@ class Session(SessionSteps, SessionModels, SessionRuns, SessionSaved, SessionMcp
                 "summary": swarm.getSummary(), "interruption": swarm.getInterruption(), "connections": swarm.getConnections(),
                 "messages": swarm.getMessages()[-80:], "ready": swarm.getReadyAgents(), "resumed": self.runInfo.get("resume", False), **self.runInfo,
                 "removed": list(swarm.removed), "canJoin": not running or self.canJoin(swarm), "round": swarm.round, "requests": swarm.requests[-10:],
-                "missionId": swarm.id, "canFollowUp": not running and not self.isBusy(),
+                "missionId": swarm.id, "canFollowUp": not running and not self.isBusy(), "architect": self.describeArchitectRun(),
                 "vram": swarm.getVramStatus() if swarm.getNeededVram() else None}
 
     def describeGpus(self):
@@ -351,10 +357,11 @@ class Session(SessionSteps, SessionModels, SessionRuns, SessionSaved, SessionMcp
             codexLogin = {key: value for key, value in self.codexLogin.items() if key != "login"} if self.codexLogin else None
         return {"version": version, "mission": self.mission, "buildMode": self.buildMode, "costs": self.describeCosts(), "settings": loadSettings(),
                 "prices": describeCached("model-prices"),
-                "maxAgentsLimit": MAX_AGENTS_LIMIT, "agents": agents, "mode": self.mode, "order": self.order, "keys": self.describeKeys(),
+                "maxAgentsLimit": MAX_AGENTS_LIMIT, "maxToolsLimit": MAX_TOOLS_LIMIT, "agents": agents, "mode": self.mode, "order": self.order, "keys": self.describeKeys(),
                 "gpu": self.describeGpus(), "run": self.describeRun(), "questions": questions, "jobs": jobs, "unfinished": self.unfinished, "busy": self.isBusy(),
                 "nativeDialogs": self.dialog is not None, "trash": self.trash["spec"]["name"] if self.trash else None, "cancelling": cancelling,
-                "codexLogin": codexLogin, "swarmFolder": next(iter(folders)) if len(folders) == 1 else None, "mixedFolders": len(folders) > 1}
+                "codexLogin": codexLogin, "swarmFolder": next(iter(folders)) if len(folders) == 1 else None, "mixedFolders": len(folders) > 1,
+                "architect": self.describeArchitect()}
 
     # Waits until something changed after the version the browser has, then gives the state and the new lines of the feed.
     def poll(self, version, feedAfter, tab=None):

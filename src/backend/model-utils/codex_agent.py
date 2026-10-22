@@ -326,6 +326,11 @@ class CodexModel:
             turn["files"][item.get("id")] = [change.get("path") for change in item.get("changes") or [] if isinstance(change, dict) and change.get("path")]
         elif method == "item/completed" and (params.get("item") or {}).get("type") == "agentMessage":
             turn["messages"].append(params["item"].get("text") or "")
+        elif method == "item/completed" and (params.get("item") or {}).get("type") == "commandExecution" and self.loop is not None:
+            # The commands Codex runs itself do not go through the gateway: the journal of the mission keeps them, for the architect.
+            item = params["item"]
+            self.loop.note("cmd", command=unwrapCommand(item.get("command")), exit=item.get("exitCode"), output=str(item.get("aggregatedOutput") or "")[-1500:],
+                           seconds=round((item.get("durationMs") or 0) / 1000, 3))
         elif method == "thread/tokenUsage/updated":
             turn["usage"] = (params.get("tokenUsage") or {}).get("total") or turn["usage"]
         elif method == "error" and params.get("willRetry"):

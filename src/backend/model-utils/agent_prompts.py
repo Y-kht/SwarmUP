@@ -250,6 +250,12 @@ APPROVED_PLAN_PROMPT = """Your plan, approved by the user. Follow it, unless the
 {plan}"""
 
 
+# The wheels the leader gave an agent (wheel_store.py). Their descriptions come with the tools themselves.
+WHEELS_AGENT_PROMPT = """YOUR WHEELS. Your leader gave you wheels for this task: {wheels}. A wheel is a script the architect of SwarmUP wrote from the earlier
+work of agents: it does in one call the steps agents did by hand before, and its description says what it does. When a wheel fits a step, use
+it instead of doing the step by hand. If a wheel fails or does not fit, do the step by hand and say so in your answer, so the architect fixes it."""
+
+
 PLAN_SUMMARY_PROMPT = """You are the leader of a swarm of agents working on this mission: {mission}
 Every agent wrote a plan for its own task. Where each agent stands, including the plans the user already approved:
 {agents}

@@ -79,12 +79,17 @@ class PromptSpec:
 
 class ServerSpec:
     # resources(agent) and prompts(agent) give the lists of ResourceSpec and PromptSpec of the agent, when the server has some.
-    def __init__(self, name, version, instructions, tools, resources=None, prompts=None, when=None):
+    # provide(agent, listing) gives tools made for that agent when it asks (the wheels its leader gave it), besides the tools every agent of the
+    # server has. listing is True when the agent lists its tools, and False when it calls one (then it gets the tools it was shown).
+    def __init__(self, name, version, instructions, tools, resources=None, prompts=None, when=None, provide=None):
         self.name, self.version, self.instructions, self.tools = name, version, instructions, list(tools)
-        self.resources, self.prompts, self.when = resources, prompts, when
+        self.resources, self.prompts, self.when, self.provide = resources, prompts, when, provide
 
     def shown(self, agent):
         return self.when is None or bool(self.when(agent))
+
+    def toolsFor(self, agent, listing=False):
+        return self.tools + (list(self.provide(agent, listing)) if self.provide is not None else [])
 
 
 # The agent a server serves: its loop, its gateway, and the stop of its work (set when the swarm stops or the agent leaves).
@@ -195,15 +200,16 @@ def runTool(tool, work, arguments):
 
 def buildServer(spec, agent):
     server = Server(spec.name, version=spec.version, instructions=spec.instructions)
-    tools = {tool.name: tool for tool in spec.tools}
 
     @server.list_tools()
     async def listTools():
-        return [tool.asTool() for tool in spec.tools if tool.shown(agent)]
+        tools = await anyio.to_thread.run_sync(lambda: spec.toolsFor(agent, True)) if spec.provide is not None else spec.tools
+        return [tool.asTool() for tool in tools if tool.shown(agent)]
 
     @server.call_tool(validate_input=True)
     async def callTool(name, arguments):
-        tool = tools.get(name)
+        tools = await anyio.to_thread.run_sync(lambda: spec.toolsFor(agent)) if spec.provide is not None else spec.tools
+        tool = next((tool for tool in tools if tool.name == name), None)
         if tool is None or not tool.shown(agent):
             return errorResult(f"Not done: {name} is not a tool of {spec.name} for {agent.name}.")
         context = server.request_context

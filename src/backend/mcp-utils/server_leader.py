@@ -4,15 +4,18 @@
 #   user when the leader ends its turn;
 # - while the swarm runs (LeaderManager, leader_manager.py), it proposes to add an agent, to remove one, or to change a model: each proposal is
 #   shown to the user at once, through the gateway (Work.propose), and the leader gets the decision as the result of its call;
-# - at any time it keeps what the next swarms of the user should know in the long-term memory (keep_long_term), and the user is told.
+# - at any time it keeps what the next swarms of the user should know in the long-term memory (keep_long_term), and the user is told;
+# - it gives each agent the wheels its task needs (scripts the architect wrote, leader_wheels.py): in the field wheels of the agent it proposes,
+#   or with give_wheels while the swarm works, after it found them with find_wheels.
 # What the leader is doing now is its desk (LeaderDesk), on its loop: the catalog of what it can choose, and the manager of the running swarm.
 import json
 from pathlib import Path
 
+from leader_wheels import findWheels, giveWheels, projectOfFolder
 from mcp_kit import ServerSpec, ToolProblem, ToolSpec
 
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 TEXT = {"type": "string"}
 WHY = {"type": "string", "description": "One or two sentences for the user that say how this change helps the mission."}
 MODEL = {"type": "string", "description": "A model of the list of models, exactly as it is written there."}
@@ -22,7 +25,8 @@ AGENT_FIELDS = {"name": {"type": "string", "description": "One word that starts 
                 "model": MODEL, "bits": BITS,
                 "waits_for": {"type": "array", "items": TEXT, "description": "The agents whose results it needs before it starts."},
                 "settings": {"type": "object", "description": "The settings of its task, by their key in the list of tasks (prompt and rules for a general agent)."},
-                "why": WHY, "role": {"type": "string", "description": "Its role, in a few words."}}
+                "why": WHY, "role": {"type": "string", "description": "Its role, in a few words."},
+                "wheels": {"type": "array", "items": TEXT, "description": "The wheels its task needs, by name, from the wheels of the project. Only those it needs."}}
 AGENT = {"type": "object", "properties": AGENT_FIELDS, "required": ["name", "model"], "additionalProperties": False}
 
 
@@ -52,6 +56,12 @@ def managing(agent):
     return desk is not None and desk.manager is not None and not desk.building
 
 
+# A leader of a swarm that runs, model or user, managed or not: it can give wheels to its agents.
+def leading(agent):
+    team = getattr(agent.loop, "team", None)
+    return forLeader(agent) and team is not None and getattr(team, "members", None) is not None and getattr(team, "active", False)
+
+
 def keeping(agent):
     return forLeader(agent) and getattr(agent.loop, "session", None) is not None
 
@@ -73,6 +83,24 @@ def proposeChange(action):
             raise ToolProblem(" ".join(problems))
         return outcome
     return run
+
+
+def projectOfLeader(work):
+    team, desk = getattr(work.loop, "team", None), work.loop.leaderDesk
+    project = getattr(team, "project", None)
+    return project or projectOfFolder(desk.catalog.folder if desk is not None else work.loop.folder)
+
+
+def findTheWheels(work, query=""):
+    return findWheels(projectOfLeader(work), query)
+
+
+def giveTheWheels(work, agent, wheels, why=""):
+    try:
+        names = giveWheels(work.loop.team, str(agent).strip(), wheels, why)
+    except ValueError as problem:
+        raise ToolProblem(str(problem)) from None
+    return f"{agent} now has the wheels {', '.join(names)}, from its next step." if names else f"{agent} has no wheel now."
 
 
 def keepLongTerm(work, file, text, mode="append"):
@@ -99,6 +127,13 @@ TOOLS = [
              "The user is told of each change.",
              {"file": {"type": "string", "description": "A file with a clear name in capitals, like USER_PREFERENCES.md or STYLE.md."}, "text": TEXT,
               "mode": {"type": "string", "enum": ["append", "replace"]}}, ["file", "text"], run=keepLongTerm, readOnly=True, when=keeping),
+    ToolSpec("find_wheels", "Find the wheels of this project about some words: scripts the architect wrote from what agents repeated, each doing in one call "
+             "steps that took many. Give an agent only the wheels its task needs. It changes nothing.", {"query": {"type": "string", "description": "Words of the work."}},
+             [], run=findTheWheels, readOnly=True, idempotent=True, when=forLeader),
+    ToolSpec("give_wheels", "Give an agent of the running swarm the wheels its task needs (they replace the ones it had; an empty list takes them away). It "
+             "gets them as tools from its next step, and is told. The user approves each new version of a wheel the first time it runs.",
+             {"agent": TEXT, "wheels": {"type": "array", "items": TEXT, "description": "The names of the wheels."}, "why": WHY}, ["agent", "wheels"],
+             run=giveTheWheels, readOnly=True, when=leading),
 ]
 
 SERVER = ServerSpec("leader", VERSION, "What only the leader of the swarm does.", TOOLS, when=forLeader)

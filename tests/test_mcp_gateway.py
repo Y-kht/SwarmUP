@@ -18,6 +18,8 @@ from base_loop import Loop
 from mcp_gateway import Gateway, checkArguments
 from mcp_kit import ServerSpec, ToolProblem, ToolSpec, Work
 from mcp_policy import PLAN_REFUSAL, decidePermission
+from agent_journal import Journal
+from user_settings import saveSettings
 from mcp_records import CallRecords
 from mission_memory import WorkSession
 
@@ -101,7 +103,70 @@ class ListTests(GatewayTestCase):
             self.assertLessEqual(len(tool["name"]), 64)
             self.assertLessEqual(len(tool["description"]), 800, tool["name"])
             self.assertFalse(tool["parameters"]["additionalProperties"])
-        self.assertLessEqual(len(tools), mcp_gateway.MAX_TOOLS)
+        self.assertLessEqual(len(tools), mcp_gateway.maxTools())
+
+    # The most tools of an agent is a setting of the user, 1000 by default: a low one cuts the list, and the user is told.
+    def testTheMostToolsOfAnAgentIsASettingOfTheUser(self):
+        loop = self.loop(session=True)
+        notices = []
+        loop.notifyUser = notices.append
+        link = self.link(loop)
+        self.assertEqual(mcp_gateway.maxTools(), 1000)
+        every = link.tools()
+        self.assertGreater(len(every), 10)
+        saveSettings({"maxTools": 10})
+        self.assertEqual([tool["name"] for tool in link.tools()], [tool["name"] for tool in every][:10])
+        self.assertIn("your settings allow 10", notices[-1])
+        with self.assertRaises(ValueError):
+            saveSettings({"maxTools": 5})
+
+
+# A server can make tools for each agent when the agent lists them (the wheels its leader gave it), and a narrowed agent (the architect)
+# only reaches the servers and tools of its scope.
+class ScopeTests(GatewayTestCase):
+    def testAServerCanGiveEachAgentToolsOfItsOwnThatChange(self):
+        made = {"Writer": ["first"]}
+
+        def provide(agent, listing):
+            return [ToolSpec(name, f"Say {name}.", run=lambda work, name=name: f"{name} for {work.loop.name}", readOnly=True) for name in made.get(agent.name, [])]
+        dynamic = ServerSpec("dynamic", "1.0.0", "Tools made for each agent.", [], provide=provide)
+        builtin = mcp_gateway.builtinServers
+        with everywhere(mcp_gateway, "builtinServers", lambda: [*builtin(), dynamic]):
+            writer, reader = self.loop(), self.loop("Reader")
+            link = self.link(writer)
+            self.assertIn("dynamic__first", [tool["name"] for tool in link.tools()])
+            self.assertNotIn("dynamic__first", [tool["name"] for tool in self.link(reader).tools()])
+            self.assertEqual(link.call("dynamic__first", {}), ("first for Writer", False))
+            made["Writer"] = ["second"]
+            link.stale = True
+            names = [tool["name"] for tool in link.tools()]
+            self.assertIn("dynamic__second", names)
+            self.assertNotIn("dynamic__first", names)
+            self.assertEqual(link.call("dynamic__second", {}), ("second for Writer", False))
+
+    def testANarrowedAgentOnlyReachesItsScope(self):
+        loop = self.loop(session=True)
+        loop.toolScope = {"files": {"read_file", "list_files"}, "probe": "*"}
+        link = self.link(loop)
+        names = {tool["name"] for tool in link.tools()}
+        self.assertEqual({name for name in names if not name.startswith("probe__")}, {"files__read_file", "files__list_files"})
+        self.assertIn("probe__count", names)
+        self.assertNotIn("processes", link.sessions)
+        text, error = link.call("processes__run_command", {"command": "echo hi"})
+        self.assertTrue(error)
+        self.assertIn("there is no tool processes__run_command", text)
+
+    def testTheIdOfACallReachesTheJournal(self):
+        loop = self.loop(session=True)
+        journal = Journal(loop.session.folder, "m1", project="p")
+        self.gateway.journal = journal
+        loop.journal = journal
+        link = self.link(loop)
+        link.call("files__read_file", {"path": "a.txt"}, callId="call-7")
+        entries = [json.loads(line) for line in journal.path.read_text(encoding="utf-8").splitlines()]
+        call = next(entry for entry in entries if entry["kind"] == "call")
+        self.assertEqual((call["id"], call["server"], call["tool"], call["outcome"], call["origin"]), ("call-7", "files", "read_file", "success", "conversation"))
+        self.assertIn("hello", call["result"])
 
     def testPlanModeAndALookingConversationOnlyListToolsThatLook(self):
         loop = self.loop(session=True)

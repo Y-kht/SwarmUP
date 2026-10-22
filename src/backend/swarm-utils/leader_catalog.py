@@ -9,6 +9,7 @@ from gpu_check import checkVram, readGpus
 from harness_utils import USER_NAME, listRules
 from internet_cache import describeCached
 from leader_checks import LeaderChecks, canJoin, showValue
+from leader_wheels import describeWheelsFor, projectOfFolder
 from mission_costs import MissionCosts, formatDollars
 from model_support import ModelError, findMissingPackages, getApiKey
 from models_library import API_KEYS, MODELS_API, MODELS_LOCAL, RECOMMENDED_API, RECOMMENDED_LOCAL, getModelInfo, getVram
@@ -216,7 +217,8 @@ class LeaderCatalog(LeaderChecks):
         taken = self.leaderModel["vram"] if self.leaderModel else 0.0
         return prompts.LEADER_BUILD_PROMPT.format(rules=self.rules(), mission=self.mission, folder=self.describeFolder(),
                                                   tasks=describeTasks(), models=self.describeModels(taken, self.moneyLeft(self.leaderTeam())),
-                                                  costs=self.describeCosts(self.leaderTeam()), most=self.maxAgents)
+                                                  costs=self.describeCosts(self.leaderTeam()), most=self.maxAgents,
+                                                  wheels=describeWheelsFor(projectOfFolder(self.folder), self.mission))
 
     def describePossible(self, swarm):
         leader, members = swarm.getLeader(), list(swarm.members.items())
@@ -233,4 +235,4 @@ class LeaderCatalog(LeaderChecks):
         return prompts.LEADER_SUPERVISE_PROMPT.format(rules=self.rules(), mission=self.mission, folder=self.describeFolder(), progress=swarm.describeProgress(),
                                                       events="\n".join(f"- {event}" for event in events), possible=self.describePossible(swarm), tasks=describeTasks(),
                                                       models=self.describeModels(swarm.getNeededVram(), self.moneyLeft(team)), decisions=decisions,
-                                                      costs=self.describeCosts(team))
+                                                      costs=self.describeCosts(team), wheels=describeWheelsFor(swarm.project or projectOfFolder(self.folder), self.mission))
