@@ -154,7 +154,7 @@ function helpModal() {
 // The settings of the user, kept on this computer (agent-files/settings.json) for every mission.
 function settingsModal(modal) {
   const save = async () => {
-    const data = await act('saveSettings', { maxAgents: modal.maxAgents, maxTools: modal.maxTools, architectShare: modal.architectShare, architectDollars: modal.architectDollars },
+    const data = await act('saveSettings', { maxAgents: modal.maxAgents, maxTools: modal.maxTools, maxSteps: modal.maxSteps, architectShare: modal.architectShare, architectDollars: modal.architectDollars },
       { busy: 'saveSettings', form: modal });
     if (data) { closeModal(); toast('Your settings are saved.', 'success'); } else render();
   };

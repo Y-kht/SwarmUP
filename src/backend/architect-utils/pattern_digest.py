@@ -8,7 +8,8 @@ from pathlib import Path
 from pattern_registry import describeNote, findNotes
 from pattern_store import ACTIONABLE
 from project_identity import projectJournals, readProject
-from wheel_store import catalogFor
+from wheel_checks import onlyReads
+from wheel_store import catalogFor, loadWheel
 
 
 BRIEF_CHARS = 12000
@@ -74,6 +75,12 @@ def contains(longer, shorter):
     return any(longer[start:start + len(shorter)] == shorter for start in range(len(longer) - len(shorter) + 1))
 
 
+def readsOnly(name, entry):
+    if entry.get("kind") != "steps":
+        return False
+    return onlyReads((loadWheel(name) or {}).get("manifest"))
+
+
 def describeWheels(store, project):
     lines = []
     for name, entry in catalogFor(project).items():
@@ -81,7 +88,7 @@ def describeWheels(store, project):
         redos = store.query("SELECT label, count FROM patterns WHERE kind='redo' AND shape LIKE ?", (f"{name} %",))
         failures = store.query("SELECT label, count FROM patterns WHERE kind='wheelfail' AND shape LIKE ? ORDER BY count DESC LIMIT 2", (f"{name}:%",))
         used = f"{runs[0]['count']} runs, {runs[0]['errors']} failed" if runs else "never run yet"
-        extra = "; ".join([f"{row['label']} ({row['count']}x)" for row in failures + redos])
+        extra = "; ".join([f"{row['label']} ({row['count']}x)" for row in failures + redos] + (["it only reads files: retire it, it saves no step"] if readsOnly(name, entry) else []))
         lines.append(f"- {name} v{entry['version']} ({entry['kind']}, {'every project' if entry.get('scope') == 'global' else 'this project'}): "
                      f"{entry.get('summary') or ''} [{used}{'; ' + extra if extra else ''}]")
     return lines

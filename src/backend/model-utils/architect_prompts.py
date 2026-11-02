@@ -21,6 +21,13 @@ HOW YOU WORK
 
 THE RULES OF A WHEEL
 - Only automate what repeats: a status repeating or cross. The tools refuse the rest.
+- Only automate what costs: model steps made one after another, reasoning written again, a mistake that comes back, a request cut at the
+  limit of its steps. Calls a model already makes together in one step cost nothing more, and a wheel that only gives back files the agents
+  read anyway saves almost nothing (and fills their context): dismiss such patterns. Prefer wheels that compute, check, search or run what the
+  agents worked out by reasoning, and wheels that make a step that went wrong before come out right the first time.
+- A streak (the same kind of call in many model steps in a row, other inputs each time: search a name, then the next name) costs a model step
+  per input. A script wheel that takes the whole list and answers for all of them at once (where each name is declared and used, which are
+  missing) saves those steps: look at the examples and the request to see what the agents were checking.
 - A wheel is a script, never a summary. It does one job completely, with typed inputs for what changes from one time to the next (a path, a
   test name, an address), and gives back only what the agent needs next (the failing tests and their first error, not the whole log).
 - Its summary says its main objective in one or two sentences, for the agents that will call it: what it does and what it gives back.

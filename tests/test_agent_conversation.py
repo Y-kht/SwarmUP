@@ -227,9 +227,10 @@ class ConversationTests(ConversationTestCase):
         self.assertEqual(loop.agent.seen[1]["messages"][-1]["content"], f"Not done: {prompts.CUT_CALL}")
         self.assertFalse((self.work / "a.txt").exists())
         loop = self.chatLoop([use(act("list_files"))] * 3)
-        with mock.patch.object(agent_conversation, "MAX_STEPS", 3):
+        with mock.patch.object(agent_conversation, "currentSetting", return_value=3):
             self.assertEqual(loop.askAgent("Work."), "")
         self.assertEqual(loop.agent.seen[2]["messages"][-1]["content"], prompts.LAST_STEP)
+        self.assertIn("stopped at the limit of 3 steps", loop.activity[-1]["text"])
 
     def testThreeCallsThatCannotBeReadAreToldToTheLeaderAndTheUser(self):
         swarm = Swarm("Bees")

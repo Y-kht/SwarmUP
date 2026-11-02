@@ -4,7 +4,8 @@
 # - error: a problem met again, by family and code; fix: how agents got out of an error;
 # - reasoning: text written again and again before an action, near the same (code and answers are left out); decision: the same reasoning
 #   followed by the same action (where the button is, then a click at the same place); intent: what agents keep saying they set out to do;
-#   hotspot: a step or a request that cost much;
+#   hotspot: a step or a request that cost much, or a request cut at the limit of its steps; streak: the same kind of call in many model steps
+#   in a row, with other inputs each time (one call that takes the list would save the steps);
 # - correction: what the user, the leader or the checks keep asking to change; permission: what the user keeps being asked; message: what
 #   agents keep writing to each other; badcall: calls a model keeps writing wrong;
 # - wheel: the runs of a wheel; wheelfail: a wheel that fails; redo: the work of a wheel done by hand (ignored: the agent had the wheel;
@@ -34,12 +35,13 @@ class Batch:
     def __init__(self):
         self.hits, self.links, self.agents = [], [], {}
 
-    def hit(self, kind, key, shape, label, entry, ref, level=1, tokens=0, seconds=0, size=0, error=False, data=None, example="", request=None):
+    # weight: how many times the hit counts (a streak counts its model steps).
+    def hit(self, kind, key, shape, label, entry, ref, level=1, tokens=0, seconds=0, size=0, error=False, data=None, example="", request=None, weight=1):
         fp = fingerprint(kind, level, *key) if isinstance(key, (list, tuple)) else fingerprint(kind, level, key)
         self.hits.append({"fp": fp, "kind": kind, "level": level, "shape": collapse(shape, 400), "label": collapse(label, 300), "mission": entry.get("mission") or "",
                           "agent": entry.get("agent") or "", "request": request, "t": (entry.get("t") or time.time() * 1000) / 1000, "tokens": tokens or 0,
                           "seconds": seconds or 0, "size": size or 0, "error": bool(error), "data": data or {}, "example": collapse(example or label, EXAMPLE_CHARS),
-                          "source": ref[0], "offset": ref[1]})
+                          "source": ref[0], "offset": ref[1], "weight": weight})
         return fp
 
     def link(self, first, second, kind):
@@ -48,10 +50,11 @@ class Batch:
 
 
 class Detectors:
-    # covers: {fingerprint: wheel} of the live wheels of the project; root: the folder of the project, to make paths relative.
+    # covers: {fingerprint: wheel} of the live wheels of the project, since: {wheel: when it was made}; root: the folder of the project, to make
+    # paths relative.
     def __init__(self, store, project, root=None):
         self.store, self.project, self.root = store, project, root
-        self.trails, self.agents, self.covers = {}, {}, {}
+        self.trails, self.agents, self.covers, self.since = {}, {}, {}, {}
 
     def trailOf(self, entry):
         key = f"{entry.get('mission')}:{entry.get('agent')}"
@@ -91,19 +94,28 @@ class Detectors:
 
     def on_request(self, db, entry, ref, batch):
         trail = self.trailOf(entry)
+        self.streak(trail.endStreak(), entry, ref, batch, self.requestKey(entry, trail))
         trail.newRequest(" ".join(maskText(entry.get("prompt") or "").split()[:12]))
+
+    def streak(self, ended, entry, ref, batch, request):
+        if not ended:
+            return
+        shape, steps, examples = ended
+        batch.hit("streak", shape, shape, f"{shape}, one call per model step, many steps in a row (other inputs each time)", entry, ref, request=request,
+                  data={"modelSteps": steps}, example="\n".join(examples), weight=steps)
 
     def on_step(self, db, entry, ref, batch):
         trail = self.trailOf(entry)
-        trail.steps += 1
-        request = self.requestKey(entry, trail)
         text, calls = entry.get("text") or "", entry.get("calls") or []
+        trail.newStep([call.get("id") for call in calls])
+        request = self.requestKey(entry, trail)
         tokens = ((entry.get("tokens") or {}).get("out") or 0) or (entry.get("length") or len(text)) / 4
         if trail.steps == LONG_REQUEST_STEPS:
             batch.hit("hotspot", ("request", trail.prompt), f"a request of {LONG_REQUEST_STEPS}+ steps: {trail.prompt}",
                       f"requests that take {LONG_REQUEST_STEPS} steps or more: \"{trail.prompt}\"", entry, ref, request=request)
         # A step with no call is the answer of the agent: what it made, not reasoning that a wheel could save.
         if not calls:
+            self.streak(trail.endStreak(), entry, ref, batch, request)
             return
         first = calls[0]
         firstShape = shapeCall(*splitFull(first.get("name")), first.get("args"), self.root)
@@ -127,6 +139,13 @@ class Detectors:
             batch.hit("hotspot", ("step", firstShape[2]), f"a long step before {firstShape[2]}", f"long reasoning ({int(tokens):,} tokens) before {firstShape[2]}", entry, ref,
                       tokens=tokens, seconds=entry.get("seconds") or 0, request=request, example=labelOf(text, 60))
 
+    # A request that used all its steps: the agent had to answer, its work maybe unfinished. Many steps that come back are what wheels save.
+    def on_limit(self, db, entry, ref, batch):
+        trail = self.trailOf(entry)
+        batch.hit("hotspot", ("limit", trail.prompt), f"a request cut at its {entry.get('steps')} steps: {trail.prompt}",
+                  f"requests cut at the limit of their steps ({entry.get('steps')}): \"{trail.prompt}\"", entry, ref, error=True, request=self.requestKey(entry, trail),
+                  data={"limit": entry.get("steps")})
+
     def on_call(self, db, entry, ref, batch):
         origin = str(entry.get("origin") or "")
         if origin.startswith("wheel:"):
@@ -141,14 +160,16 @@ class Detectors:
         example = f"{l0}\n{'ok' if ok else entry.get('outcome')}: {result[:300]}"
         errorFp = None
         if server != "wheels":
-            kind = "command" if tool == "run_command" else "action"
-            data = {"exact": l0, **({"local": True} if tool == "run_command" else {}), **({"toolOnly": True} if server not in ("files", "processes", "transfer") else {})}
+            kind, looking = "command" if tool == "run_command" else "action", f"{server}__{tool}".startswith(LOOKING)
+            data = {"exact": l0, **({"local": True} if tool == "run_command" else {}), **({"toolOnly": True} if server not in ("files", "processes", "transfer") else {}),
+                    **({"reading": True} if looking else {})}
             actionFp = batch.hit(kind, l1, l1, l1, entry, ref, seconds=seconds, size=size, error=not ok, data=data, example=example, request=request)
-            self.checkRedo(entry, ref, batch, actionFp, request)
+            self.checkRedo(entry, ref, batch, actionFp, request, looking=looking)
             if ok and tool in READING_TOOLS and size >= REREAD_SIZE:
                 target = targetOf(server, tool, args, self.root)
                 if target:
-                    batch.hit("reread", (tool, target), f"{tool} {target}", f"{tool} of {target} again", entry, ref, size=size, request=request, example=example)
+                    batch.hit("reread", (tool, target), f"{tool} {target}", f"{tool} of {target} again", entry, ref, size=size, request=request, example=example,
+                              data={"reading": True})
         if not ok:
             found = classifyError(result) or {"family": "other", "code": entry.get("outcome"), "template": maskText(result)[:120]}
             if entry.get("outcome") in ("timeout", "cancelled", "refused") and found["family"] != "swarmup":
@@ -157,11 +178,12 @@ class Detectors:
                                 entry, ref, error=True, seconds=seconds, data={"family": found["family"], "where": found.get("where") or ""}, example=example, request=request)
         if seconds >= LONG_CALL_SECONDS:
             batch.hit("hotspot", ("call", l1), f"a call of {LONG_CALL_SECONDS}+ s: {l1}", f"slow call ({int(seconds)} s): {l1}", entry, ref, seconds=seconds, request=request)
-        found = trail.add(l1, l2, ok, errorFp)
-        for gram, _ in found["grams"]:
+        found = trail.add(l1, l2, ok, errorFp, trail.stepOf(entry.get("id")), l0)
+        self.streak(found["streak"], entry, ref, batch, request)
+        for gram, _, spanned in found["grams"]:
             reading = all(step.startswith(LOOKING) for step in gram)
             fp = batch.hit("sequence", gram, " -> ".join(gram), " -> ".join(gram), entry, ref, level=len(gram), seconds=seconds, request=request,
-                           data={"steps": gram, **({"reading": True} if reading else {})})
+                           data={"steps": gram, "modelSteps": spanned, **({"reading": True} if reading else {})})
             self.checkRedo(entry, ref, batch, fp, request)
         if found["loop"]:
             label, fp = found["loop"]
@@ -171,10 +193,11 @@ class Detectors:
             fix = batch.hit("fix", (error, *recipe), " -> ".join(recipe), f"fixed by {' -> '.join(recipe)}", entry, ref, request=request, data={"recipes": [" -> ".join(recipe)]})
             batch.link(error, fix, "fixedBy")
 
-    # The work of a wheel done by hand: the step or sequence a live wheel covers, made by an agent that has it (ignored) or not (missed).
-    def checkRedo(self, entry, ref, batch, fp, request):
+    # The work of a wheel done by hand: the step or sequence a live wheel covers, made by an agent that has it (ignored) or not (missed). Work done
+    # before the wheel existed is no redo, and neither is reading one file: it is one step of the work of a wheel at most.
+    def checkRedo(self, entry, ref, batch, fp, request, looking=False):
         wheel = self.covers.get(fp)
-        if not wheel:
+        if not wheel or looking or (entry.get("t") or 0) / 1000 < self.since.get(wheel, 0):
             return
         agent = self.agents.get(f"{entry.get('mission')}:{entry.get('agent')}") or {}
         how = "ignored" if wheel in (agent.get("wheels") or []) else "missed"

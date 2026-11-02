@@ -23,10 +23,17 @@ BATCH_LINES = 2000
 CROSS_TOTAL = 3
 SIGNAL_STATUSES = ("repeating", "cross")
 # The kinds worth waking the architect for when they start to repeat (the others wait for its next pass).
-SIGNALLING = ("decision", "reasoning", "fix", "sequence", "loop", "error", "command", "correction", "badcall", "hotspot", "redo", "wheelfail")
+SIGNALLING = ("decision", "reasoning", "fix", "sequence", "streak", "loop", "error", "command", "correction", "badcall", "hotspot", "redo", "wheelfail")
 # A wheel that fails, or that an agent who had it worked around, is a wheel to fix: the architect hears of it the first time. A wheel the leader
 # did not give (a redo missed) waits for a second time.
 SIGNAL_COUNTS = {"wheelfail": 1, "ignored": 1, "missed": 2}
+
+
+def epochOf(stamp):
+    try:
+        return time.mktime(time.strptime(str(stamp), "%Y-%m-%d %H:%M:%S"))
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
 
 
 def signalCount(row):
@@ -52,13 +59,14 @@ class Miner:
             self.registry = Registry()
         return self.registry
 
-    # The wheels of the project, by the fingerprints of the patterns they cover.
+    # The wheels of the project, by the fingerprints of the patterns they cover, and since when each one exists.
     def refreshCovers(self):
-        covers = {}
+        covers, since = {}, {}
         for name, entry in catalogFor(self.project).items():
+            since[name] = epochOf(entry.get("created"))
             for fp in entry.get("covers") or []:
                 covers[fp] = name
-        self.detectors.covers = covers
+        self.detectors.covers, self.detectors.since = covers, since
         return covers
 
     # One poll: what the journals got since the last one. It gives how many entries it read.
@@ -115,8 +123,11 @@ class Miner:
                 row = rows[hit["fp"]] = {"fp": hit["fp"], "kind": hit["kind"], "level": hit["level"], "shape": hit["shape"], "label": hit["label"], "count": 0, "requests": 0,
                                          "agents": 0, "missions": 0, "firstSeen": hit["t"], "lastSeen": hit["t"], "tokens": 0.0, "seconds": 0.0, "size": 0.0,
                                          "errors": 0, "status": "new", "statusAt": hit["t"], "score": 0.0, "data": {}}
+                verdict = self.store.verdictOf(db, hit["fp"])
+                if verdict:
+                    row.update(note=verdict["note"], dismissedAt=verdict["dismissedAt"], **({"status": "dismissed"} if verdict["dismissedAt"] else {}))
                 self.store.writeRow(db, row)
-            row["count"] += 1
+            row["count"] += hit.get("weight", 1)
             row["lastSeen"] = max(row["lastSeen"] or 0, hit["t"])
             row["tokens"] += hit["tokens"]
             row["seconds"] += hit["seconds"]
@@ -163,22 +174,30 @@ class Miner:
         except Exception:
             traceback.print_exc()
 
+    # The missions of the project from before the journals (pattern_legacy.py) that the store has not read yet. A miner reads them when it starts,
+    # so the architect knows the older work of the project from its first pass, without the user asking for a rebuild.
+    def importLegacy(self):
+        known, total = self.store.sources(), 0
+        for mission, state, root in legacyMissions(self.project):
+            if f"legacy:{mission}" in known:
+                continue
+            registerMission(self.project, root, mission, missionFolder(mission) / STATE_FOLDER / JOURNAL_FILE)
+            entries = legacyEntries(mission, state)
+            for start in range(0, len(entries), BATCH_LINES):
+                total += self.applyEntries(f"legacy:{mission}", mission, entries[start:start + BATCH_LINES])
+        return total
+
     # Reads again everything of the project: its journals from their start, and the missions without a journal (pattern_legacy.py).
     def rebuild(self):
-        path = self.store.path
+        path, kept = self.store.path, self.store.verdicts()
         self.store.close()
         for suffix in ("", "-wal", "-shm"):
             (path.parent / f"{path.name}{suffix}").unlink(missing_ok=True)
         self.store = PatternStore(path)
+        self.store.keepVerdicts(kept)
         self.detectors.store = self.store
         self.detectors.trails = {}
-        total = 0
-        for mission, state, root in legacyMissions(self.project):
-            registerMission(self.project, root, mission, missionFolder(mission) / STATE_FOLDER / JOURNAL_FILE)
-            entries = legacyEntries(mission, state)
-            for start in range(0, len(entries), BATCH_LINES):
-                part = entries[start:start + BATCH_LINES]
-                total += self.applyEntries(f"legacy:{mission}", mission, part)
+        total = self.importLegacy()
         while True:
             read = self.poll()
             total += read

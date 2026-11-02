@@ -62,6 +62,7 @@ function architectSettings(modal) {
     modal.errors[key] ? h('div', { class: 'field-error' }, icon('alert'), modal.errors[key]) : h('div', { class: 'field-help' }, icon('info'), help));
   return [
     field('maxTools', 'The most tools one agent is given', `An agent with more tools gets the first ones, and you are told. The default is 1000 (no real limit); it can be 10 to ${store.state.maxToolsLimit}.`, { min: '10', step: '1' }),
+    field('maxSteps', 'The most steps of one request of an agent', `At the last step the agent must answer, even if its work is not finished. The default is 60; it can be 5 to ${store.state.maxStepsLimit}.`, { min: '5', step: '1' }),
     field('architectShare', 'The share of the budget the architect may spend (%)', 'When the mission has a budget. The default is 10%.', { min: '0', max: '100', step: '1' }),
     field('architectDollars', 'What the architect may spend in a mission without a budget ($)', 'The default is $1.', { min: '0', step: '0.1' }),
   ];

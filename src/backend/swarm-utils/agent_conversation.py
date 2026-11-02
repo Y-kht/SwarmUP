@@ -21,9 +21,9 @@ from harness_utils import STOPPED_MESSAGE, SwarmStopped
 from mcp_gateway import LOOSE_GATEWAY, gatewayOf
 from memory_cache import describeMemory
 from model_adapters import adapterOf
+from user_settings import currentSetting
 
 
-MAX_STEPS = 25
 CONTEXT_CHARS = 600000
 KEEP_RECENT = 12
 CONVERSATIONS_FOLDER = "conversations"
@@ -189,10 +189,11 @@ class Conversation:
         return (f"you already made this same call {self.sameCalls[key] - 1} times in this request, and its result is above. Use it, do something "
                 "else, or give your answer now.")
 
-    # One request: the model works with its tools for MAX_STEPS steps at most (a loop can have fewer), then its answer is given back.
+    # One request: the model works with its tools for the maxSteps setting steps at most (a loop can have fewer), then its answer is given back.
+    # A request that used them all is told: the agent may have left its work unfinished, and the architect sees which requests hit the limit.
     def ask(self, prompt):
         loop, readOnly = self.loop, not self.own
-        steps = getattr(loop, "maxSteps", MAX_STEPS)
+        steps = getattr(loop, "maxSteps", None) or currentSetting("maxSteps")
         adapter = adapterOf(loop.agent)
         self.checkStop()
         with linkOf(loop) as link:
@@ -241,6 +242,9 @@ class Conversation:
                 if news:
                     self.messages.append({"role": "user", "content": news})
                 self.save()
+            if step == steps - 1:
+                loop.note("limit", own=self.own, steps=steps, calls=bool(calls))
+                loop.recordActivity(f"stopped at the limit of {steps} steps of a request: its work may be unfinished")
         self.save()
         return reply.get("text") or ""
 

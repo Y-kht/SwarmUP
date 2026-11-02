@@ -26,7 +26,7 @@ from pattern_text import intentsOf, locationsOf, similarity, sketchOf
 from project_identity import projectDir, projectFor, registerMission
 from saved_swarms import saveSwarmState
 from test_saved_swarms import waitUntil
-from wheel_store import saveWheel
+from wheel_store import readCatalog, saveWheel, writeCatalog
 
 
 class ShapeTests(unittest.TestCase):
@@ -65,6 +65,13 @@ class ShapeTests(unittest.TestCase):
         click = shapeCall("computer", "click", {"x": 1210, "y": 84})
         self.assertEqual(click[1], "computer__click(x=#, y=#)")
         self.assertEqual(len(fingerprint("a", 1)), 20)
+
+    # Searching the names of the code one by one is one habit, whatever the name; a search for words keeps its words.
+    def testSearchesForNamesOfTheCodeShareTheirTemplate(self):
+        names = [shapeCall("files", "search_files", {"path": "Sources", "text": text}) for text in ("holdActionDuration", "result.disposition", "replay_prefix")]
+        self.assertEqual({shape[1] for shape in names}, {"files__search_files(path=<name>, text=<identifier>)"})
+        self.assertEqual(len({shape[0] for shape in names}), 3)
+        self.assertEqual(shapeCall("files", "search_files", {"path": "Sources", "text": "TODO"})[1], "files__search_files(path=<name>, text=TODO)")
 
 
 class ErrorTests(unittest.TestCase):
@@ -131,11 +138,33 @@ class SequenceTests(unittest.TestCase):
         trail = AgentTrail()
         trail.add("read a", "read", True)
         found = trail.add("run tests", "run", True)
-        self.assertEqual([gram for gram, fp in found["grams"]], [["read a", "run tests"]])
+        self.assertEqual([gram for gram, fp, spanned in found["grams"]], [["read a", "run tests"]])
         trail.add("edit", "edit", False, error="e1")
         trail.add("edit", "edit", False, error="e1")
         self.assertIsNotNone(trail.add("edit", "edit", False, error="e1")["loop"])
         self.assertIsNone(trail.add("edit", "edit", False, error="e1")["loop"])
+
+    # Calls the model made together in one step are no sequence: a wheel that makes them at once would save no step.
+    def testCallsOfOneModelStepGiveNoSequence(self):
+        trail = AgentTrail()
+        trail.newStep(["c1", "c2"])
+        trail.add("read a", "read", True, step=trail.stepOf("c1"))
+        self.assertEqual(trail.add("read b", "read", True, step=trail.stepOf("c2"))["grams"], [])
+        trail.newStep(["c3"])
+        found = trail.add("run tests", "run", True, step=trail.stepOf("c3"))
+        self.assertEqual([(gram, spanned) for gram, fp, spanned in found["grams"]], [(["read b", "run tests"], 2), (["read a", "read b", "run tests"], 2)])
+        self.assertEqual(AgentTrail(json.loads(json.dumps(trail.toData()))).stepCalls, ["c3"])
+
+    # The same kind of call in model step after model step is a streak, told when another kind of call (or the answer) ends it.
+    def testTheSameKindOfCallInStepAfterStepIsAStreak(self):
+        trail = AgentTrail()
+        for number, name in enumerate(("holdActionDuration", "replayPrefixCount", "SettingsLink")):
+            trail.newStep([f"c{number}"])
+            self.assertIsNone(trail.add("search <identifier>", "search", True, step=trail.stepOf(f"c{number}"), l0=f"search {name}")["streak"])
+        trail.newStep(["c9"])
+        found = trail.add("edit a", "edit", True, step=trail.stepOf("c9"), l0="edit a")
+        self.assertEqual(found["streak"], ("search", 3, ["search holdActionDuration", "search replayPrefixCount", "search SettingsLink"]))
+        self.assertIsNone(trail.endStreak())
 
     def testTheFixOfAnErrorIsWhatLedToTheSameStepWorking(self):
         trail = AgentTrail()
@@ -324,6 +353,50 @@ class MinerTests(MinerTestCase):
         self.assertEqual(signalled, {"ignored"})
         self.assertEqual(self.rowOf(miner, "command", "pip install")["status"], "covered")
 
+    # Reading a file that a wheel also reads is one step of its work at most, and what agents did before the wheel was made is no redo.
+    def testReadingAFileOrWorkDoneBeforeTheWheelIsNoRedo(self):
+        miner = self.miner()
+        self.habit("m1")
+        miner.poll()
+        read, pip = self.rowOf(miner, "action", "read_file"), self.rowOf(miner, "command", "pip install")
+        saveWheel("install_missing", "script", "WHEEL = {}\n", "Installs the module that is missing, then runs the tests again.", [pip["fp"], read["fp"]], "project",
+                  self.project, {})
+        self.journalOf("m2").add("run", agents=[{"name": "Other", "wheels": []}])
+        self.call("m2", "Other", "read_file", {"path": str(self.work / "src/app.py")}, size=5000)
+        self.call("m2", "Other", "run_command", {"command": "pip install requests"})
+        miner.poll()
+        self.assertEqual({row["data"]["how"]: row["count"] for row in miner.store.patterns(("redo",), limit=10)}, {"missed": 1})
+        catalog = readCatalog()
+        catalog["wheels"]["install_missing"]["created"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() + 3600))
+        writeCatalog(catalog)
+        miner.rebuild()
+        self.assertEqual(miner.store.patterns(("redo",), limit=10), [])
+
+    # Six names searched one per model step: a streak that counts its steps, and repeats though it happened in one request.
+    def testNamesSearchedOneByOneMakeAStreakThatRepeats(self):
+        miner = self.miner()
+        journal = self.journalOf("m1")
+        journal.add("request", "Auditor", prompt="Check every called function and enum case")
+        names = ("holdActionDuration", "replayPrefixCount", "SettingsLink", "showSettingsWindow", "replay_prefix", "result.disposition")
+        for number, name in enumerate(names, 1):
+            journal.add("step", "Auditor", n=number, text="", calls=[{"id": f"c{number}", "name": "files__search_files", "args": {"path": "Sources", "text": name}}])
+            self.call("m1", "Auditor", "search_files", {"path": "Sources", "text": name}, number=number)
+        journal.add("step", "Auditor", n=7, text="All names exist.", calls=[])
+        miner.poll()
+        row = self.rowOf(miner, "streak", "search_files")
+        self.assertEqual((row["count"], row["status"], row["data"]["modelSteps"]), (6, "repeating", 6))
+        self.assertIn("saves 5 model steps", pattern_store.hintsOf(row))
+
+    # One agent that meets the same error again and again in one request: a mistake that repeats, though it did not spread.
+    def testTheSameErrorManyTimesInOneRequestRepeats(self):
+        miner = self.miner()
+        self.journalOf("m1").add("request", "Researcher", prompt="Read the documentation of the event tap")
+        for number in range(6):
+            self.call("m1", "Researcher", "fetch_page", {"url": f"https://developer.apple.com/documentation/coregraphics/page{number}"}, "error",
+                      "The website answered with error 404.", number=number + 1)
+        miner.poll()
+        self.assertEqual(self.rowOf(miner, "error", "developer.apple.com")["status"], "repeating")
+
     def testOnlyUsefulPatternsSignalTheArchitectOnceWhenTheyStartToRepeat(self):
         miner = self.miner()
         for mission in ("m1", "m1", "m2"):
@@ -373,7 +446,8 @@ class MinerTests(MinerTestCase):
         self.assertEqual(mine["data"]["cross"]["projects"], [otherProject])
         self.assertEqual(findNotes("ruff linter")[0]["id"], "N1")
 
-    def testAMissionWithoutAJournalIsReadFromItsOldFilesWhenTheMinerIsRebuilt(self):
+    # The old missions of a project are read once, when its miner starts, so the first architect knows them without a rebuild.
+    def testAMissionWithoutAJournalIsReadFromItsOldFilesWhenTheMinerStartsOrIsRebuilt(self):
         state = {"id": "old1", "mission": "Old", "members": {"Coder": {"role": "coder", "status": "failed", "error": "The command failed. Exit code 1.\nbash: make: command not found",
                                                                        "recipe": {"task": "agent", "answers": {"folder": str(self.work)}}}}}
         saveSwarmState("old1", state)
@@ -384,10 +458,44 @@ class MinerTests(MinerTestCase):
                                                                    "note": "bash: make: command not found"}) for _ in range(3)) + "\n", encoding="utf-8")
         (folder / "conversations" / "Coder.json").write_text(json.dumps({"system": "", "delivered": [0, 0], "messages": [
             {"role": "user", "content": "Build it"}, {"role": "assistant", "content": "I will run make test now to build and test the project as usual.", "calls": []}]}), encoding="utf-8")
+        service = MinerService(self.project)
+        self.assertGreater(service.pollOnce(), 0)
+        self.assertEqual(self.rowOf(service.miner, "error", "after processes__run_command: make test")["count"], 3)
+        self.assertEqual(service.pollOnce(), 0)
+        service.miner.close()
+        service.projectLock.free()
         miner = self.miner()
+        self.assertEqual(miner.importLegacy(), 0)
         self.assertGreater(miner.rebuild(), 0)
         error = self.rowOf(miner, "error", "after processes__run_command: make test")
-        self.assertGreaterEqual(error["count"], 3)
+        self.assertEqual(error["count"], 3)
+
+    # A request that used all its steps is a hotspot: the agent had to answer, maybe before its work was done.
+    def testARequestCutAtTheLimitOfItsStepsIsAHotspot(self):
+        miner = self.miner()
+        journal = self.journalOf("m1")
+        journal.add("request", "Coder", prompt="Implement the recognizer and its tests")
+        journal.add("limit", "Coder", steps=60, calls=False)
+        miner.poll()
+        row = self.rowOf(miner, "hotspot", "cut at the limit")
+        self.assertEqual((row["errors"], row["data"]["limit"]), (1, 60))
+
+    # A store made again (a rebuild, a newer version of the miner) keeps what the architect decided about the patterns.
+    def testTheVerdictsOfTheArchitectSurviveARebuildAndANewVersion(self):
+        miner = self.miner()
+        for mission in ("m1", "m2"):
+            self.habit(mission)
+        miner.poll()
+        pip = self.rowOf(miner, "command", "pip install")
+        miner.store.setStatus(pip["id"], "dismissed")
+        miner.rebuild()
+        self.assertEqual(self.rowOf(miner, "command", "pip install")["status"], "dismissed")
+        miner.close()
+        with everywhere(pattern_store, "SCHEMA_VERSION", pattern_store.SCHEMA_VERSION + 1):
+            again = self.miner()
+            self.assertEqual(again.store.patterns(limit=5), [])
+            self.assertGreater(again.poll(), 0)
+            self.assertEqual(self.rowOf(again, "command", "pip install")["status"], "dismissed")
 
     def testADeletedMissionLeavesNoExampleBehind(self):
         miner = self.miner()
