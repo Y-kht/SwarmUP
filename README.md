@@ -4,19 +4,43 @@
 
 # SwarmUP
 
-**Build and run a swarm of AI agents on your own computer, in its own window or in a terminal.**<br>
-You do not need experience with code.
+**A swarm of AI agents that learns from its own work.**<br>
+What its agents do again and again becomes a script they run in one call the next time.<br>
+On your own computer, in its own window or in a terminal. You do not need experience with code.
 
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](#install)
 [![Built on MCP](https://img.shields.io/badge/built%20on-MCP-5B4CF0)](#how-the-agents-work-one-conversation-tools-through-mcp)
 [![Windows · macOS · Linux](https://img.shields.io/badge/runs%20on-Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-0E9F8E)](#use-the-interface)
+[![Learns from its work: wheels](https://img.shields.io/badge/learns%20from%20its%20work-wheels-0E9F8E)](#why-swarmup-a-swarm-that-gets-better-at-your-work)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-F4A62A)](LICENSE)
 
-[Install](#install) · [Quick start](#quick-start) · [Features](#features) · [The architect](#the-architect-and-the-wheels) · [Window](#use-the-interface) · [Command line](#use-the-command-line) · [Contributing](#contributing)
+[Why SwarmUP](#why-swarmup-a-swarm-that-gets-better-at-your-work) · [Install](#install) · [Quick start](#quick-start) · [Features](#features) · [Window](#use-the-interface) · [Command line](#use-the-command-line) · [Contributing](#contributing)
 
 </div>
 
 ---
+
+## Why SwarmUP: a swarm that gets better at your work
+
+AI agents spend much of their time and tokens doing again what they did before. They find the test command of the same project again, read the same files again, reason again about where the button of a login page is, and meet the same error and work out the same fix. Keeping notes in a long-term memory does not solve it: the notes are text, and every agent pays for that text in its context.
+
+SwarmUP keeps **scripts, not notes**. Every swarm has an **architect** that works in the background. It reads what the agents did, finds what they repeat, and writes **wheels**: scripts that do those steps in one call, with no reasoning to do again.
+
+```text
+ agents work ──► journal ──► miner of patterns ──► architect ──► wheels ──► the leader gives each agent the wheels it needs
+                (every step)  (counts what repeats)  (writes scripts)            (as tools: wheels__run_unit_tests)
+```
+
+- 🔁 **Only what repeats.** A miner counts every step, command, error, fix and piece of reasoning of every agent, by agent and by mission. A wheel can only cover a pattern that came back in several requests. What does not repeat yet, but may repeat elsewhere, gets a short note instead.
+- 🩹 **Repeated mistakes become steps that work.** An error that agents keep meeting, and the fix they keep finding, is a pattern too: a wheel does the steps the right way the first time. A wheel that fails, or that an agent has to work around, goes back to the architect to be fixed.
+- 🎯 **Each agent gets only what its task needs.** Wheels never fill the prompts. The leader gives each agent the few wheels its task needs, as tools, so the context stays small.
+- 🌍 **It learns across projects.** The notes of the architects are shared between projects: a pattern that repeats a little in each of several projects is recognised, and gets its wheel.
+- 🛡️ **You stay in control.** A wheel is code that a model wrote, so you see its code the first time it runs, and approve each version once. A changed wheel is asked again.
+
+> [!NOTE]
+> **From a real run.** Two testers ran the unit tests of a project again and again, and met the same assertion failures. At the end of the run, the architect saved the wheel `run_unittest_discovery`, which runs the tests and gives back only the failing ones with their first error line. In the next mission, the leader gave it to the testers. The first run showed its code, and was approved always; the next agent ran it without being asked. When a tester still worked around it, because it left out the assertion messages, the miner recorded that the wheel needed a fix.
+
+See [The architect and the wheels](#the-architect-and-the-wheels) for how it works, and `swarmup_cli.py patterns` to see what your agents repeat.
 
 ## How does it work?
 
@@ -26,7 +50,6 @@ SwarmUP builds and runs a swarm of AI agents for you, on your computer. You use 
 |---|---|
 | 🧩 **You build the swarm from parts** | Each agent has its instructions (in your own words, as you would brief an expert), the rules files that it follows, a folder to work in, and its own model. Any model can go with any agent: an API model (GPT, Claude, Gemini, DeepSeek), a free model on your GPUs, or a coding agent (Claude Code, Codex). For work that instructions alone cannot do, there are specialised agents (email, calendar, news, literature review, formatting, math, code). You can also tell a leader agent the mission, and it proposes the full swarm for your approval. |
 | 🤝 **The agents work as a team** | They work at the same time, wait for the results of other agents, write to each other, and keep a memory of the mission. The leader manages the swarm while it runs and writes the final report. When a round is over, you give the swarm your next request, as in a chat. |
-| ⚙️ **It learns from its own work** | Every swarm has an architect, which works in the background. A miner reads what every agent does and counts what the agents repeat: the same commands, the same errors and how they were fixed, the same sequences of steps, the same reasoning before the same action. The architect turns what repeats into **wheels**, scripts that do those steps in one call. The next swarms get them, and the leader gives each agent only the wheels that its task needs. |
 | 🔌 **Every agent works the same way, through MCP** | SwarmUP is built on the Model Context Protocol (MCP). Every agent gets its tools, its data and its skills from MCP servers, through one gateway, whatever its model. So the same tools, the same permissions and the same records apply to every agent. |
 | 🧱 **You can extend it** | Add your own rules files to `agent-rules/`. Give your agents the tools of other programs that have an MCP server (GitHub, a database...), after you approve them. Another AI agent can also start and lead your swarms, because SwarmUP is an MCP server too. |
 | 🛡️ **You stay in control** | SwarmUP asks you before an agent changes a file, runs a command or reads a web page, and each result waits for your approval. If you reject a result, the files that the agent changed are put back. |
@@ -195,11 +218,6 @@ You can build the swarm one agent at a time, or you can let the leader build it.
 ### The architect and the wheels
 
 Agents spend much of their time and tokens doing again what they did before: finding the test command of a project, reading the same files, reasoning about where the button of a login page is. SwarmUP learns from this. Every swarm has an **architect**, which works in the background for as long as the swarm runs. It has no task of its own, it never takes part in the work of the team, and it never asks you anything.
-
-```text
- agents work ──► journal ──► miner of patterns ──► architect ──► wheels ──► leader gives each agent the wheels it needs
-                 (every step)  (counts what repeats)  (writes scripts)            (as tools: wheels__run_unit_tests)
-```
 
 - **The journal.** Everything the agents do is written in the journal of the mission (`.swarmup/journal.jsonl` in its memory): every step of a model (what it wrote and the calls it made), every call of a tool with how it ended, the calls that could not run, the permissions, the drafts and their checks, your corrections and those of the leader, the messages and the changes of state. It is written whole, line by line, without secrets. Codex's own commands are in it too.
 - **The miner of patterns** reads the journals of a **project** while its swarms run (a project is the folder of the swarm, or the root of its git repository). It turns each step into a shape that keeps what the step is and drops what changes (`python -m pytest <path>.py -q`), and counts the patterns: the same calls and commands, sequences of steps, stuck loops, errors by family (Python, compilers, test runners, package managers, network, git, the refusals of SwarmUP...), how agents got out of an error, the same reasoning (near the same, not only word for word), the same reasoning followed by the same action, files read again and again, the corrections that you, the leader or the checks keep asking for, the permissions you keep giving, the calls a model keeps writing wrong, and the costly steps. For each one it knows how many times, by which agent, in which missions, what it cost, and a few examples. A pattern is new, then emerging, then **repeating** when it came back in several requests. It keeps everything in one SQLite file per project, so it reads only what is new, also after a restart, and very large journals take seconds.
