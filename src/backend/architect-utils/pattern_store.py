@@ -14,7 +14,10 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
-SCHEMA_VERSION = 1
+# The version of the store: a miner of a newer version reads every journal again (4: streaks) (2: a sequence spans model steps, no redo before a wheel
+# existed or from one file read, a mistake made again and again in one request repeats; 3: a search for a name of the code is <identifier>).
+# The verdicts of the architect stay.
+SCHEMA_VERSION = 4
 DB_FILE = "patterns.sqlite"
 FIRST_EXAMPLES = 4
 EXAMPLES = 12
@@ -23,10 +26,13 @@ TEXT_SIGNATURES = 50000
 EXACT_VALUES = 20
 REPEAT_COUNT = 3
 REPEAT_SPREAD = 2
+# A mistake that one agent makes again and again in one request (the same error, a stuck loop) repeats without spreading: it costs each time.
+STUCK_COUNT = 6
+STUCK_KINDS = ("error", "loop", "badcall", "streak")
 EMERGING_COUNT = 2
 AGE_DAYS = 14
 # How much a pattern of each kind is worth automating, all else equal.
-KIND_WEIGHTS = {"decision": 2.0, "wheelfail": 1.8, "fix": 1.6, "reasoning": 1.5, "redo": 1.5, "loop": 1.4, "sequence": 1.3, "correction": 1.3,
+KIND_WEIGHTS = {"decision": 2.0, "wheelfail": 1.8, "fix": 1.6, "streak": 1.6, "reasoning": 1.5, "redo": 1.5, "loop": 1.4, "sequence": 1.3, "correction": 1.3,
                 "error": 1.2, "command": 1.0, "badcall": 1.0, "hotspot": 1.0, "reread": 0.8, "action": 0.7, "permission": 0.6, "message": 0.6,
                 "intent": 0.5, "wheel": 0.0}
 # The kinds that tell the architect something to automate or fix (wheel only counts the runs of the wheels).
@@ -48,6 +54,7 @@ CREATE TABLE IF NOT EXISTS textsigs(id INTEGER PRIMARY KEY, kind TEXT, cluster T
 CREATE TABLE IF NOT EXISTS anchors(kind TEXT, anchor TEXT, sig INTEGER, PRIMARY KEY(kind, anchor, sig));
 CREATE TABLE IF NOT EXISTS signals(id INTEGER PRIMARY KEY, pattern INTEGER, kind TEXT, t REAL, consumed INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS passes(id INTEGER PRIMARY KEY, mission TEXT, started REAL, ended REAL, outcome TEXT, spent REAL, patterns TEXT, report TEXT);
+CREATE TABLE IF NOT EXISTS verdicts(fp TEXT PRIMARY KEY, dismissedAt INTEGER, note TEXT);
 """
 COLUMNS = ("fp", "kind", "level", "shape", "label", "count", "requests", "agents", "missions", "firstSeen", "lastSeen", "tokens", "seconds", "size", "errors",
            "status", "statusAt", "score", "wheel", "note", "claimedBy", "claimedUntil", "dismissedAt", "data")
@@ -67,6 +74,8 @@ def foldData(old, new):
                 counts[value] = counts.get(value, 0) + 1
             else:
                 data["exactOther"] = data.get("exactOther", 0) + 1
+        elif key == "modelSteps":
+            data[key] = max(data.get(key) or 0, value or 0)
         elif key == "recipes":
             recipes = data.setdefault("recipes", {})
             for recipe in value:
@@ -77,7 +86,8 @@ def foldData(old, new):
     return data
 
 
-# The hints the architect reads: the step is always the same (deterministic), its numbers barely change (stable), it has a known fix.
+# The hints the architect reads: the step is always the same (deterministic), its numbers barely change (stable), it has a known fix, the model
+# steps a wheel of the sequence would save.
 def hintsOf(row):
     data, hints = row.get("data") or {}, []
     exact = data.get("exact") or {}
@@ -92,6 +102,8 @@ def hintsOf(row):
         hints.append("toolOnly")
     if data.get("local"):
         hints.append("local")
+    if (data.get("modelSteps") or 0) >= 2:
+        hints.append(f"saves {data['modelSteps'] - 1} model steps")
     return hints
 
 
@@ -101,7 +113,8 @@ def statusOf(row, cross=False, covered=None, noted=None):
         return "covered"
     if row.get("status") == "dismissed" and row["count"] < 2 * (row.get("dismissedAt") or 0):
         return "dismissed"
-    if row["count"] >= REPEAT_COUNT and max(row["requests"], row["agents"], row["missions"]) >= REPEAT_SPREAD:
+    spread = max(row["requests"], row["agents"], row["missions"]) >= REPEAT_SPREAD
+    if row["count"] >= REPEAT_COUNT and (spread or (row["kind"] in STUCK_KINDS and row["count"] >= STUCK_COUNT)):
         return "repeating"
     if cross:
         return "cross"
@@ -121,6 +134,17 @@ def scoreOf(row, now=None):
     return round(math.log2(1 + row["count"]) * spread * cost * age * KIND_WEIGHTS.get(row["kind"], 1.0) * hinted, 4)
 
 
+def verdictsIn(connection):
+    tables = {name for (name,) in connection.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    kept = {}
+    if "verdicts" in tables:
+        kept.update({row[0]: tuple(row) for row in connection.execute("SELECT fp, dismissedAt, note FROM verdicts").fetchall()})
+    if "patterns" in tables:
+        kept.update({row[0]: tuple(row) for row in connection.execute("SELECT fp, CASE WHEN status='dismissed' THEN dismissedAt END, note FROM patterns "
+                                                                       "WHERE status='dismissed' OR note IS NOT NULL").fetchall()})
+    return list(kept.values())
+
+
 class PatternStore:
     def __init__(self, path, readOnly=False):
         self.path, self.readOnly = Path(path), readOnly
@@ -136,9 +160,11 @@ class PatternStore:
         version = connection.execute("PRAGMA user_version").fetchone()[0]
         if version != SCHEMA_VERSION and (version == 0 or not self.readOnly):
             connection.execute("PRAGMA journal_mode=WAL")
+            kept = verdictsIn(connection)
             for (name,) in connection.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall():
                 connection.execute(f"DROP TABLE IF EXISTS {name}")
             connection.executescript(SCHEMA)
+            connection.executemany("INSERT OR REPLACE INTO verdicts VALUES (?, ?, ?)", kept)
             connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         if not self.readOnly:
             connection.execute("PRAGMA synchronous=NORMAL")
@@ -147,6 +173,19 @@ class PatternStore:
     def close(self):
         with self.lock:
             self.connection.close()
+
+    # What the architect decided about the patterns (dismissed, noted): kept when the store is made again, given back to a pattern that comes back.
+    def verdicts(self):
+        with self.lock:
+            return verdictsIn(self.connection)
+
+    def keepVerdicts(self, kept):
+        with self.transaction() as db:
+            db.executemany("INSERT OR REPLACE INTO verdicts VALUES (?, ?, ?)", kept)
+
+    def verdictOf(self, db, fp):
+        found = db.execute("SELECT dismissedAt, note FROM verdicts WHERE fp=?", (fp,)).fetchone()
+        return dict(found) if found else None
 
     @contextmanager
     def transaction(self):

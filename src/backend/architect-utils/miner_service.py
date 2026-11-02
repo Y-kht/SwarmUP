@@ -104,12 +104,14 @@ class MinerService:
         return self.reader
 
     def pollOnce(self):
-        if self.miner is None and self.projectLock.take():
-            self.miner = Miner(self.project)
-        if self.miner is None:
-            return 0
         with self.busy:
-            read = self.miner.poll()
+            read = 0
+            if self.miner is None and self.projectLock.take():
+                self.miner = Miner(self.project)
+                read = self.miner.importLegacy()
+            if self.miner is None:
+                return 0
+            read += self.miner.poll()
         self.polls += 1
         return read
 

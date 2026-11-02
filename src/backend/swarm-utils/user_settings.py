@@ -8,15 +8,18 @@ from harness_utils import AGENT_FILES
 # The settings of the user, kept in agent-files/settings.json:
 # - maxAgents: the most agents a leader that builds the swarm may put in it.
 # - maxTools: the most tools one agent is given at a time (the rest is cut, and the user is told).
+# - maxSteps: the most steps (model calls) of one request of an agent; at the last one it must answer. A worker with a large task needs many.
 # - architectShare: the part of the budget of a mission, in percent, that the architect may spend; architectDollars: what it may spend in a
 #   mission without a budget.
 # ==============
 SETTINGS_FILE = "settings.json"
-DEFAULT_SETTINGS = {"maxAgents": 10, "maxTools": 1000, "architectShare": 10, "architectDollars": 1.0}
+DEFAULT_SETTINGS = {"maxAgents": 10, "maxTools": 1000, "maxSteps": 60, "architectShare": 10, "architectDollars": 1.0}
 MAX_AGENTS_LIMIT = 100
 MAX_TOOLS_LIMIT = 100000
+MAX_STEPS_LIMIT = 1000
 # key: (whole number, lowest, highest, its name for the user).
 LIMITS = {"maxAgents": (True, 1, MAX_AGENTS_LIMIT, "The most agents"), "maxTools": (True, 10, MAX_TOOLS_LIMIT, "The most tools of an agent"),
+          "maxSteps": (True, 5, MAX_STEPS_LIMIT, "The most steps of a request"),
           "architectShare": (True, 0, 100, "The share of the architect"), "architectDollars": (False, 0, 1000, "The dollars of the architect")}
 
 

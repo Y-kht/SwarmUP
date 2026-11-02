@@ -44,6 +44,9 @@ CONNECTIVES = {"&&", "||", ";", "|", "&", "|&"}
 CONTEXT_PROGRAMS = {"cd", "pushd", "popd", "source", ".", "export", "set", "unset", "alias"}
 PATH_KEYS = ("path", "source", "target", "file", "folder", "cwd", "filename", "directory", "dir")
 TEXT_KEYS = ("text", "pattern", "query", "content", "new_text", "old_text", "note", "message", "question", "prompt")
+# A search for a name of the code (camelCase, snake_case, a dotted name): agents that check names one by one make one pattern, whatever the name.
+SEARCH_KEYS = ("text", "pattern", "query")
+IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\(?")
 SOURCE_SUFFIXES = {".py", ".js", ".ts", ".tsx", ".jsx", ".swift", ".rs", ".go", ".java", ".kt", ".c", ".h", ".cpp", ".hpp", ".cs", ".rb", ".php", ".m",
                    ".mm", ".scala", ".sh", ".sql", ".vue", ".svelte", ".lua", ".r", ".jl", ".dart", ".ex", ".exs", ".hs", ".ml", ".zig"}
 DOC_SUFFIXES = {".md", ".txt", ".rst", ".tex", ".docx", ".pdf", ".html", ".adoc"}
@@ -323,6 +326,8 @@ def shapeValue(key, value, root=None):
     if URL.fullmatch(text.strip()):
         exact, template, host = shapeUrl(text.strip())
         return exact, template
+    if key in SEARCH_KEYS and IDENTIFIER.fullmatch(text.strip()) and re.search(r"[a-z][A-Z]|_|\.", text):
+        return text.strip()[:120], "<identifier>"
     if key in TEXT_KEYS or len(text) > 60:
         masked = maskText(text)
         return masked[:200], f"<text:{len(text.split())}w>" if key in ("content", "new_text", "old_text") else masked[:80]

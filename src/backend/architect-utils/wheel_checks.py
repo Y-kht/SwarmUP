@@ -11,6 +11,7 @@ import types
 import jsonschema
 
 from mcp_external import screenTool
+from pattern_detectors import LOOKING
 
 
 NAME = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$")
@@ -174,7 +175,24 @@ def checkSteps(manifest):
             except re.error:
                 problems.append(f"Step {number} saves {name} with a regular expression that does not compile.")
             known.add(name)
+    if not problems and onlyReads(manifest):
+        problems.append("This wheel only reads (files, the team), and no step needs what a step before found: an agent makes such calls together in one step, "
+                        "so the wheel saves no step and no reasoning, and fills its context. Automate what the agents work out or run (a check, a search that "
+                        "answers, a command), or dismiss the pattern.")
     return problems
+
+
+# A wheel of steps that only reads what the agent could read itself in one step: no step writes or runs, and none uses a value saved before.
+def onlyReads(manifest):
+    steps = manifest.get("steps") if isinstance(manifest, dict) else None
+    if not steps or not all(isinstance(step, dict) and str(step.get("tool") or "").startswith(LOOKING) for step in steps):
+        return False
+    saved = set()
+    for step in steps:
+        if saved & set(re.findall(r"\{(\w+)\}", str(step.get("arguments") or {}))):
+            return False
+        saved |= set(step.get("save") or {})
+    return True
 
 
 # The problems of a wheel before it is saved: [] when it can be saved. covers are the patterns (rows of the store) it automates, and liveCovers

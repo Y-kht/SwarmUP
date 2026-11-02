@@ -21,7 +21,7 @@ from session_architect import ARCHITECT_ID, SessionArchitect
 from session_saved import SessionSaved
 from session_steps import SessionSteps
 from tasks_library import DEFAULT_LOOPS, getTask, suggestFolder
-from user_settings import DEFAULT_SETTINGS, MAX_AGENTS_LIMIT, MAX_TOOLS_LIMIT, SettingError, loadSettings, saveSettings
+from user_settings import DEFAULT_SETTINGS, MAX_AGENTS_LIMIT, MAX_STEPS_LIMIT, MAX_TOOLS_LIMIT, SettingError, loadSettings, saveSettings
 
 
 POLL_SECONDS = 20
@@ -357,7 +357,7 @@ class Session(SessionSteps, SessionModels, SessionRuns, SessionSaved, SessionMcp
             codexLogin = {key: value for key, value in self.codexLogin.items() if key != "login"} if self.codexLogin else None
         return {"version": version, "mission": self.mission, "buildMode": self.buildMode, "costs": self.describeCosts(), "settings": loadSettings(),
                 "prices": describeCached("model-prices"),
-                "maxAgentsLimit": MAX_AGENTS_LIMIT, "maxToolsLimit": MAX_TOOLS_LIMIT, "agents": agents, "mode": self.mode, "order": self.order, "keys": self.describeKeys(),
+                "maxAgentsLimit": MAX_AGENTS_LIMIT, "maxToolsLimit": MAX_TOOLS_LIMIT, "maxStepsLimit": MAX_STEPS_LIMIT, "agents": agents, "mode": self.mode, "order": self.order, "keys": self.describeKeys(),
                 "gpu": self.describeGpus(), "run": self.describeRun(), "questions": questions, "jobs": jobs, "unfinished": self.unfinished, "busy": self.isBusy(),
                 "nativeDialogs": self.dialog is not None, "trash": self.trash["spec"]["name"] if self.trash else None, "cancelling": cancelling,
                 "codexLogin": codexLogin, "swarmFolder": next(iter(folders)) if len(folders) == 1 else None, "mixedFolders": len(folders) > 1,

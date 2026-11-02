@@ -98,7 +98,9 @@ class CheckTests(WheelTestCase):
         cases = [({**STEPS, "steps": []}, "1 to 12 steps"), ({**STEPS, "steps": [{"tool": "read"}]}, "full name"),
                  ({**STEPS, "steps": [{"tool": "wheels__other", "arguments": {}}]}, "not wheels"),
                  ({**STEPS, "steps": [{"tool": "files__read_file", "arguments": {"path": "{nowhere}"}}]}, "is no input"),
-                 ({**STEPS, "steps": [{"tool": "files__read_file", "arguments": {}, "save": {"x": "("}}]}, "does not compile")]
+                 ({**STEPS, "steps": [{"tool": "files__read_file", "arguments": {}, "save": {"x": "("}}]}, "does not compile"),
+                 ({**STEPS, "steps": [{"tool": "files__read_file", "arguments": {"path": "{path}"}}, {"tool": "files__read_file", "arguments": {"path": "b.txt"}}]},
+                  "saves no step")]
         for manifest, expected in cases:
             problems = self.problems(json.dumps(manifest), "steps", "find_first_word")
             self.assertTrue(any(expected in problem for problem in problems), (expected, problems))
