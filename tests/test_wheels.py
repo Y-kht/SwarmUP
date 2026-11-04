@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -20,13 +21,14 @@ from leader_wheels import checkWheels, describeWheelsFor, findWheels, giveWheels
 from mcp_gateway import Gateway
 from mission_memory import WorkSession
 from project_identity import projectFor
+from server_architect import checkStepTools
 from swarm_harness import Swarm
 from tasks_library import buildLoop
 from test_leader_utils import makeCatalog
 from user_settings import saveSettings
-from wheel_checks import checkWheel
+from wheel_checks import checkWheel, cleanSteps
 from wheel_store import catalogFor, isApproved, loadWheel, readCatalog, resolve, retireWheel, revoke, saveWheel, wheelsFolder
-from wheel_tools import RUNNER
+from wheel_tools import RUNNER, packageFolders
 
 
 SCRIPT = '''WHEEL = {"name": "count_lines", "summary": "Counts the lines of a text file of the project and gives the number back.", "kind": "script",
@@ -67,6 +69,67 @@ class WheelTestCase(unittest.TestCase):
 class CheckTests(WheelTestCase):
     def problems(self, text, kind="script", name="count_lines", covers=REPEATING, scope="project", live=None):
         return checkWheel(text, kind, name, covers, scope, live or {})[1]
+
+    # What a small model wrote in a real run: it ran the name of a tool as a command, one chunk for each call, which can never work and saves no step.
+    def testAScriptFindsThePackagesOfTheUserButNotTheCodeOfSwarmUp(self):
+        folders = packageFolders().split(os.pathsep)
+        self.assertFalse(any("architect-utils" in folder or "swarm-utils" in folder for folder in folders))
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder)
+            (target / "users_package.py").write_text("VALUE = 42\n", encoding="utf-8")
+            (target / "wheel.py").write_text("import users_package\n\n\ndef run(args, folder):\n    return users_package.VALUE\n", encoding="utf-8")
+            (target / "args.json").write_text("{}", encoding="utf-8")
+            done = subprocess.run([sys.executable, "-I", str(RUNNER), str(target / "wheel.py"), str(target / "args.json"), str(target / "result.json"), folder], cwd=folder, capture_output=True)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertEqual(json.loads((target / "result.json").read_text(encoding="utf-8"))["data"], 42)
+
+    def testAToolOfTheAgentsIsNoCommand(self):
+        body = "    import subprocess\n    return subprocess.run(['files__read_file', '--path=a'], capture_output=True).stdout\n"
+        self.assertTrue(any("files__read_file (line" in problem and "not a command" in problem for problem in self.problems(script(body=body))))
+        self.assertFalse(any("not a command" in problem for problem in self.problems(script(body="    return 'files of the project'\n"))))
+
+    # What a small model wrote next: the tools as functions of Python. It would fail when it runs, and with an empty list it would say nothing at all.
+    def testANameThatNoLineDefinesIsSaid(self):
+        tool = "    for text in args.get('text', []):\n        files__search_files(text=text)\n    return 'done'\n"
+        self.assertTrue(any("files__search_files (line" in problem and "not a function" in problem for problem in self.problems(script(body=tool))))
+        unknown = "    return json.dumps(args)\n"
+        self.assertTrue(any("json (line" in problem and "defined nowhere" in problem for problem in self.problems(script(body=unknown))))
+        fine = ("    import json as parser\n    from os import path\n    found = [parser.dumps(item) for item in args]\n    try:\n        total = len(found)\n"
+                "    except ValueError as error:\n        raise RuntimeError(str(error))\n    helper = lambda value, *others, **more: (value, others, more)\n"
+                "    return path.join(folder, str(total)), helper(1), print, Path\n\n\nclass Path:\n    pass\n")
+        self.assertEqual(self.problems(script(body=fine)), [])
+
+    def testABraceTooManyAfterAWheelOfStepsIsLeftOut(self):
+        clean = cleanSteps(json.dumps(STEPS) + "}\n")
+        self.assertEqual(json.loads(clean), STEPS)
+        self.assertEqual(self.problems(clean, "steps", "find_first_word"), [])
+        self.assertEqual(cleanSteps("not json"), "not json")
+        self.assertEqual(cleanSteps("[1, 2]"), "[1, 2]")
+
+    # What a real pass saved: a search for each path, without the text to search. Every call would fail.
+    def testAStepNeedsARealToolWithWhatItNeeds(self):
+        self.assertEqual(checkStepTools({"steps": [{"tool": "files__read_file", "each": "items", "arguments": {"path": "{item}"}}]}), [])
+        missing = checkStepTools({"steps": [{"tool": "files__search_files", "each": "items", "arguments": {"path": "{item}"}}]})
+        self.assertIn("files__search_files without text", missing[0])
+        self.assertIn("has no tool read", checkStepTools({"steps": [{"tool": "files__read", "arguments": {}}]})[0])
+        self.assertEqual(checkStepTools({"steps": [{"tool": "github__create_issue", "arguments": {}}]}), [])
+
+    def testAStepForEachItemNeedsAList(self):
+        each = {**STEPS, "inputs": {"paths": {"type": "array", "items": {"type": "string"}, "description": "The files."}, "path": {"type": "string", "description": "One file."}}, "required": ["paths"],
+                "steps": [{"tool": "files__read_file", "each": "paths", "arguments": {"path": "{item}", "line_count": 60}}]}
+        self.assertEqual(self.problems(json.dumps(each), "steps", "find_first_word"), [])
+        self.assertEqual(self.problems(json.dumps(each), "steps", "find_first_word", covers=[{"fp": "f1", "status": "repeating", "kind": "streak", "data": {}}]), [])
+        wrong = {**each, "steps": [{"tool": "files__read_file", "each": "path", "arguments": {"path": "{item}"}}]}
+        self.assertTrue(any("must be an input of type array" in problem for problem in self.problems(json.dumps(wrong), "steps", "find_first_word")))
+        outside = {**each, "steps": [{"tool": "files__read_file", "arguments": {"path": "{item}"}}]}
+        self.assertTrue(any("item" in problem and "no input" in problem for problem in self.problems(json.dumps(outside), "steps", "find_first_word")))
+
+    def testAWheelForAStreakTakesTheWholeList(self):
+        streak = [{"fp": "f1", "status": "repeating", "kind": "streak", "data": {}}]
+        self.assertTrue(any("input of type array" in problem for problem in self.problems(script(), covers=streak)))
+        listed = script(inputs={"paths": {"type": "array", "items": {"type": "string"}, "description": "The files to read."}}, required=["paths"])
+        self.assertEqual(self.problems(listed, covers=streak), [])
+        self.assertEqual(self.problems(script()), [])
 
     def testAGoodWheelPasses(self):
         self.assertEqual(self.problems(SCRIPT), [])
@@ -241,6 +304,31 @@ class GatewayTests(WheelTestCase):
         self.assertTrue(error)
         self.assertIn("ran for more than 1 seconds", text)
         self.assertLess(time.monotonic() - started, 10)
+
+    # The easiest wheel for a streak: one call of the agent, the tool once for each item, what one item cannot do does not stop the others.
+    def testAStepForEachItemCallsTheToolForEveryItem(self):
+        each = {**STEPS, "inputs": {"paths": {"type": "array", "items": {"type": "string"}, "description": "The files."}}, "required": ["paths"],
+                "steps": [{"tool": "files__read_file", "each": "paths", "arguments": {"path": "{item}", "line_count": 2}}]}
+        self.save(json.dumps(each), "find_first_word", "steps")
+        (self.work / "one.md").write_text("First\nSecond\nThird\n", encoding="utf-8")
+        (self.work / "two.md").write_text("Other\nLines\n", encoding="utf-8")
+        text, error = self.gateway.link(self.loop(wheels=("find_first_word",))).call("wheels__find_first_word", {"paths": ["one.md", "missing.md", "two.md"]})
+        self.assertFalse(error, text)
+        self.assertIn("First", text)
+        self.assertIn("Other", text)
+        self.assertNotIn("Third", text)
+        self.assertIn("missing.md (it failed)", text)
+
+    def testAWheelThatFailsForEveryItemIsAFailureTheArchitectSees(self):
+        each = {**STEPS, "inputs": {"paths": {"type": "array", "items": {"type": "string"}, "description": "The files."}}, "required": ["paths"],
+                "steps": [{"tool": "files__read_file", "each": "paths", "arguments": {"path": "{item}"}}]}
+        self.save(json.dumps(each), "find_first_word", "steps")
+        text, error = self.gateway.link(self.loop(wheels=("find_first_word",))).call("wheels__find_first_word", {"paths": ["missing.md", "gone.md"]})
+        self.assertTrue(error)
+        self.assertIn("failed at step 1", text)
+        runs = [entry for entry in map(json.loads, self.journal.path.read_text().splitlines()) if entry["kind"] == "wheel"]
+        self.assertEqual([entry["ok"] for entry in runs], [False])
+        self.assertIn("failed for every item", runs[0]["error"]["message"])
 
     def testAWheelOfStepsCallsTheToolsOfTheAgentAsItsOwnCalls(self):
         self.save(json.dumps(STEPS), "find_first_word", "steps")

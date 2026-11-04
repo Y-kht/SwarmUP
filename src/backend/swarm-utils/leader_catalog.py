@@ -19,11 +19,12 @@ from user_settings import loadSettings
 
 
 STATUS_SECONDS = 60
+EXAMPLE_MODEL = "claude-sonnet-5-5"
 
 KIND_WORDS = {"text": "text", "prompt": "the instructions of the agent, in plain words", "email": "an email address", "number": "a whole number", "file": "the path of a file that exists in the folder",
               "path": "the path of a file in the folder, created if it does not exist", "folder": "a folder", "phone": "a phone number with its country code, like +4915112345678",
               "time": "a time of the day HH:MM", "command": "a command line, run in the folder", "outlets": "a list of news outlets: names of the list of outlets below, or addresses of RSS feeds",
-              "publishers": "a list of publishers: names of the list of publishers below", "secret": "a secret: never write it, the user gives it",
+              "publishers": "a list of publishers: names of the list of publishers below. Leave it out, unless the user asks for some publishers", "secret": "a secret: never write it, the user gives it",
               "accounts": "accounts of the user: never write them, the user gives them"}
 
 
@@ -117,7 +118,12 @@ class LeaderCatalog(LeaderChecks):
         return self.status
 
     def rules(self):
-        return prompts.LEADER_RULES.format(leader=self.leader, user=USER_NAME)
+        return prompts.LEADER_RULES.format(leader=self.leader, user=USER_NAME, example=self.exampleModel())
+
+    # The model of the examples of the rules: small models copy examples, so it is one that is sure to work, the model of the leader itself.
+    def exampleModel(self):
+        info = self.leaderModel or {}
+        return info["name"] if info.get("name") and not info.get("user") and not info.get("cli") else EXAMPLE_MODEL
 
     # The price of 1 million tokens of a model (the higher of reading and writing) in US dollars, 0 for a free model, None if it is not known.
     def reference(self, info):

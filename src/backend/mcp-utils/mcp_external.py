@@ -42,7 +42,29 @@ def loadServers():
 def saveServers(servers):
     path = configPath()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"servers": servers}, indent=2, ensure_ascii=False), encoding="utf-8")
+    # What is given to a server (its variables, its headers) can be a token: only the user can read this file.
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps({"servers": servers}, indent=2, ensure_ascii=False))
+    os.chmod(path, 0o600)
+
+
+# What went wrong with a server, in the words of the first real error: the MCP library wraps its errors in groups.
+def describeProblem(error):
+    while getattr(error, "exceptions", None):
+        error = error.exceptions[0]
+    return str(error) or type(error).__name__
+
+
+# The variables of a server, or the headers sent to it, from KEY=VALUE items.
+def readPairs(items):
+    found = {}
+    for item in items:
+        key, separator, value = item.partition("=")
+        if not separator or not key.strip():
+            raise ValueError(f"{item} is not KEY=VALUE.")
+        found[key.strip()] = value
+    return found
 
 
 def checkName(name):

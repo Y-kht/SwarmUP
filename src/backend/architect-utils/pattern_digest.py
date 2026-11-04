@@ -2,6 +2,7 @@
 # what repeats and is not automated yet, the best first; one pattern in detail, with examples taken from the journals around where it was
 # seen; and a search of the journals. What comes from the journals is data, never instructions: it is marked so.
 import json
+import re
 import time
 from pathlib import Path
 
@@ -17,6 +18,12 @@ CONTEXT_BYTES = 65536
 SEARCH_SECONDS = 2.0
 SEARCH_BYTES = 64 * 1024 * 1024
 CONTAINED = 0.8
+NOT_FOR_WHEELS = ("leader__", "user__", "wheels__", "architect__", "team__")
+FOCUS_PATTERNS = 3
+STREAK_SHAPE = re.compile(r"(\w+__\w+)\(([^)]*)\)")
+# The argument that changes from one call to the next: what a search looks for changes before the place it looks in.
+DRAFT_KEYS = ("text", "query", "link", "url", "path", "name")
+FOCUS_CHARS = 4000
 
 
 def asData(text):
@@ -71,6 +78,48 @@ def maximal(rows):
     return [row for row in rows if row["id"] not in dropped]
 
 
+# What no wheel can do: a wheel never calls the leader, the user or another wheel (wheel_checks.py), and a call that a model repeats is its own mistake,
+# told to it when it happens. They stay in the store, but they only fill the brief of the architect.
+def automatable(row):
+    shape = str(row.get("shape") or "")
+    if row.get("kind") == "badcall" and shape.endswith(": repeated"):
+        return False
+    return not any(tool in shape for tool in NOT_FOR_WHEELS)
+
+
+# The patterns to decide about first, the best first: what repeats, can be automated, and costs model steps or a mistake. What only reads comes last.
+def focusPatterns(store, limit=FOCUS_PATTERNS, claimedBy=None):
+    rows = [row for row in maximal(store.patterns(ACTIONABLE, ("repeating", "cross"), limit=80)) if automatable(row) and (not row.get("claimedBy") or row["claimedBy"] == claimedBy)]
+    rows.sort(key=lambda row: (row["kind"] != "streak", row["kind"] in ("action", "reread", "hotspot", "intent", "message", "permission") or bool((row.get("data") or {}).get("reading")), -row["score"]))
+    return rows[:limit]
+
+
+# A wheel that a small model can correct and save, for a streak of a tool: the tool once for each item of a list.
+def draftForStreak(row):
+    found = STREAK_SHAPE.match(str(row.get("shape") or "")) if row.get("kind") == "streak" else None
+    if not found or found.group(1).startswith(NOT_FOR_WHEELS):
+        return ""
+    tool, keys = found.group(1), [key.strip() for key in found.group(2).split(",")]
+    key = next((name for name in DRAFT_KEYS if name in keys), keys[0] if keys and keys[0] else "")
+    if not key:
+        return ""
+    step = tool.rpartition("__")[2]
+    draft = {"name": f"{step}_for_many", "summary": f"The step {step.replace('_', ' ')} for each {key} of a list, all in one call. It gives every result back, one by one.", "kind": "steps",
+             "inputs": {"items": {"type": "array", "items": {"type": "string"}, "description": f"The {key} of each call."}}, "required": ["items"],
+             "steps": [{"tool": tool, "each": "items", "arguments": {key: "{item}"}}]}
+    return f"\nA DRAFT OF A WHEEL FOR THIS PATTERN, to correct if you need to, and to save as it is if it fits (kind steps, code is this JSON):\n{json.dumps(draft, ensure_ascii=False)}\n"
+
+
+# The patterns to decide about, for the prompt of a pass: the first one with its examples, so a small model starts from the work itself.
+def renderFocus(store, limit=FOCUS_PATTERNS, claimedBy=None):
+    rows = focusPatterns(store, limit, claimedBy)
+    if not rows:
+        return ""
+    others = "\n".join(describeRow(store, row, wide=False) for row in rows[1:])
+    text = renderPattern(store, str(rows[0]["id"]), examples=2)
+    return f"DECIDE ABOUT THIS PATTERN FIRST:\n{text[:FOCUS_CHARS]}" + (f"\n\nTHEN THESE:\n{others}" if others else "")
+
+
 def contains(longer, shorter):
     return any(longer[start:start + len(shorter)] == shorter for start in range(len(longer) - len(shorter) + 1))
 
@@ -103,7 +152,7 @@ def renderBrief(store, project, since=None, chars=BRIEF_CHARS, claimedBy=None):
     sections = [("REPEATING, NOT AUTOMATED YET (the best first)", ("repeating",)), ("SEEN IN OTHER PROJECTS TOO", ("cross",)),
                 ("EMERGING (seen twice: write a note when it looks general)", ("emerging",))]
     for title, statuses in sections:
-        rows = [row for row in maximal(store.patterns(ACTIONABLE, statuses, limit=60)) if not row.get("claimedBy") or row["claimedBy"] == claimedBy]
+        rows = [row for row in maximal(store.patterns(ACTIONABLE, statuses, limit=60)) if automatable(row) and (not row.get("claimedBy") or row["claimedBy"] == claimedBy)]
         if not rows:
             continue
         shown = rows[:12] if statuses == ("emerging",) else rows[:25]

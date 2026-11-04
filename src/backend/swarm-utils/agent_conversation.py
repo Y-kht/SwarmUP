@@ -21,11 +21,24 @@ from harness_utils import STOPPED_MESSAGE, SwarmStopped
 from mcp_gateway import LOOSE_GATEWAY, gatewayOf
 from memory_cache import describeMemory
 from model_adapters import adapterOf
+from model_support import ModelMemoryError
 from user_settings import currentSetting
 
 
 CONTEXT_CHARS = 600000
 KEEP_RECENT = 12
+# A long answer cut at the limit of the tokens of a model goes on, this many times at most.
+CUT_TURNS = 4
+# When the GPUs run out of memory, the conversation keeps this share of itself and the model tries again, this many times at most.
+MEMORY_SHARE = 0.6
+MEMORY_TRIES = 3
+KEPT_CHARS = 2000
+KEEP_STEPS = 6
+# After this many refused repetitions in a row, a request is stuck: it ends, instead of using all its steps.
+STUCK_CALLS = 6
+# After this many calls in a row that were cut for being too long, the model answers in words, which go on as long as they need.
+CUT_CALLS = 2
+LONG_CALL_CHARS = 2000
 CONVERSATIONS_FOLDER = "conversations"
 BAD_CALLS = 3
 # The times a model may make exactly the same call in one request; after that it is told to use the result it has.
@@ -114,6 +127,7 @@ class Conversation:
     def __init__(self, loop, own=True):
         self.loop, self.own = loop, own
         self.system, self.messages, self.delivered = "", [], [0, 0]
+        self.limit = None
         self.badCalls = 0
         self.sameCalls = {}
 
@@ -155,13 +169,67 @@ class Conversation:
         self.delivered = [len(inbox), len(users)]
         return "\n".join(lines)
 
+    def size(self):
+        return sum(len(str(message.get("content") or "")) + len(str(message.get("calls") or "")) for message in self.messages)
+
     # A long conversation drops the old results of its tools, except for a model whose old messages must stay as they were (Claude).
     def shorten(self, adapter):
-        if not getattr(adapter, "canShorten", True) or sum(len(str(message.get("content") or "")) for message in self.messages) <= CONTEXT_CHARS:
-            return
+        limit = self.limit or CONTEXT_CHARS
+        if getattr(adapter, "canShorten", True) and self.size() > limit:
+            self.shrink(limit)
+
+    # The old results go first, then the longest results that are left lose their end, and say so.
+    def shrink(self, limit):
         for message in self.messages[:-KEEP_RECENT]:
             if message["role"] == "tool" and message["content"] != prompts.OLD_RESULT:
                 message["content"] = prompts.OLD_RESULT
+        results = [message for message in self.messages if message["role"] == "tool" and len(str(message["content"])) > KEPT_CHARS]
+        for message in sorted(results, key=lambda item: len(str(item["content"])), reverse=True):
+            excess = self.size() - limit
+            if excess <= 0:
+                break
+            text = str(message["content"]).replace(prompts.CUT_RESULT, "")
+            message["content"] = text[:max(KEPT_CHARS, len(text) - excess)] + prompts.CUT_RESULT
+        self.dropOldSteps(limit)
+
+    # When there is no long result to cut, the oldest steps leave, each with its call and its result, so what is left stays a correct conversation.
+    # The first message (the task) and the latest steps stay.
+    def dropOldSteps(self, limit):
+        last = max(len(self.messages) - KEEP_STEPS, 1)
+        dropped = False
+        position = 1
+        while self.size() > limit and position < last:
+            message = self.messages[position]
+            if message["role"] == "assistant" and (message.get("calls") or len(str(message.get("content") or "")) > KEPT_CHARS):
+                end = position + 1
+                while end < len(self.messages) and self.messages[end]["role"] == "tool":
+                    end += 1
+                del self.messages[position:end]
+                last -= end - position
+                dropped = True
+            else:
+                position += 1
+        if dropped and not any(message["role"] == "user" and prompts.OLD_STEPS in str(message.get("content")) for message in self.messages):
+            self.messages.insert(1, {"role": "user", "content": prompts.OLD_STEPS})
+
+    # The GPUs ran out of memory on the conversation: it keeps less from now on, and the model tries again. It says if there was something to take out.
+    def makeRoom(self):
+        before = self.size()
+        self.limit = int(before * MEMORY_SHARE)
+        self.shrink(self.limit)
+        return self.size() < before
+
+    def converseWithRoom(self, adapter, tools, options):
+        tries, loop = 0, self.loop
+        while True:
+            try:
+                return loop.callModel(lambda: adapter.converse(self.system, self.messages, tools, **options), self.own)
+            except ModelMemoryError as error:
+                tries += 1
+                if not error.tokens or tries > MEMORY_TRIES or not getattr(adapter, "canShorten", True) or not self.makeRoom():
+                    raise
+                loop.note("memory", own=self.own, tokens=error.tokens, left=self.size())
+                loop.notifyUser(f"[{loop.name}] Its conversation of {error.tokens:,} tokens was too long for the memory of the GPUs: SwarmUP took out part of the results of its tools, and it goes on.")
 
     def checkStop(self):
         team = getattr(self.loop, "team", None)
@@ -205,18 +273,20 @@ class Conversation:
             self.messages.append({"role": "user", "content": f"{news}\n\n{prompt}" if news else prompt})
             loop.note("request", own=self.own, look=readOnly, prompt=clipText(prompt, 1500, 500), promptHash=hashOf(prompt), systemHash=hashOf(self.system),
                       news=clipText(news, 1500))
-            reply, self.sameCalls = {"text": ""}, {}
+            reply, self.sameCalls, stuck, cuts, cutCalls, written, last = {"text": ""}, {}, 0, 0, 0, [], False
             for step in range(steps):
                 self.checkStop()
                 self.shorten(adapter)
-                tools = link.tools(readOnly)
+                # The last step of a request has no tools: the model can only answer, with what it has.
+                last = last or step == steps - 1
+                tools = [] if last else link.tools(readOnly)
                 if hasattr(adapter, "attach"):
                     adapter.attach(loop)
                 live = LiveText(loop)
                 options = adapterOptions(adapter, loop, link, readOnly, live)
                 started, mark = time.time(), usageOf(loop)[0]
                 try:
-                    reply = loop.callModel(lambda: adapter.converse(self.system, self.messages, tools, **options), self.own)
+                    reply = self.converseWithRoom(adapter, tools, options)
                 finally:
                     live.end()
                 calls = reply.get("calls") or []
@@ -225,15 +295,36 @@ class Conversation:
                           seconds=round(time.time() - started, 3), tokens=tokensSince(loop, mark),
                           calls=[{"id": call.get("id"), "name": call.get("name"), "args": clipArguments(call.get("arguments"))} for call in calls])
                 self.messages.append({"role": "assistant", "content": reply.get("text") or "", "calls": calls, "raw": reply.get("raw")})
-                if not calls:
+                if last and calls:
+                    reply = {"text": text}
                     break
+                if last and reply.get("cut") and cuts < CUT_TURNS:
+                    calls = []
+                if not calls:
+                    if not reply.get("cut"):
+                        break
+                    written.append(text)
+                    if cuts >= CUT_TURNS:
+                        loop.recordActivity("its answer is still too long after it went on several times: the end of it is missing")
+                        reply = {"text": ""}
+                        break
+                    cuts += 1
+                    self.messages.append({"role": "user", "content": prompts.CUT_ANSWER})
+                    self.save()
+                    continue
+                written = []
+                cutCalls = cutCalls + 1 if reply.get("cut") or any(len(str(call.get("text") or "")) > LONG_CALL_CHARS for call in calls) else 0
                 loop.recordActivity(", ".join(describeCall(call["name"], call.get("arguments")) for call in calls))
                 for call in calls:
-                    problem = call.get("problem") or (prompts.CUT_CALL if reply.get("cut") else "") or self.repeated(call)
+                    problem = call.get("problem") or (prompts.CUT_CALL if reply.get("cut") else "")
+                    repeated = "" if problem else self.repeated(call)
+                    problem = problem or repeated
+                    stuck = stuck + 1 if repeated else 0
                     self.noteBadCall(bool(call.get("problem")))
                     if problem:
                         why = "parse" if call.get("problem") else "cut" if reply.get("cut") else "repeated"
-                        loop.note("bad", id=call.get("id"), name=call.get("name"), why=why, problem=clipText(problem, 600), args=clipArguments(call.get("arguments")))
+                        loop.note("bad", id=call.get("id"), name=call.get("name"), why=why, problem=clipText(problem, 600), args=clipArguments(call.get("arguments")),
+                                  text=clipText(call.pop("text", ""), 1000, 500))
                     text, error = (f"Not done: {problem}", True) if problem else link.call(call["name"], call.get("arguments"), readOnly, callId=call.get("id"))
                     self.messages.append({"role": "tool", "id": call["id"], "name": call["name"], "content": text, "error": error})
                 news = self.news()
@@ -242,11 +333,29 @@ class Conversation:
                 if news:
                     self.messages.append({"role": "user", "content": news})
                 self.save()
+                if stuck >= STUCK_CALLS:
+                    loop.note("limit", own=self.own, steps=step + 1, calls=True, stuck=True)
+                    loop.recordActivity("it kept repeating calls that it had already made: it must answer now")
+                    self.messages.append({"role": "user", "content": prompts.LAST_STEP})
+                    last = True
+                if cutCalls >= CUT_CALLS and not last:
+                    loop.note("limit", own=self.own, steps=step + 1, calls=True, cut=True)
+                    loop.recordActivity("its calls are too long for its model: it gives its work as its answer")
+                    self.messages.append({"role": "user", "content": prompts.CUT_CALLS})
+                    last = True
             if step == steps - 1:
                 loop.note("limit", own=self.own, steps=steps, calls=bool(calls))
                 loop.recordActivity(f"stopped at the limit of {steps} steps of a request: its work may be unfinished")
         self.save()
-        return reply.get("text") or ""
+        return joinPieces([*written, reply.get("text") or ""])
+
+
+# The parts of an answer that was cut and went on. Each part was stripped, so words are kept apart, except where a part starts with punctuation.
+def joinPieces(pieces):
+    answer = ""
+    for piece in pieces:
+        answer += " " + piece if answer and piece and piece[0] not in ",.;:!?)]}" else piece
+    return answer
 
 
 def clipText(text, head, tail=0):

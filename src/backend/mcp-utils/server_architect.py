@@ -7,13 +7,14 @@ from mcp_kit import ServerSpec, ToolProblem, ToolSpec
 from pattern_digest import describeRow, describeWheels, maximal, renderBrief, renderPattern, searchJournal
 from pattern_registry import describeNote, findNotes, saveNote
 from pattern_store import ACTIONABLE
-from wheel_checks import checkWheel
+from wheel_checks import checkWheel, cleanSteps
 from wheel_store import catalogFor, describeWheel, loadWheel, realName, retireWheel, saveWheel
 
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
+MOST_LISTS = 2
 TEXT = {"type": "string"}
-PATTERN_IDS = {"type": "array", "items": {"type": "string"}, "description": "The ids of the patterns, like #12, as the brief shows them."}
+PATTERN_IDS = {"type": "array", "items": {"type": "string"}, "description": "The ids of the patterns it covers, like #12, as the brief shows them. Without it: the pattern to decide about first."}
 WHEEL_FIELDS = {"name": {"type": "string", "description": "The name of the wheel, like run_unit_tests, as in its WHEEL."},
                 "kind": {"type": "string", "enum": ["script", "steps"], "description": "script: Python with WHEEL and run(args, folder). steps: JSON with steps."},
                 "code": {"type": "string", "description": "The whole text of the wheel."},
@@ -40,8 +41,13 @@ def storeOf(work):
     return store
 
 
+# A small model can list patterns, kind after kind, until its steps are over: after a few lists, it is told to decide.
 def readPatterns(work, status="", kind="", limit=20):
     desk, store = deskOf(work), storeOf(work)
+    desk.listings = getattr(desk, "listings", 0) + 1
+    if desk.listings > MOST_LISTS:
+        raise ToolProblem("you have read enough lists for this pass. Decide now about a pattern of your brief: write a wheel (architect__check_wheel, then architect__save_wheel), "
+                          "keep a note (architect__save_note), dismiss it (architect__dismiss_pattern), or give your report.")
     if not status and not kind:
         return renderBrief(store, desk.project, desk.since, claimedBy=desk.passId)
     kinds = (kind,) if kind else ACTIONABLE
@@ -79,23 +85,47 @@ def coveredRows(store, covers):
     return rows, missing
 
 
+# The tools a wheel of steps calls, as SwarmUP describes them: they exist, and they are given what they need. A tool of a server of another
+# program is not known here: it answers when the wheel runs.
+def checkStepTools(manifest):
+    from mcp_gateway import builtinServers
+    servers = {server.name: {tool.name: tool for tool in server.tools} for server in builtinServers()}
+    problems = []
+    for number, step in enumerate(manifest.get("steps") or [], 1):
+        server, _, name = str(step.get("tool") or "").partition("__") if isinstance(step, dict) else ("", "", "")
+        if server not in servers:
+            continue
+        if name not in servers[server]:
+            problems.append(f"Step {number}: {server} has no tool {name}. Its tools: {', '.join(sorted(servers[server]))}.")
+            continue
+        missing = [key for key in servers[server][name].required if key not in (step.get("arguments") or {})]
+        if missing:
+            problems.append(f"Step {number} calls {step['tool']} without {', '.join(missing)}, which it needs: give it in arguments.")
+    return problems
+
+
+# A small model often leaves out which patterns its wheel covers: it is then the pattern it was asked to decide about first.
 def checkProblems(work, name, kind, code, covers, scope, replaces):
     desk, store = deskOf(work), storeOf(work)
-    rows, missing = coveredRows(store, covers)
+    rows, missing = coveredRows(store, covers or ([desk.focus] if getattr(desk, "focus", "") else ()))
     live = {fp: wheel for wheel, entry in catalogFor(desk.project).items() for fp in entry.get("covers") or []}
     manifest, problems = checkWheel(code, kind, name, rows, scope, live, tuple(replaces or ()))
+    if kind == "steps" and manifest:
+        problems += checkStepTools(manifest)
     if missing:
         problems.insert(0, f"There is no pattern {', '.join(missing)}: give the ids of the brief, like #12.")
     return manifest, rows, problems
 
 
 def checkTheWheel(work, name, kind, code, covers=(), scope="project", replaces=()):
+    code = cleanSteps(code) if kind == "steps" else code
     manifest, rows, problems = checkProblems(work, name, kind, code, covers, scope, replaces)
     return "It passes the checks: save it with architect__save_wheel." if not problems else "Not ready yet:\n- " + "\n- ".join(problems)
 
 
 def saveTheWheel(work, name, kind, code, covers=(), scope="project", replaces=(), why=""):
     desk = deskOf(work)
+    code = cleanSteps(code) if kind == "steps" else code
     manifest, rows, problems = checkProblems(work, name, kind, code, covers, scope, replaces)
     if problems:
         raise ToolProblem("the wheel is not saved:\n- " + "\n- ".join(problems))
@@ -169,10 +199,10 @@ TOOLS = [
              readOnly=True, idempotent=True, when=isArchitect),
     ToolSpec("check_wheel", "Check a wheel without saving it: its WHEEL, its code (nothing runs when it loads, no eval, no secrets, no network unless "
              "declared), its summary, and that the patterns it covers repeat. It gives every problem to correct. It runs nothing and changes nothing.",
-             dict(WHEEL_FIELDS), ["name", "kind", "code", "covers"], checkTheWheel, readOnly=True, idempotent=True, when=isArchitect),
+             dict(WHEEL_FIELDS), ["name", "kind", "code"], checkTheWheel, readOnly=True, idempotent=True, when=isArchitect),
     ToolSpec("save_wheel", "Save a wheel that passes the checks: a new one, or a new version of one (replaces merges other wheels into it). Leaders can give "
              "it to agents at once, and the user approves each new version the first time it runs. The user is told.",
-             {**WHEEL_FIELDS, "why": {"type": "string", "description": "In a sentence, the repetition it saves, for the user."}}, ["name", "kind", "code", "covers", "why"],
+             {**WHEEL_FIELDS, "why": {"type": "string", "description": "In a sentence, the repetition it saves, for the user."}}, ["name", "kind", "code"],
              saveTheWheel, readOnly=True, when=isArchitect),
     ToolSpec("retire_wheel", "Retire a wheel that is wrong, unused or replaced: no agent gets it anymore. To merge it into another one, save that one with "
              "replaces instead. The user is told.", {"name": TEXT, "why": TEXT}, ["name", "why"], retireTheWheel, readOnly=True, when=isArchitect),

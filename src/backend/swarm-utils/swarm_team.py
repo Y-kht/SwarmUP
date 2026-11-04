@@ -173,13 +173,17 @@ class SwarmTeam:
     def getNeededVram(self, replacing=None):
         return round(sum(member["model"]["vram"] for name, member in self.members.items() if member["model"] and name != replacing), 1)
 
+    # The VRAM in GB that the models of the agents hold now: the leader that built the swarm, the agents after their plan or the round before.
+    def getLoadedVram(self):
+        return round(sum(member["model"]["vram"] for member in self.members.values() if member["model"] and getattr(getattr(member["agent"], "agent", None), "isLoaded", False)), 1)
+
     # What the user sees before choosing a model for an agent, or to replace the model of the agent called replacing.
     # A local model that does not fit in the GPUs is not allowed, and the message says why. One that fits, but not in the memory
     # that is free now, is allowed and the message is a warning. API models are always allowed, but they do not hide the warning of the swarm.
     def checkModel(self, model, replacing=None):
         taken = self.getNeededVram(replacing)
         after = round(taken + model["vram"], 1)
-        status = checkVram(after, readGpus() if after else [])
+        status = checkVram(after, readGpus() if after else [], self.getLoadedVram())
         name, vram, total = model["name"], model["vram"], status["total"]
         if model["local"] and status["gpus"] and vram > total:
             message = f"{name} needs about {vram} GB of VRAM, but your GPUs only have {total} GB in total. Choose a smaller model or an API model."
@@ -225,11 +229,11 @@ class SwarmTeam:
     # The VRAM the swarm needs so far next to what the GPUs have, for the user interface to show while the swarm is built.
     # The message is empty, or the warning that the swarm cannot run now.
     def getVramStatus(self):
-        return checkVram(self.getNeededVram(), readGpus())
+        return checkVram(self.getNeededVram(), readGpus(), self.getLoadedVram())
 
     def checkGpus(self):
         needed = self.getNeededVram()
-        status = checkVram(needed, readGpus() if needed else [])
+        status = checkVram(needed, readGpus() if needed else [], self.getLoadedVram())
         if not status["runnable"]:
             raise ValueError(status["message"])
 

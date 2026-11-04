@@ -1,5 +1,7 @@
 # What the window shows of the MCP layer (docs/MCP_DESIGN_BOOKLET.md, OBS-03 and SEC-01): the record of every call of a tool in the mission,
 # with the counts of each agent, and the MCP servers of other programs that the user adds, inspects, approves and removes.
+import shlex
+
 import mcp_external
 from interface_views import FormError
 from mcp_records import CallRecords
@@ -9,6 +11,20 @@ from mission_memory import STATE_FOLDER, missionFolder
 
 INSPECT_SECONDS = 60
 SHOWN_CALLS = 300
+
+
+class FieldProblem(ValueError):
+    def __init__(self, field, message):
+        super().__init__(message)
+        self.field = field
+
+
+# What the user wrote in a field of the form, KEY=VALUE on each line.
+def readLines(payload, key, field):
+    try:
+        return mcp_external.readPairs([line for line in str(payload.get(key) or "").splitlines() if line.strip()])
+    except ValueError as error:
+        raise FieldProblem(field, str(error)) from None
 
 
 def describeServer(name, config):
@@ -41,15 +57,18 @@ class SessionMcp:
         try:
             return RUNTIME.call(mcp_external.inspectServer(servers[name]), INSPECT_SECONDS)
         except Exception as error:
-            raise ValueError(f"SwarmUP could not connect to {name}: {error}") from None
+            raise ValueError(f"SwarmUP could not connect to {name}: {mcp_external.describeProblem(error)}") from None
 
     def mcpAdd(self, payload):
         name = str(payload.get("name") or "").strip()
         transport = "http" if payload.get("transport") == "http" else "stdio"
         agents = str(payload.get("agents") or "").strip()
         try:
-            mcp_external.addServer(name, transport, str(payload.get("command") or "").strip(), str(payload.get("args") or "").split(), None, str(payload.get("url") or "").strip(),
-                                   None, "all" if agents in ("", "all") else [item.strip() for item in agents.split(",") if item.strip()])
+            args, env, headers = shlex.split(str(payload.get("args") or "")), readLines(payload, "env", "env"), readLines(payload, "headers", "headers")
+            mcp_external.addServer(name, transport, str(payload.get("command") or "").strip(), args, env, str(payload.get("url") or "").strip(),
+                                   headers, "all" if agents in ("", "all") else [item.strip() for item in agents.split(",") if item.strip()])
+        except FieldProblem as problem:
+            raise FormError({problem.field: str(problem)}) from None
         except ValueError as error:
             raise FormError({"name": str(error)}) from None
         return {"inspection": self.inspect(name), **self.mcpServers()}

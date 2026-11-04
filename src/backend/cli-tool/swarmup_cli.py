@@ -136,7 +136,7 @@ def runProgram(console, missionId=None):
                 continue
             followUps(console, swarm, models)
             break
-    closeArchitect(swarm)
+    closeArchitect(swarm, console)
     unloadModels(models)
     console.say("\nBye.")
 

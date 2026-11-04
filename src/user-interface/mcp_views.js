@@ -83,7 +83,7 @@ function mcpSection(modal) {
     modal.servers = null;
     loadServers(modal);
   }
-  const draft = modal.mcpDraft || (modal.mcpDraft = { name: '', transport: 'stdio', command: '', args: '', url: '', agents: 'all', errors: {} });
+  const draft = modal.mcpDraft || (modal.mcpDraft = { name: '', transport: 'stdio', command: '', args: '', env: '', url: '', headers: '', agents: 'all', errors: {} });
   const inspect = async (name, data) => { modal.inspection = { name, tools: data.inspection }; if (data.servers) modal.servers = data.servers; render(); };
   const add = async () => { const data = await act('mcpAdd', draft, { busy: 'mcpAdd', form: draft }); if (data) { modal.mcpDraft = null; await inspect(draft.name, data); } };
   const approve = async () => { const data = await act('mcpApprove', { name: modal.inspection.name, hashes: modal.inspection.tools.map(tool => tool.hash) }, { busy: 'mcpApprove', ok: `${modal.inspection.name} is approved.` });
@@ -91,6 +91,9 @@ function mcpSection(modal) {
   const field = (key, label, placeholder) => h('div', { class: ['field', draft.errors?.[key] && 'has-error'] }, h('label', { class: 'field-label' }, label),
     h('input', { class: 'input', 'data-key': `mcp-${key}`, value: draft[key], placeholder, onInput: event => { draft[key] = event.target.value; } }),
     draft.errors?.[key] ? h('div', { class: 'field-error' }, icon('alert'), draft.errors[key]) : null);
+  const lines = (key, label, placeholder) => h('div', { class: ['field', draft.errors?.[key] && 'has-error'] }, h('label', { class: 'field-label' }, label, h('span', { class: 'opt' }, 'optional')),
+    h('textarea', { class: 'textarea', rows: 2, 'data-key': `mcp-${key}`, value: draft[key], placeholder, onInput: event => { draft[key] = event.target.value; } }),
+    draft.errors?.[key] ? h('div', { class: 'field-error' }, icon('alert'), draft.errors[key]) : h('div', { class: 'field-help' }, icon('lock'), 'They are kept in the file of the MCP servers, on this computer.'));
   return h('div', { class: 'stack' }, h('h3', {}, 'MCP servers'),
     h('p', { class: 'small muted' }, 'Other programs can give tools to your agents with MCP (GitHub, a database...). Nothing is given before you approve a server, and a tool that changes later is hidden until you approve it again.'),
     modal.serverError ? callout('danger', 'alert', modal.serverError) : modal.servers === null ? loading('Reading the servers…') :
@@ -106,7 +109,8 @@ function mcpSection(modal) {
       h('div', { class: 'row wrap' }, ['stdio', 'http'].map(kind => button(kind === 'stdio' ? 'A program of this computer' : 'A server on the network', { kind: draft.transport === kind ? 'soft' : 'ghost', size: 'sm',
         onClick: () => { draft.transport = kind; render(); } }))),
       field('name', 'Its name', 'github'),
-      draft.transport === 'stdio' ? [field('command', 'The command that starts it', 'npx'), field('args', 'Its arguments', '-y @modelcontextprotocol/server-github')] : field('url', 'Its address', 'https://example.com/mcp'),
+      draft.transport === 'stdio' ? [field('command', 'The command that starts it', 'npx'), field('args', 'Its arguments', '-y @modelcontextprotocol/server-github'), lines('env', 'The variables of its environment, KEY=VALUE on each line', 'GITHUB_TOKEN=...')] :
+        [field('url', 'Its address', 'https://example.com/mcp'), lines('headers', 'The headers sent to it, KEY=VALUE on each line', 'Authorization=Bearer ...')],
       field('agents', 'The agents that get it', 'all, or Writer, Coder'),
       h('div', {}, button('Add and inspect it', { kind: 'soft', iconName: 'plus', busy: ui.busy.mcpAdd, onClick: add })))));
 }

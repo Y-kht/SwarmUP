@@ -98,7 +98,7 @@ def resumeSaved(console, saved):
         return False
     startSwarm(console, swarm, swarm.getMode(), models, resume=True)
     followUps(console, swarm, models)
-    closeArchitect(swarm)
+    closeArchitect(swarm, console)
     unloadModels(models)
     return True
 
@@ -136,7 +136,7 @@ def followUpSaved(console, saved):
     swarm.followUp(askRequest(console))
     startSwarm(console, swarm, chooseMode(console), models)
     followUps(console, swarm, models)
-    closeArchitect(swarm)
+    closeArchitect(swarm, console)
     unloadModels(models)
     return True
 

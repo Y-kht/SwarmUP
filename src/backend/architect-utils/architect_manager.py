@@ -12,11 +12,11 @@ import time
 import traceback
 
 from architect_loop import MAX_STEPS, ArchitectDesk, ArchitectLoop, pickArchitect
-from architect_prompts import ARCHITECT_PASS_PROMPT, ARCHITECT_PASS_REASONS
+from architect_prompts import ARCHITECT_FOCUS_PROMPT, ARCHITECT_PASS_PROMPT, ARCHITECT_PASS_REASONS
 from harness_utils import ARCHITECT_NAME, SwarmStopped
 from mcp_gateway import Gateway
 from miner_service import MINERS
-from pattern_digest import renderBrief
+from pattern_digest import FOCUS_CHARS, describeWheels, draftForStreak, focusPatterns, renderBrief, renderFocus, renderPattern
 from project_identity import projectFor, readProject
 from user_settings import currentSetting
 
@@ -29,6 +29,10 @@ MIN_ACTIVITY = 30
 JOIN_SECONDS = 5
 REPORTS = 20
 CLAIM_SECONDS = 1200
+LAST_PASS_SECONDS = 3600
+GUIDED_PATTERNS = 3
+GUIDED_STEPS = 6
+GUIDED_TOOLS = {"check_wheel", "save_wheel", "save_note", "dismiss_pattern", "read_wheel"}
 
 
 class ArchitectManager:
@@ -213,10 +217,13 @@ class ArchitectManager:
         loop.gateway, loop.conversation = self.gateway, None
         self.setState("working", f"pass {self.passCount}: {ARCHITECT_PASS_REASONS.get(reason, '')}")
         brief = renderBrief(store, self.project, self.desk.since, claimedBy=self.desk.passId)
-        prompt = ARCHITECT_PASS_PROMPT.format(why=ARCHITECT_PASS_REASONS.get(reason, ""), brief=brief, steps=MAX_STEPS)
+        prompt = ARCHITECT_PASS_PROMPT.format(why=ARCHITECT_PASS_REASONS.get(reason, ""), brief=brief, steps=MAX_STEPS, focus=renderFocus(store, claimedBy=self.desk.passId))
+        self.desk.listings = 0
+        focus = focusPatterns(store, 1, self.desk.passId)
+        self.desk.focus = f"#{focus[0]['id']}" if focus else ""
         outcome, report = "done", ""
         try:
-            report = loop.askAgent(prompt, own=True) or "Nothing worth automating in this pass."
+            report = (self.guidedPass(loop, store) if (self.info or {}).get("local") else loop.askAgent(prompt, own=True)) or "Nothing worth automating in this pass."
         except SwarmStopped:
             outcome, report = "stopped", "The pass was stopped."
         except Exception as error:
@@ -236,6 +243,27 @@ class ArchitectManager:
             traceback.print_exc()
         self.tell(f"Pass {self.passCount} ({outcome}): {report}")
         self.setState("idle", "")
+        self.unloadModel()
+
+    # A local model of its own is only needed during a pass: the agents need the memory of the GPU the rest of the time. It loads again for the next pass.
+    def unloadModel(self):
+        if self.how == "own" and hasattr(self.client, "unload"):
+            self.client.unload()
+
+    # A small local model gets lost in an open task: it decides about the best patterns one at a time, each in a short conversation of its own, with
+    # only the tools of a decision. A capable model of an API works freely on the whole brief.
+    def guidedPass(self, loop, store):
+        scope, steps, reports = loop.toolScope, loop.maxSteps, []
+        loop.toolScope, loop.maxSteps = {"architect": GUIDED_TOOLS}, GUIDED_STEPS
+        try:
+            for row in focusPatterns(store, GUIDED_PATTERNS, self.desk.passId):
+                self.desk.focus, loop.conversation = f"#{row['id']}", None
+                wheels = "\n".join(describeWheels(store, self.project)) or "- none yet"
+                prompt = ARCHITECT_FOCUS_PROMPT.format(steps=GUIDED_STEPS, pattern=renderPattern(store, str(row["id"]), examples=2)[:FOCUS_CHARS], wheels=wheels, draft=draftForStreak(row))
+                reports.append(f"#{row['id']}: {loop.askAgent(prompt, own=True)}")
+        finally:
+            loop.toolScope, loop.maxSteps, loop.conversation = scope, steps, None
+        return "\n".join(reports)
 
     def callsFolder(self):
         session = self.swarm.session
@@ -286,6 +314,16 @@ class ArchitectManager:
         client = self.client
         if client is not None and hasattr(client, "cancel") and self.how == "own":
             threading.Thread(target=client.cancel, daemon=True).start()
+
+    # The last pass of a run is what the swarm learned. It says if the architect is still at work, and finish waits for it (a stop ends it at once).
+    def isWorking(self):
+        thread = self.thread
+        return thread is not None and thread.is_alive()
+
+    def finish(self, seconds=LAST_PASS_SECONDS):
+        thread = self.thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(seconds)
 
     # The architect stops for good: before the models are unloaded and when the program closes.
     def close(self):

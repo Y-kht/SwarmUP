@@ -3,6 +3,7 @@
 import html
 import json
 import re
+import time
 import urllib.request
 from collections import Counter
 from functools import partial
@@ -18,6 +19,8 @@ from internet_cache import remember
 PAPERS_PER_SEARCH = 10
 
 MIN_ABSTRACT_LENGTH = 400
+
+SEARCH_NOTE_CHARS = 300
 
 PUBLISHERS_REFRESH_SECONDS = 7 * 24 * 3600
 
@@ -128,10 +131,17 @@ class LiteratureSurveyLoop(Loop):
         self.publishers = dict(publishers or {})
         self.papers = []
         self.logins = {}
+        self.searchNumber = 0
 
     def describeTask(self):
         places = [*self.searches, *(f"papers of {name}" for name in self.publishers)]
         return f"Write a literature survey on {self.subject} in at most {self.length} words, from the papers found by: {', '.join(places)}."
+
+    # The searches of the survey are not calls of tools, so they are noted like calls: the architect sees this work too, and what keeps failing.
+    def noteSearch(self, tool, arguments, started, result, ok=True):
+        self.searchNumber += 1
+        self.note("call", id=f"{tool}-{self.searchNumber}", origin="task", server="skill_literature", tool=tool, args=arguments, outcome="success" if ok else "error",
+                  result=str(result)[:SEARCH_NOTE_CHARS], seconds=round(time.time() - started, 3), size=len(str(result)))
 
     # A search that fails (for example Google Scholar blocking automatic searches) is skipped, the others continue.
     def searchPapers(self):
@@ -139,11 +149,14 @@ class LiteratureSurveyLoop(Loop):
         searches += [(name, partial(searchCrossref, self.subject, number)) for name, number in self.publishers.items()]
         papers, titles = [], set()
         for name, search in searches:
+            started = time.time()
             try:
                 found = search()
             except FETCH_ERRORS as error:
                 self.notifyUser(f"Skipping the search on {name}: {describeError(error)}.")
+                self.noteSearch("search_papers", {"source": name, "subject": self.subject}, started, describeError(error), ok=False)
                 continue
+            self.noteSearch("search_papers", {"source": name, "subject": self.subject}, started, f"{len(found)} papers")
             for paper in found:
                 title = " ".join(getWords(paper["title"]))
                 if title not in titles:
@@ -177,11 +190,14 @@ class LiteratureSurveyLoop(Loop):
         for paper in self.papers:
             if len(paper["summary"]) >= MIN_ABSTRACT_LENGTH:
                 continue
+            started = time.time()
             try:
                 abstract = readAbstract(self.downloadPaperPage(paper["link"]))
             except FETCH_ERRORS as error:
                 self.notifyUser(f"Could not open {paper['link']}: {describeError(error)}. Using the short description of the search.")
+                self.noteSearch("read_paper", {"link": paper["link"]}, started, describeError(error), ok=False)
                 continue
+            self.noteSearch("read_paper", {"link": paper["link"]}, started, f"{len(abstract)} characters")
             if len(abstract) > len(paper["summary"]):
                 paper["summary"] = abstract[:SUMMARY_LENGTH]
 
@@ -222,7 +238,14 @@ class DocumentFormatLoop(Loop):
         super().__init__(agent, numberOfLoops, "DOCUMENT_FORMAT_RULES.md")
         self.path = Path(filePath)
         self.style = style
-        self.original = self.path.read_text(encoding="utf-8")
+        self.text = None
+
+    # The document may be the work of an agent this one waits for, so it is read when the agent starts.
+    @property
+    def original(self):
+        if self.text is None:
+            self.text = self.path.read_text(encoding="utf-8")
+        return self.text
 
     def describeTask(self):
         return f"Format the document {self.path.name} in this style: {self.style}, without changing its content."
@@ -238,6 +261,9 @@ class DocumentFormatLoop(Loop):
         return ""
 
     def run(self):
+        if not self.path.is_file():
+            self.notifyUser(f"There is no file at {self.path}: nothing to format.")
+            return None
         task = prompts.DOCUMENT_FORMAT_PROMPT.format(style=self.style, document=self.original)
         formatted = self.reviewLoop(task, self.checkContent, key="formatted")
         if formatted is None:

@@ -22,7 +22,7 @@ import leader_checks
 import leader_parser
 import leader_utils
 import mission_costs
-from leader_catalog import LeaderCatalog
+from leader_catalog import EXAMPLE_MODEL, LeaderCatalog
 from leader_manager import LeaderManager
 from leader_parser import isNoChange, parseOutput
 from model_messages import readToolCalls
@@ -333,6 +333,17 @@ class CatalogTests(FolderTestCase):
         self.assertIn("    Author: rules for the text the agent writes.", tasks)
         self.assertIn('"task": "agent"', catalog.buildPrompt())
 
+    # A writing pipeline: the formatter works on what the agent it waits for will write, so the file does not exist when the swarm is proposed.
+    def testAFileThatDoesNotExistYetIsFineForAnAgentThatWaits(self):
+        catalog = makeCatalog(self.folder, status=machine(gpus=[{"name": "GPU", "total": 103.2, "free": 103.2}]), leaderModel="Qwen/Qwen3-8B")
+        writer = {"name": "Author", "task": "agent", "model": "Qwen/Qwen3-8B", "bits": 4, "settings": {"prompt": "Write the review to review.md."}, "why": "x"}
+        formatter = {"name": "Formatter", "task": "formatting", "model": "Qwen/Qwen3-8B", "bits": 4, "waits_for": ["Author"], "settings": {"filePath": "review.md", "style": "IEEE"}, "why": "x"}
+        agents, errors = catalog.checkBuild({"agents": [writer, formatter]})
+        self.assertEqual(errors, [])
+        self.assertTrue(agents[1]["answers"]["filePath"].endswith("review.md"))
+        agents, errors = catalog.checkBuild({"agents": [writer, {**formatter, "waits_for": []}]})
+        self.assertTrue(any("There is no file" in error for error in errors), errors)
+
     def testTheWholeSwarmIsCheckedTogether(self):
         catalog = makeCatalog(self.folder, leaderModel="Qwen/Qwen3-8B")
         agents, errors = catalog.checkBuild({"agents": [{"name": "A", "task": "author", "model": "Qwen/Qwen3-8B", "settings": {"subject": "a"}},
@@ -375,6 +386,23 @@ class CatalogTests(FolderTestCase):
         prompt = catalog.buildPrompt()
         for part in ("You are Leader, the leader of a swarm", "Check my paper and write a summary of it.", str(self.folder.resolve()), "leader__propose_swarm"):
             self.assertIn(part, prompt)
+
+
+class ExampleTests(FolderTestCase):
+    # Small models copy the examples of their prompt: a local leader without an API key must not read that an agent has a model of an API.
+    def testTheExamplesOfTheRulesUseTheModelOfTheLeader(self):
+        catalog = makeCatalog(self.folder, leaderModel="Qwen/Qwen3-8B")
+        rules = catalog.rules()
+        self.assertIn('"model": "Qwen/Qwen3-8B"', rules)
+        self.assertNotIn("claude-", rules)
+        self.assertIn("Leave it out, unless the user asks for some publishers", catalog.buildPrompt())
+        self.assertIn('"model": "claude-opus-5-5"', makeCatalog(self.folder).rules())
+
+    def testALeaderThatIsTheUserOrACodingAgentGetsTheUsualExample(self):
+        catalog = makeCatalog(self.folder)
+        for info in ({"name": "you", "user": True}, {"name": "claude-code", "cli": "claude-code"}):
+            catalog.leaderModel = info
+            self.assertIn(f'"model": "{EXAMPLE_MODEL}"', catalog.rules())
 
 
 class BudgetTests(FolderTestCase):

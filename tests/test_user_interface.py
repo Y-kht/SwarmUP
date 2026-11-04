@@ -17,6 +17,7 @@ import agent_prompts as prompts
 import coding_agents
 import harness_utils
 import interface_views
+import mcp_external
 import leader_manager
 import leader_utils
 import model_clients
@@ -30,6 +31,13 @@ import web_server
 from model_clients import ApiModel
 from test_leader_utils import usePrices
 from test_saved_swarms import waitUntil
+from agent_journal import Journal
+from interface_views import FormError
+from architect_admin import patternBrief
+from pattern_registry import saveNote
+from pattern_store import DB_FILE, PatternStore
+from project_identity import projectDir, projectFor, registerMission
+from wheel_store import isApproved, loadWheel, readCatalog, saveWheel
 
 GPUS = [{"name": "RTX A5000", "total": 25.8, "free": 25.3}]
 
@@ -685,6 +693,192 @@ class LeaderModeTests(SessionTestCase):
 
 
 # The budget of the mission, and what it spent: the first lists only show the models that fit in what is left, and the cost grows with every call.
+# The page of what the architect learned: everything the command line shows and does with the patterns and the wheels.
+class LearningTests(SessionTestCase):
+    WHEEL = ("WHEEL = {\"name\": \"check_links\", \"summary\": \"Checks that each link of a text answers, and gives the links that fail.\", \"kind\": \"script\", \"inputs\": {}, "
+             "\"required\": [], \"changes\": False, \"network\": True, \"timeout\": 60}\n\n\ndef run(args, folder):\n    return 'ok'\n")
+
+    def setUp(self):
+        super().setUp()
+        self.root = self.folder / "project"
+        self.root.mkdir()
+        self.project = projectFor(self.root)[0]
+        journal = Journal(self.folder / "mission-specific-memory" / "m1" / ".swarmup", "m1", self.project)
+        registerMission(self.project, self.root, "m1", journal.path)
+        for mission in range(3):
+            journal.add("request", "Writer", prompt="Read the paper.")
+            journal.add("call", "Writer", id=f"c{mission}", origin="conversation", server="web", tool="fetch_page", args={"url": f"https://arxiv.org/abs/2401.0000{mission}"},
+                        outcome="error", result="HTTP Error 404: Not Found", seconds=1.0, size=25)
+        saveWheel("check_links", "script", self.WHEEL, "Checks that each link of a text answers, and gives the links that fail.", ["f1"], "project", self.project, {"model": "Qwen/Qwen3-8B"})
+        self.act("minePatterns", project=self.project)
+
+    def testTheProjectsAndTheirWheelsAreShown(self):
+        data = self.act("learning")
+        self.assertEqual([project["id"] for project in data["projects"]], [self.project])
+        self.assertEqual(data["project"], self.project)
+        self.assertGreater(data["counts"]["patterns"], 0)
+        wheel = data["wheels"][0]
+        self.assertEqual((wheel["name"], wheel["version"], wheel["approved"], wheel["author"]), ("check_links", 1, False, "Qwen/Qwen3-8B"))
+        self.assertIn("repeating", data["statuses"])
+        self.assertIn("streak", data["kinds"])
+
+    def testThePatternsCanBeFilteredAndReadWithExamples(self):
+        rows = self.act("patterns", project=self.project)["patterns"]
+        self.assertTrue(rows)
+        errors = self.act("patterns", project=self.project, kind="error")["patterns"]
+        self.assertEqual({row["kind"] for row in errors}, {"error"})
+        self.assertEqual(self.act("patterns", project=self.project, kind="error", status="covered")["patterns"], [])
+        detail = self.act("patternDetail", project=self.project, id=f"#{errors[0]['id']}")["text"]
+        self.assertIn("HTTP Error 404", detail)
+        self.assertIn("Example", detail)
+
+    def testTheBriefAndTheSearchAreWhatTheCommandLineShows(self):
+        self.assertEqual(self.act("patternBrief", project=self.project)["text"], patternBrief(self.project))
+        self.assertIn("arxiv.org/abs/2401.00001", self.act("searchPatterns", project=self.project, text="2401.00001")["text"])
+        self.assertIn("Nothing in the journals", self.act("searchPatterns", project=self.project, text="not in any journal")["text"])
+
+    def testTheJournalsCanBeReadAgainAndAVerdictStays(self):
+        self.assertIn("patterns", self.act("minePatterns", project=self.project)["text"])
+        self.assertIn("Read", self.act("minePatterns", project=self.project, rebuild=True)["text"])
+        self.assertTrue(self.act("patterns", project=self.project)["patterns"])
+
+    def testAWheelShowsItsCodeThenIsApprovedAndAskedAgain(self):
+        wheel = self.act("wheelDetail", name="check_links")["wheel"]
+        self.assertIn("def run(args, folder)", wheel["text"])
+        self.assertEqual((wheel["approved"], wheel["network"], wheel["changes"]), (False, True, False))
+        self.assertIn("runs without asking", self.act("approveWheel", name="check_links")["text"])
+        self.assertTrue(self.act("learning")["wheels"][0]["approved"])
+        self.assertTrue(isApproved(loadWheel("check_links")["pin"]))
+        self.assertIn("1 approvals", self.act("revokeWheel", name="check_links")["text"])
+        self.assertFalse(self.act("wheelDetail", name="check_links")["wheel"]["approved"])
+
+    def testAWheelIsRetiredWithAReason(self):
+        self.assertIn("retired", self.act("retireWheel", name="check_links", why="It does not fit.")["text"])
+        self.assertEqual(self.act("learning")["wheels"], [])
+        self.assertEqual(readCatalog()["wheels"]["check_links"]["retired"]["why"], "It does not fit.")
+        with self.assertRaisesRegex(ValueError, "no live wheel"):
+            self.act("retireWheel", name="check_links")
+        with self.assertRaisesRegex(ValueError, "no wheel"):
+            self.act("wheelDetail", name="nothing_here")
+
+    def testTheNotesOfTheArchitectsAreRead(self):
+        self.assertEqual(self.act("architectNotes")["notes"], [])
+        store = PatternStore(projectDir(self.project) / DB_FILE, readOnly=True)
+        rows = store.patterns(limit=1)
+        store.close()
+        saveNote(self.project, "project", "m1", rows, "Agents often check the links of a text by hand, one by one.", "Qwen/Qwen3-8B")
+        self.assertIn("check the links", self.act("architectNotes")["notes"][0]["text"])
+        self.assertEqual(self.act("architectNotes", query="nothing about this")["notes"], [])
+
+    def testAProjectWithoutPatternsAndNoProjectAtAllAreSaidNotBroken(self):
+        other = self.folder / "other"
+        other.mkdir()
+        otherProject = projectFor(other)[0]
+        registerMission(otherProject, other, "m2", other / "journal.jsonl")
+        data = self.act("learning", project=otherProject)
+        self.assertEqual((data["project"], data["counts"], data["wheels"]), (otherProject, None, []))
+        with self.assertRaisesRegex(ValueError, "no pattern yet"):
+            self.act("patterns", project=otherProject)
+
+    # While the swarm runs, the user gives an agent its wheels from its card, as with wheels <agent> <names> in the command line.
+    def testAWheelIsGivenWhileTheSwarmRunsAndTheCardShowsIt(self):
+        self.act("setMission", mission="Write about bees.")
+        first, second = self.addWriter("bees"), self.addWriter("honey")
+        for agentId in (first, second):
+            self.chooseApi(agentId)
+            self.act("setFolder", agentId=agentId, folder=str(self.root))
+        self.assertEqual([wheel["name"] for wheel in self.session.describe()["architect"]["wheels"]], ["check_links"])
+        self.act("start", mode="plan")
+        self.waitForQuestion()
+        self.assertTrue(self.session.swarm.isRunning())
+        run = self.session.describe()["run"]
+        name = run["agents"][1]["name"]
+        self.assertEqual(run["agents"][1]["wheels"], [])
+        spec = next(spec for spec in self.session.describe()["agents"] if spec["name"] == name)
+        self.act("setWheels", agentId=spec["id"], wheels=["check_links"])
+        self.assertEqual(next(agent for agent in self.session.describe()["run"]["agents"] if agent["name"] == name)["wheels"], ["check_links"])
+        self.assertEqual(self.session.swarm.getMember(name)["agent"].wheels, ["check_links"])
+        self.assertTrue(any("got the wheels check_links" in item["text"] for item in self.session.feed))
+        with self.assertRaisesRegex(ValueError, "no wheel"):
+            self.act("setWheels", agentId=spec["id"], wheels=["nothing_here"])
+
+    def testThePageIsServedAndItsScriptsKnowTheActions(self):
+        for action in ("learning", "patterns", "patternBrief", "patternDetail", "searchPatterns", "minePatterns", "wheelDetail", "approveWheel", "revokeWheel", "retireWheel", "architectNotes"):
+            self.assertIn(action, self.session.actions)
+            self.assertIn(action, session_core.FREE_ACTIONS)
+        script = (web_server.INTERFACE_FOLDER / "architect_view.js").read_text(encoding="utf-8")
+        for action in ("learning", "patterns", "patternBrief", "patternDetail", "searchPatterns", "minePatterns", "wheelDetail", "retireWheel", "architectNotes"):
+            self.assertIn(f"'{action}'", script)
+        self.assertIn("learning: viewLearning", (web_server.INTERFACE_FOLDER / "app.js").read_text(encoding="utf-8"))
+
+
+# The MCP servers of other programs, with what the command line can give them: the variables of a program, the headers of a server on the network.
+class McpFormTests(SessionTestCase):
+    def fakeInspect(self):
+        patcher = mock.patch.object(session_core.Session, "inspect", lambda session, name: [])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def testTheVariablesAndTheHeadersOfAServerAreKept(self):
+        self.fakeInspect()
+        self.act("mcpAdd", name="files_one", transport="stdio", command="npx", args='-y "a server"', env="TOKEN=abc\n\nOTHER=two=2\n")
+        self.act("mcpAdd", name="web_one", transport="http", url="https://example.com/mcp", headers="Authorization=Bearer x")
+        servers = mcp_external.loadServers()
+        self.assertEqual(servers["files_one"]["env"], {"TOKEN": "abc", "OTHER": "two=2"})
+        self.assertEqual(servers["files_one"]["args"], ["-y", "a server"])
+        self.assertEqual(servers["web_one"]["headers"], {"Authorization": "Bearer x"})
+
+    def testAWrongLineIsSaidUnderItsField(self):
+        self.fakeInspect()
+        with self.assertRaises(FormError) as caught:
+            self.act("mcpAdd", name="files_one", transport="stdio", command="npx", env="NOT A PAIR")
+        self.assertIn("env", caught.exception.errors)
+        self.assertNotIn("files_one", mcp_external.loadServers())
+
+
+# The user leads the swarm instead of a model, in the window as in the command line.
+class UserLeaderTests(SessionTestCase):
+    def build(self):
+        self.act("setMission", mission="Write about bees.")
+        first, second = self.addWriter("bees"), self.addWriter("honey")
+        self.act("chooseModel", agentId=first, user=True)
+        self.chooseApi(second)
+        return first, second
+
+    def testTheFirstAgentCanBeTheUser(self):
+        first, second = self.build()
+        leader = self.session.describe()["agents"][0]
+        self.assertTrue(leader["model"]["user"])
+        self.assertEqual(leader["model"]["label"], "You lead it")
+        with self.assertRaisesRegex(ValueError, "Only the first agent"):
+            self.act("chooseModel", agentId=second, user=True)
+        self.assertNotIn(leader["name"], self.session.architectOptions())
+
+    def testOnlyTheLeaderCanBeTheUserWhenTheAgentsMove(self):
+        first, second = self.build()
+        self.act("moveAgent", agentId=first, position=1)
+        with self.assertRaisesRegex(ValueError, "Only the first agent"):
+            self.act("start", mode="execute")
+
+    def testWhatTheSwarmAsksItsLeaderComesToTheUserAndTheAnswerIsItsAnswer(self):
+        self.build()
+        self.act("start", mode="execute")
+        def leaderAsks():
+            for item in list(self.session.questions.values()):
+                if "as the leader" in item["text"]:
+                    return item
+                self.act("answer", id=item["id"], answer="yes")
+            return None
+        waitUntil(leaderAsks, "a question for the leader")
+        question = leaderAsks()
+        leader = self.session.specs[0]["name"]
+        self.assertEqual((question["kind"], question["speaker"]), ("text", leader))
+        self.assertTrue(any("You lead the swarm" in item["text"] for item in self.session.feed))
+        self.act("answer", id=question["id"], answer="The report of the user.")
+        waitUntil(lambda: not self.session.swarm.isRunning() or self.session.questions, "the end of the run")
+        self.assertEqual(self.session.swarm.getInfo(leader)["draft"] or self.session.swarm.getInfo(leader)["result"], "The report of the user.")
+
+
 class CostTests(SessionTestCase):
     def testTheFirstListsOnlyShowTheModelsThatFitTheVramAndTheBudgetLeft(self):
         self.act("setMission", mission="Bees.")

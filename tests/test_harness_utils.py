@@ -136,6 +136,11 @@ class ContextTests(LoopTestCase):
 
 
 class ReviewLoopTests(LoopTestCase):
+    def testTheSameDraftAgainIsShownToTheUserAtOnce(self):
+        loop = self.makeLoop(["A long draft.", "A long draft.", "A long draft.", "Never asked."], ["yes"])
+        self.assertEqual(loop.reviewLoop("Write.", lambda draft: "It is too long."), "A long draft.")
+        self.assertEqual(loop.agent.replies, ["Never asked."])
+
     def makeLoop(self, replies, answers, numberOfLoops=5, rulesFile=None):
         loop = Loop(FakeAgent(replies), numberOfLoops, rulesFile)
         return self.script(loop, answers)
@@ -780,6 +785,19 @@ class LiteratureTests(LoopTestCase):
         self.assertEqual([paper["link"] for paper in papers], ["https://a.test/1", "https://b.test/2"])
         self.assertIn("Skipping the search on C: the website says it received too many requests", self.saidText(loop))
 
+    def testTheSearchesAreInTheJournalLikeCallsForTheArchitect(self):
+        def broken(subject):
+            raise urllib.error.HTTPError("u", 403, "Forbidden", {}, None)
+        self.patchSearches(A=lambda s: [self.paper("A Paper", "https://a.test/1")], B=broken)
+        loop = self.makeLoop([], [], ["A", "B"])
+        noted = []
+        loop.note = lambda kind, **fields: noted.append({"kind": kind, **fields})
+        loop.searchPapers()
+        self.assertEqual([(entry["kind"], entry["server"], entry["tool"], entry["args"]["source"], entry["outcome"]) for entry in noted],
+                         [("call", "skill_literature", "search_papers", "A", "success"), ("call", "skill_literature", "search_papers", "B", "error")])
+        self.assertEqual(noted[0]["result"], "1 papers")
+        self.assertEqual(len({entry["id"] for entry in noted}), 2)
+
     def testNothingFoundMeansNothingSaved(self):
         self.patchSearches(A=lambda s: [])
         loop = self.makeLoop([], [], ["A"])
@@ -890,6 +908,15 @@ class DocumentFormatTests(LoopTestCase):
         path = self.folder / "notes.md"
         path.write_text("Introduction\nThis is the first paragraph with some words.\nConclusion\nThat is all.", encoding="utf-8")
         return self.script(DocumentFormatLoop(FakeAgent(replies), path, "markdown with headings"), answers), path
+
+    # The document can be the work of an agent this one waits for: it is read when the agent starts, and it is told if it never came.
+    def testTheDocumentIsReadWhenTheAgentStarts(self):
+        path = self.folder / "later.md"
+        loop = self.script(DocumentFormatLoop(FakeAgent(["# Later\n\nWords."]), path, "markdown"), ["yes"])
+        self.assertIsNone(loop.run())
+        self.assertIn("There is no file at", self.saidText(loop) if hasattr(self, "saidText") else " ".join(loop.said))
+        path.write_text("Later\nWords.", encoding="utf-8")
+        self.assertEqual(loop.run(), "# Later\n\nWords.")
 
     def testLayoutOnlyChangeIsSavedNextToTheUntouchedOriginal(self):
         loop, path = self.makeLoop(["# Introduction\n\nThis is the first paragraph with some words.\n\n# Conclusion\n\nThat is all."], ["yes"])
@@ -1513,7 +1540,7 @@ class SwarmTests(LoopTestCase):
         self.assertIn("No agent is concerned", self.saidText(self.agentOf(swarm, "Leader")))
 
     def testACorrectionGoesToEveryoneIfTheLeaderCannotRouteIt(self):
-        swarm = self.reviewedSwarm("plan", ["leader plan", "Summary one: Leader Writer"] + ["not json"] * 5 + ["leader plan two", "Summary two: Leader Writer"],
+        swarm = self.reviewedSwarm("plan", ["leader plan", "Summary one: Leader Writer"] + ["not json"] * 3 + ["leader plan two", "Summary two: Leader Writer"],
                                    ["Use bullet points", "yes"], Writer=["writer plan", "writer plan two"])
         self.assertEqual(swarm.run(), "Summary two: Leader Writer")
         self.assertEqual((swarm.getInfo("Writer")["plan"], swarm.getInfo("Leader")["plan"]), ("writer plan two", "leader plan two"))
@@ -2426,6 +2453,31 @@ class SwarmVramTests(unittest.TestCase):
         self.useGpus(40.0, free=40.0)
         status = swarm.getVramStatus()
         self.assertEqual((status["runnable"], status["message"]), (True, ""))
+
+    # A model the swarm already holds (the leader that built it, the agents after their plan, the round before) is what the swarm needs, not another job.
+    def testTheModelsTheSwarmAlreadyLoadedAreNotCountedTwice(self):
+        self.useGpus(48.0, free=24.7)
+        swarm = self.swarmWith(Leader=self.NINE, A=self.FOUR, B=self.FOUR)
+        swarm.getMember("Leader")["agent"].agent.isLoaded = True
+        status = swarm.getVramStatus()
+        self.assertEqual((status["needed"], status["runnable"], status["message"]), (45.9, True, ""))
+        self.assertEqual(status["used"], 0.0)
+        swarm.checkGpus()
+
+    def testAPlanThatLoadedEveryModelCanStillBeExecuted(self):
+        self.useGpus(48.0, free=2.1)
+        swarm = self.swarmWith(Leader=self.NINE, A=self.FOUR, B=self.FOUR)
+        for name in swarm.getAgents():
+            swarm.getMember(name)["agent"].agent.isLoaded = True
+        swarm.checkGpus()
+
+    def testOtherJobsStillStopASwarmThatLoadedItsLeader(self):
+        self.useGpus(48.0, free=10.0)
+        swarm = self.swarmWith(Leader=self.NINE, A=self.FOUR, B=self.FOUR)
+        swarm.getMember("Leader")["agent"].agent.isLoaded = True
+        with self.assertRaises(ValueError) as caught:
+            swarm.checkGpus()
+        self.assertIn("other jobs use 14.7 GB", str(caught.exception))
 
     def testNoGpuMeansNoLocalModelButApiModelsStillWork(self):
         swarm = Swarm("Test mission")

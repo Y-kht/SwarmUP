@@ -4,6 +4,7 @@
 # is read by the models of every later swarm as the description of a tool, so it is screened like the tools of servers of other programs.
 # And a wheel automates only what repeats: at least one of the patterns it covers repeats in the project, or across projects.
 import ast
+import builtins
 import json
 import re
 import types
@@ -29,6 +30,7 @@ NETWORK_MODULES = {"socket", "ssl", "urllib", "http", "requests", "httpx", "aioh
                    "websocket", "websockets", "paramiko", "xmlrpc", "socketserver"}
 CREDENTIALS = re.compile(r"(?i)(?:^|[/\\'\"~])(?:\.ssh|\.aws|\.gnupg|\.netrc|\.kube[/\\]config|id_rsa|id_ed25519|\.docker[/\\]config\.json|keychain|\.git-credentials|\.npmrc|\.pypirc)")
 REPEATING = ("repeating", "cross")
+TOOL_NAME = re.compile(r"[a-z][a-z0-9_]*__[a-z][a-z0-9_]*")
 
 
 def checkInputs(manifest):
@@ -150,7 +152,36 @@ def checkScript(text):
             problems.append(f"A wheel may not call {node.func.id}() (line {node.lineno}).")
         if isinstance(node, ast.Constant) and isinstance(node.value, str) and CREDENTIALS.search(node.value):
             problems.append(f"A wheel may not reach the secrets of the user (line {node.lineno}).")
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and TOOL_NAME.fullmatch(node.value.strip()):
+            problems.append(f"{node.value.strip()} (line {node.lineno}) is a tool of the agents, not a command: a script cannot run it. Do its work with Python (open(path) for a text "
+                            "file, pypdf for a PDF), or write a wheel of steps, which calls tools.")
+    problems += undefinedNames(tree)
     return manifest, sorted(set(problems), key=problems.index)
+
+
+# The names no line of the wheel defines: they fail when it runs. A small model writes the tools of the agents as functions of Python.
+def undefinedNames(tree):
+    known = set(dir(builtins)) | {"__name__", "__file__"}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            known.add(node.name)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            arguments = node.args
+            known.update(argument.arg for argument in [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs, arguments.vararg, arguments.kwarg] if argument)
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            known.update((alias.asname or alias.name).split(".")[0] for alias in node.names)
+        if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+            known.add(node.id)
+        if isinstance(node, ast.ExceptHandler) and node.name:
+            known.add(node.name)
+        if isinstance(node, (ast.Global, ast.Nonlocal)):
+            known.update(node.names)
+    missing = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id not in known:
+            missing.setdefault(node.id, node.lineno)
+    return [(f"{name} (line {line}) is a tool of the agents, not a function: a script cannot call it. To call a tool for each item of a list, write a wheel of steps with each."
+             if TOOL_NAME.fullmatch(name) else f"{name} (line {line}) is defined nowhere in the wheel: import it or define it.") for name, line in missing.items()]
 
 
 def checkSteps(manifest):
@@ -165,8 +196,11 @@ def checkSteps(manifest):
             continue
         if step["tool"].startswith(("wheels__", "architect__", "leader__", "user__")):
             problems.append(f"Step {number} calls {step['tool']}: a wheel calls the tools of the agent only, not wheels, the leader or the user.")
+        each = step.get("each")
+        if each is not None and (manifest.get("inputs") or {}).get(each, {}).get("type") != "array":
+            problems.append(f"Step {number} repeats for each item of {each}, which must be an input of type array.")
         names = set(re.findall(r"\{(\w+)\}", str(step.get("arguments") or {})))
-        missing = names - known
+        missing = names - known - ({"item"} if each is not None else set())
         if missing:
             problems.append(f"Step {number} uses {', '.join(sorted(missing))}, which is no input and was not saved by a step before.")
         for name, pattern in (step.get("save") or {}).items():
@@ -187,12 +221,24 @@ def onlyReads(manifest):
     steps = manifest.get("steps") if isinstance(manifest, dict) else None
     if not steps or not all(isinstance(step, dict) and str(step.get("tool") or "").startswith(LOOKING) for step in steps):
         return False
+    # A step for each item of a list does in one call what a model that makes one call at a time takes many model steps to do.
+    if any(step.get("each") for step in steps):
+        return False
     saved = set()
     for step in steps:
         if saved & set(re.findall(r"\{(\w+)\}", str(step.get("arguments") or {}))):
             return False
         saved |= set(step.get("save") or {})
     return True
+
+
+# The JSON of a wheel of steps as a small model writes it: what comes after the end of its object, like a brace too many, is left out.
+def cleanSteps(code):
+    try:
+        value = json.JSONDecoder().raw_decode(str(code).strip())[0]
+    except ValueError:
+        return code
+    return json.dumps(value, ensure_ascii=False, indent=1) if isinstance(value, dict) else code
 
 
 # The problems of a wheel before it is saved: [] when it can be saved. covers are the patterns (rows of the store) it automates, and liveCovers
@@ -212,6 +258,9 @@ def checkWheel(text, kind, name, covers, scope, liveCovers, replaces=()):
             problems += checkManifest(manifest, kind, name)
     else:
         return None, ["kind is script (Python) or steps (calls of tools)."]
+    if manifest and any(row.get("kind") == "streak" for row in covers) and not any(isinstance(spec, dict) and spec.get("type") == "array" for spec in (manifest.get("inputs") or {}).values()):
+        problems.append("It covers a streak: one call for each input, in many model steps. A wheel saves those steps only if it takes the whole list at once: give it an input of type array, "
+                        "and answer for every item in one call.")
     if not covers:
         problems.append("A wheel automates patterns: give the ids of the patterns it covers (from architect__read_patterns).")
     elif not any(row["status"] in REPEATING or row["status"] == "covered" and liveCovers.get(row["fp"]) in (name, *replaces) for row in covers):

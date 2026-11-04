@@ -133,6 +133,8 @@ function renderSidebar() {
     h('div', { class: 'nav-title' }, 'Run'),
     h('button', { class: ['nav-item', ui.view === 'run' && 'active'], disabled: !run, onClick: () => go('run'), title: run ? null : 'Start a swarm to follow it here.' },
       h('span', { class: 'nav-step' }, icon('activity', 'sm')), 'Live swarm', running ? h('span', { class: ['nav-live-dot', needsYou && 'attention'], title: needsYou ? 'Something waits for you' : 'Running' }) : null),
+    h('button', { class: ['nav-item', ui.view === 'learning' && 'active'], onClick: () => go('learning'), title: 'What your agents repeat, and the wheels the architect wrote from it.' },
+      h('span', { class: 'nav-step' }, icon('zap', 'sm')), 'Patterns and wheels'),
     h('div', { class: 'sidebar-bottom' },
       h('div', { class: 'theme-switch', role: 'group', 'aria-label': 'Theme' },
         [['auto', 'monitor', 'Like the system'], ['light', 'sun', 'Light'], ['dark', 'moon', 'Dark']].map(([value, iconName, label]) =>

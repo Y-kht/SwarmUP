@@ -11,7 +11,7 @@ from models_library import DEFAULT_CLI_MODEL, MODELS_API, getModelInfo
 
 
 RULES_FILE = "ARCHITECT.md"
-MAX_STEPS = 14
+MAX_STEPS = 24
 READING_TOOLS = {"list_files", "find_files", "search_files", "read_file"}
 
 
@@ -22,6 +22,7 @@ class ArchitectDesk:
         self.leader, self.members, self.allowedAll = None, {}, set()
         self.stopped = threading.Event()
         self.passId, self.since = "", None
+        self.listings, self.focus = 0, ""
 
     @property
     def project(self):

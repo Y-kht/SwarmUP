@@ -3,6 +3,7 @@ import copy
 import shutil
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from patching import everywhere
@@ -16,6 +17,7 @@ import agent_prompts as prompts
 import harness_utils
 from agent_conversation import Conversation
 from mission_memory import WorkSession
+from model_support import ModelMemoryError
 from agent_tools import undoChanges
 from mcp_gateway import Gateway, builtinServers
 from base_loop import Loop
@@ -232,6 +234,156 @@ class ConversationTests(ConversationTestCase):
         self.assertEqual(loop.agent.seen[2]["messages"][-1]["content"], prompts.LAST_STEP)
         self.assertIn("stopped at the limit of 3 steps", loop.activity[-1]["text"])
 
+    # A local model that runs out of memory on a long conversation: the agent goes on with less of the old results, and it is told.
+    def testAConversationTooLongForTheGpusMakesRoomAndGoesOn(self):
+        (self.work / "long.md").write_text("word\n" * 9000, encoding="utf-8")
+        def tooLong(loop):
+            raise ModelMemoryError("The GPUs ran out of memory.", tokens=30000)
+        loop = self.chatLoop([use(act("read_file", path="long.md")), tooLong, say("Done")])
+        self.assertEqual(loop.askAgent("Work."), "Done")
+        result = loop.agent.seen[-1]["messages"][2]["content"]
+        self.assertIn(prompts.CUT_RESULT, result)
+        self.assertLess(len(result), len(loop.agent.seen[1]["messages"][2]["content"]))
+        self.assertTrue(any("too long for the memory" in text for text in loop.said))
+
+    def testMemoryThatCannotBeFreedIsAnErrorWithItsMessage(self):
+        def tooLong(loop):
+            raise ModelMemoryError("The GPUs ran out of memory.", tokens=30000)
+        loop = self.chatLoop([tooLong, say("Never")])
+        with self.assertRaisesRegex(ModelMemoryError, "ran out of memory"):
+            loop.askAgent("Work.")
+        def notTheConversation(loop):
+            raise ModelMemoryError("The model did not fit.")
+        (self.work / "long.md").write_text("word\n" * 9000, encoding="utf-8")
+        loop = self.chatLoop([use(act("read_file", path="long.md")), notTheConversation, say("Never")])
+        with self.assertRaisesRegex(ModelMemoryError, "did not fit"):
+            loop.askAgent("Work.")
+
+    # Many small steps and long drafts: there is no long result to cut, so the old steps themselves leave. The task and the last steps stay.
+    def testRoomIsMadeByTakingOutOldStepsWhenNoResultIsLong(self):
+        first = [use(dict(act("find_files", pattern=f"{number}*"), id=f"s{number}")) for number in range(16)]
+        tries = []
+        def tooLong(loop):
+            tries.append(1)
+            raise ModelMemoryError("The GPUs ran out of memory.", tokens=12000)
+        loop = self.chatLoop([*first, tooLong, say("Done")])
+        self.assertEqual(loop.askAgent("Do your task."), "Done")
+        seen = loop.agent.seen[-1]["messages"]
+        self.assertEqual(seen[0]["content"], "Do your task.")
+        self.assertLess(len(seen), len(loop.agent.seen[-2]["messages"]))
+        self.assertTrue(any(prompts.OLD_STEPS in str(message["content"]) for message in seen))
+        self.assertEqual(seen[-1]["role"], "tool")
+        for number, message in enumerate(seen):
+            if message["role"] == "tool":
+                self.assertEqual(seen[number - 1]["role"] if seen[number - 1]["role"] == "assistant" else "tool", seen[number - 1]["role"])
+
+    def testTheSizeOfAConversationCountsTheArgumentsOfItsCalls(self):
+        conversation = Conversation(self.chatLoop([]))
+        conversation.messages = [{"role": "assistant", "content": "", "calls": [{"id": "1", "name": "files__write_file", "arguments": {"content": "x" * 5000}}]}]
+        self.assertGreater(conversation.size(), 5000)
+
+    def testAFailedMemoryStepAlsoLowersTheLimitForTheNextSteps(self):
+        (self.work / "long.md").write_text("word\n" * 9000, encoding="utf-8")
+        def tooLong(loop):
+            raise ModelMemoryError("The GPUs ran out of memory.", tokens=30000)
+        loop = self.chatLoop([use(act("read_file", path="long.md")), tooLong, use(act("read_file", path="long.md", start_line=2)), say("Done")])
+        self.assertEqual(loop.askAgent("Work."), "Done")
+        self.assertLess(sum(len(str(message["content"])) for message in loop.agent.seen[-1]["messages"]), 30000)
+
+    # A long answer is cut at the limit of the tokens of the model: the model goes on, and the agent gets the whole answer.
+    def testAnAnswerCutAtTheLimitOfItsTokensIsContinued(self):
+        loop = self.chatLoop([{"text": "The first part of the", "calls": [], "cut": True}, {"text": "review goes on,", "calls": [], "cut": True}, say("and ends here.")])
+        self.assertEqual(loop.askAgent("Work."), "The first part of the review goes on, and ends here.")
+        self.assertEqual(loop.agent.seen[1]["messages"][-1]["content"], prompts.CUT_ANSWER)
+
+    def testAnAnswerThatKeepsBeingCutEndsAndIsTold(self):
+        loop = self.chatLoop([{"text": f"Part {number}", "calls": [], "cut": True} for number in range(9)])
+        answer = loop.askAgent("Work.")
+        self.assertEqual(answer.count("Part"), agent_conversation.CUT_TURNS + 1)
+        self.assertIn("still too long", loop.activity[-1]["text"])
+
+    # A model that keeps repeating calls that are refused is stuck: its request ends, instead of using all its steps.
+    def testARequestStuckOnRepeatedCallsEnds(self):
+        first, second = act("list_files"), act("find_files", pattern="*.md")
+        loop = self.chatLoop([use(dict(first, id=f"a{number}") if number % 2 else dict(second, id=f"b{number}")) for number in range(60)])
+        self.assertEqual(loop.askAgent("Work."), "")
+        self.assertLess(len(loop.agent.seen), 20)
+        self.assertEqual(loop.agent.seen[-1]["tools"], [])
+        self.assertIn(prompts.LAST_STEP, str(loop.agent.seen[-1]["messages"][-1]["content"]))
+        self.assertTrue(any("kept repeating" in item["text"] for item in loop.activity))
+
+    def testALongFileIsWrittenInParts(self):
+        replies = [use(act("write_file", path="review.md", content="The first part.")), use(act("write_file", path="review.md", content="The second part.", append=True)),
+                   use(act("write_file", path="review.md", content="The third part.\n", append=True)), say("Done.")]
+        loop = self.chatLoop(replies)
+        self.assertEqual(loop.askAgent("Work."), "Done.")
+        self.assertEqual((self.work / "review.md").read_text(encoding="utf-8"), "The first part.\nThe second part.\nThe third part.\n")
+
+    def testAppendingToAFileThatDoesNotExistCreatesIt(self):
+        loop = self.chatLoop([use(act("write_file", path="new.md", content="Text.", append=True)), say("Done.")])
+        loop.askAgent("Work.")
+        self.assertEqual((self.work / "new.md").read_text(encoding="utf-8"), "Text.")
+
+    # The leader lists what the swarm did before a stop while it may be in a long request of its own: one message never waits behind that request.
+    def testOneMessageNeverWaitsBehindALongRequestOfTheAgent(self):
+        loop = self.chatLoop([say("What the swarm did.")])
+        with loop.thinking:
+            answers = []
+            thread = threading.Thread(target=lambda: answers.append(loop.askAgent("List what was done.", own=False, tools=False)), daemon=True)
+            thread.start()
+            thread.join(5)
+        self.assertEqual(answers, ["What the swarm did."])
+
+    # A model that cannot fit its work in one call is not left to try again and again: it gives it as its answer, which goes on as long as it needs.
+    def testCallsThatKeepBeingCutEndInAnAnswerInWords(self):
+        long = {"text": "", "calls": [act("write_file", path="review.md", content="x")], "cut": True}
+        loop = self.chatLoop([long, long, {"text": "The first part of", "calls": [], "cut": True}, say("the review.")])
+        self.assertEqual(loop.askAgent("Work."), "The first part of the review.")
+        self.assertEqual(loop.agent.seen[2]["tools"], [])
+        self.assertEqual(loop.agent.seen[2]["messages"][-1]["content"], prompts.CUT_CALLS)
+        self.assertEqual(loop.agent.seen[3]["messages"][-1]["content"], prompts.CUT_ANSWER)
+        self.assertFalse((self.work / "review.md").exists())
+
+    def testLongCallsThatCannotBeReadAlsoEndInAnAnswerInWords(self):
+        broken = lambda number: {"text": "", "calls": [{"id": f"b{number}", "name": "unknown", "arguments": {}, "problem": "this tool call is not valid JSON.", "text": "x" * 3000}]}
+        loop = self.chatLoop([broken(1), broken(2), say("The review, in words.")])
+        self.assertEqual(loop.askAgent("Work."), "The review, in words.")
+        self.assertEqual(loop.agent.seen[2]["tools"], [])
+        self.assertEqual(loop.agent.seen[2]["messages"][-1]["content"], prompts.CUT_CALLS)
+        self.assertNotIn("text", loop.agent.seen[2]["messages"][1]["calls"][0])
+
+    def testShortCallsThatCannotBeReadKeepTheirTools(self):
+        broken = lambda number: {"text": "", "calls": [{"id": f"b{number}", "name": "unknown", "arguments": {}, "problem": "this tool call is not valid JSON.", "text": "{x"}]}
+        loop = self.chatLoop([broken(1), broken(2), say("Done.")])
+        loop.askAgent("Work.")
+        self.assertTrue(loop.agent.seen[2]["tools"])
+
+    def testACutCallThenAGoodOneDoesNotEndTheRequest(self):
+        long = {"text": "", "calls": [act("write_file", path="review.md", content="x")], "cut": True}
+        loop = self.chatLoop([long, use(act("list_files")), long, say("Done.")])
+        self.assertEqual(loop.askAgent("Work."), "Done.")
+        self.assertTrue(loop.agent.seen[3]["tools"])
+
+    # The last step of a request has no tools, so the model has nothing to do but to answer.
+    def testAStuckModelMustAnswerAtTheEnd(self):
+        same = [use(dict(act("list_files"), id=f"a{number}")) for number in range(8)]
+        loop = self.chatLoop([*same, say("What I found.")])
+        self.assertEqual(loop.askAgent("Work."), "What I found.")
+        self.assertEqual(loop.agent.seen[-1]["tools"], [])
+
+    def testTheLastStepOfARequestHasNoTools(self):
+        loop = self.chatLoop([use(act("list_files")), use(act("find_files", pattern="a*")), say("The answer.")])
+        with mock.patch.object(agent_conversation, "currentSetting", return_value=3):
+            self.assertEqual(loop.askAgent("Work."), "The answer.")
+        self.assertEqual(loop.agent.seen[2]["tools"], [])
+        self.assertTrue(loop.agent.seen[1]["tools"])
+
+    def testACallThatRunsResetsTheCountOfRepeatedCalls(self):
+        same = [use(dict(act("list_files"), id=f"a{number}")) for number in range(4)]
+        fresh = [use(dict(act("find_files", pattern=f"{number}*"), id=f"b{number}")) for number in range(6)]
+        loop = self.chatLoop([*same, *fresh, say("Done")])
+        self.assertEqual(loop.askAgent("Work."), "Done")
+
     def testThreeCallsThatCannotBeReadAreToldToTheLeaderAndTheUser(self):
         swarm = Swarm("Bees")
         leader = self.chatLoop([say("Report")])
@@ -400,7 +552,7 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(([(item["name"], item["arguments"]) for item in calls], text), ([("list_files", {})], "I look."))
         calls, text = readToolCalls('[{"name": "read_file", "parameters": "{\\"path\\": \\"a\\"}"}]')
         self.assertEqual(([(item["name"], item["arguments"]) for item in calls], text), ([("read_file", {"path": "a"})], ""))
-        self.assertEqual(readToolCalls('<tool_call>{"name": oops</tool_call>')[0][0]["problem"], "this tool call is not valid JSON. Write it again.")
+        self.assertIn("this tool call is not valid JSON (", readToolCalls('<tool_call>{"name": oops</tool_call>')[0][0]["problem"])
         self.assertEqual(readToolCalls('{"answer": 42}'), ([], '{"answer": 42}'))
         self.assertEqual(readToolCalls(""), ([], ""))
 

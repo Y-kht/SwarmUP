@@ -95,3 +95,33 @@ def describeCommands(tools):
 
 def adapterOf(agent):
     return agent if callable(getattr(agent, "converse", None)) else PromptAdapter(agent)
+
+
+# The user can lead the swarm instead of a model: a person in the window or at the terminal, or an AI agent that drives the command line
+# (swarmup_cli.py send). What the swarm asks the model of the leader (its own task, which agents a follow-up concerns, what to keep in the long-term
+# memory) is asked to the user, in the window of the leader, and the answer is the answer of the leader. The leader does not check or approve its own drafts.
+USER_LEADER = {"name": "you", "local": False, "provider": None, "billions": None, "bits": None, "vram": 0.0, "cli": None, "user": True}
+
+
+# The user is an adapter of its own (model_adapters.py): it sees only what is new in the conversation, and calls the tools of the leader with
+# commands, like a model calls them (ADP-07). console is what the program that runs it gives: say(text, window) and ask(question, window).
+class UserLeader:
+    approvesItself = True
+
+    def __init__(self, console, name):
+        self.console, self.name, self.usage = console, name, {"calls": 0, "input": 0, "output": 0}
+
+    # One line answers; \n in it starts a new line, so a long answer (a report, JSON) fits in one line. A line that starts with / calls a tool.
+    def converse(self, system, messages, tools, onText=None):
+        self.usage["calls"] += 1
+        last = max((number for number, message in enumerate(messages) if message["role"] == "assistant"), default=-1)
+        new = [message for message in messages[last + 1:]]
+        shown = [system] if last < 0 and system else []
+        shown += [message["content"] if message["role"] == "user" else f"[Result of {message['name']}]\n{message['content']}" for message in new]
+        if tools and last < 0:
+            shown.append("Your tools, as commands (write /name key=value, or /name {JSON}):\n" + describeCommands(tools))
+        self.console.say("\n=== You lead the swarm. SwarmUP asks you what it would ask the model of the leader: ===\n" + "\n\n".join(shown) +
+                         "\n=== Answer in one line (write \\n for a new line), or call a tool. ===", window=self.name)
+        reply = self.console.ask("Your answer, as the leader:", window=self.name).replace("\\n", "\n")
+        calls = readCommand(reply) if tools else None
+        return {"text": "" if calls else reply, "calls": calls or [], "raw": None, "cut": False}

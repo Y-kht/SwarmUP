@@ -163,6 +163,8 @@ class SessionRuns:
         missing = [spec["name"] for spec in self.specs if not spec["model"]]
         if missing:
             raise ValueError(f"Choose a model for {', '.join(missing)} first.")
+        if any((spec["model"] or {}).get("user") for spec in self.specs[1:]):
+            raise ValueError("Only the first agent, the leader, can be you: make your agent the first one, or choose a model for it.")
         silent = [spec["name"] for spec in self.specs if spec["task"] == "agent" and not str(spec["answers"].get("prompt") or "").strip()]
         if silent:
             raise ValueError(f"Write what {', '.join(silent)} must do, in the step of the agents.")
@@ -182,7 +184,7 @@ class SessionRuns:
         for spec in self.specs[1:]:
             swarm.setWaitsFor(spec["name"], spec["waitsFor"])
         swarm.addListener(self.onEvent)
-        if leader or len(self.specs) > 1:
+        if (leader or len(self.specs) > 1) and not self.specs[0]["model"].get("user"):
             self.manage(swarm, leader or self.specs[0])
         self.attachTheArchitect(swarm)
         return swarm

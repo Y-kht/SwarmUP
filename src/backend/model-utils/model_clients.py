@@ -8,15 +8,17 @@
 # The coding agents are in coding_agents.py and codex_agent.py, and what every client needs in model_support.py.
 import gc
 import json
+import os
 import re
 import threading
+import weakref
 
 from codex_agent import CodexModel
 from coding_agents import ClaudeCodeModel
 from harness_utils import isOnline
-from model_messages import (claudeBlock, claudeMessages, explainApiError, localMessages, openAiMessages, readOpenAiUsage, readResponsesUsage,  # noqa: F401
+from model_messages import (claudeBlock, claudeMessages, explainApiError, localMessages, openAiMessages, readCutCalls, readOpenAiUsage, readResponsesUsage,  # noqa: F401
                             readToolCalls, responsesInput)
-from model_support import API_LIBRARIES, ModelConnectionError, ModelError, getApiKey, importLibrary, isDownloaded, recordCall
+from model_support import API_LIBRARIES, ModelConnectionError, ModelError, ModelMemoryError, getApiKey, importLibrary, isDownloaded, recordCall
 from models_library import API_KEYS, isGated
 
 
@@ -24,7 +26,8 @@ BASE_URLS = {"claude": None, "gpt": None, "gemini": "https://generativelanguage.
 API_RETRIES = 2
 ACCEPTED_ENCODINGS = "gzip, deflate"
 CLAUDE_MAX_TOKENS = 32000
-LOCAL_MAX_TOKENS = 4096
+# A long text in one call of a tool must fit: a review of 3000 words is about 4500 tokens. It only costs time, and only when the model writes that much.
+LOCAL_MAX_TOKENS = 16384
 THINKING_PATTERN = re.compile(r"<think>.*?</think>", re.DOTALL)
 STREAM_ATTEMPTS = 2
 
@@ -95,7 +98,7 @@ class ApiModel:
         message = self.streamClaude(onText, **options)
         calls = [{"id": block.id, "name": block.name, "arguments": block.input} for block in message.content if block.type == "tool_use"]
         return {"text": "".join(block.text for block in message.content if block.type == "text"), "calls": calls, "raw": {"claude": [claudeBlock(block) for block in message.content]},
-                "cut": message.stop_reason == "max_tokens" and bool(calls)}
+                "cut": message.stop_reason == "max_tokens"}
 
     def converseOpenAi(self, system, messages, tools, onText=None):
         options = {"model": self.name, "messages": openAiMessages(system, messages)}
@@ -118,7 +121,7 @@ class ApiModel:
             raw["tool_calls"] = [item.model_dump(mode="json", exclude_none=True) for item in written]
         if getattr(message, "reasoning_content", None):
             raw["reasoning_content"] = message.reasoning_content
-        return {"text": message.content or "", "calls": calls, "raw": {"openai": raw}, "cut": choice.finish_reason == "length" and bool(calls)}
+        return {"text": message.content or "", "calls": calls, "raw": {"openai": raw}, "cut": choice.finish_reason == "length"}
 
     # A GPT model of OpenAI that reasons can only call tools through the Responses API. Nothing is kept at OpenAI (store is False), so the
     # encrypted reasoning comes back with the answer, and goes with the conversation.
@@ -141,8 +144,7 @@ class ApiModel:
                 texts += [part.text for part in item.content or [] if getattr(part, "type", "") == "output_text"]
                 if any(getattr(part, "type", "") == "refusal" for part in item.content or []) and not texts:
                     raise ModelError(f"{self.name} declined this request.")
-        cut = response.status == "incomplete" and bool(calls)
-        return {"text": "".join(texts), "calls": calls, "raw": {"responses": raw}, "cut": cut}
+        return {"text": "".join(texts), "calls": calls, "raw": {"responses": raw}, "cut": response.status == "incomplete"}
 
     def askOpenAi(self, prompt):
         response = self.client.chat.completions.create(model=self.name, messages=[{"role": "user", "content": prompt}])
@@ -176,8 +178,17 @@ class ApiModel:
 # A Hugging Face model on the GPUs. It is loaded when it is first asked something, one model at a time (a swarm has many),
 # spread over all the GPUs. bits below 16 load it compressed (it needs bitsandbytes), and token is the Hugging Face token of gated models.
 # report is a function that tells the user what takes time (the download and the loading of a big model take minutes).
+# The memory of the GPU has more room now: the model tries again.
+class RetryWithRoom(Exception):
+    pass
+
+
 class LocalModel:
     loading = threading.Lock()
+    # One lock for each GPU: what a model writes needs memory beyond what it holds, so two models on one GPU write one after the other.
+    gpus = {}
+    # The models of this program, so one that runs out of memory can ask those that wait on its GPU to let theirs go.
+    models = weakref.WeakSet()
     # A model on the GPUs of this computer: a swarm lets its memory go when its agent has finished (Swarm.release), and it loads again if needed.
     local = True
     # It gives its text while it writes it, and a stop of the swarm ends it there (cancel).
@@ -197,8 +208,18 @@ class LocalModel:
         self.torch = self.transformers = None
         self.lock = threading.Lock()
         self.stopping = threading.Event()
+        self.promptTokens = self.written = 0
+        LocalModel.models.add(self)
+
+    # True while the model holds memory of the GPUs (Swarm.getLoadedVram).
+    @property
+    def isLoaded(self):
+        return self.model is not None
 
     def load(self):
+        # Without this, a small allocation keeps a big block of the GPU reserved after unload: a model that let its memory go would still hold it.
+        for variable in ("PYTORCH_ALLOC_CONF", "PYTORCH_CUDA_ALLOC_CONF"):
+            os.environ.setdefault(variable, "expandable_segments:True")
         torch, transformers = importLibrary("torch"), importLibrary("transformers")
         importLibrary("accelerate")
         if not torch.cuda.is_available():
@@ -272,8 +293,9 @@ class LocalModel:
             self.ensureLoaded()
             native = bool(tools) and "tools" in str(self.tokenizer.chat_template or "")
             text = self.generate(localMessages(system, messages, tools, native), [{"type": "function", "function": item} for item in tools] if native else None, onText)
-        calls, text = readToolCalls(text, tools)
-        return {"text": text, "calls": calls, "raw": None, "cut": False}
+            cut = self.written >= self.maxNewTokens
+        calls, text = readCutCalls(text, tools) if cut else readToolCalls(text, tools)
+        return {"text": text, "calls": calls, "raw": None, "cut": cut}
 
     def ensureLoaded(self):
         if self.model is None:
@@ -285,17 +307,17 @@ class LocalModel:
         self.ensureLoaded()
         inputs = self.tokenizer.apply_chat_template(messages, tools=tools, add_generation_prompt=True, return_tensors="pt", return_dict=True, enable_thinking=False)
         inputs = inputs.to(self.model.device)
+        start = self.promptTokens = inputs["input_ids"].shape[-1]
         options = {**inputs, "max_new_tokens": self.maxNewTokens, **self.stoppingOptions()}
         streamer = getattr(self.transformers, "TextIteratorStreamer", None) if onText is not None else None
-        if streamer is None:
-            with self.torch.no_grad():
-                output = self.model.generate(**options)
-        else:
-            output = self.generateWhileReading(options, streamer(self.tokenizer, skip_prompt=True, skip_special_tokens=True), onText)
-        start = inputs["input_ids"].shape[-1]
-        self.usage["calls"] += 1
-        self.usage["input"] += start
-        self.usage["output"] += output.shape[-1] - start
+        with LocalModel.gpus.setdefault(str(self.model.device), threading.Lock()):
+            if streamer is None:
+                with self.torch.no_grad():
+                    output = self.model.generate(**options)
+            else:
+                output = self.generateWhileReading(options, streamer(self.tokenizer, skip_prompt=True, skip_special_tokens=True), onText)
+        self.written = output.shape[-1] - start
+        recordCall(self.usage, input=start, output=self.written)
         text = self.tokenizer.decode(output[0][start:], skip_special_tokens=True)
         return THINKING_PATTERN.sub("", text).split("<think>")[0].strip()
 
@@ -342,6 +364,14 @@ class LocalModel:
 
     # The two things that go wrong most with a local model are told in words a user understands.
     def guard(self, work):
+        while True:
+            self.promptTokens = 0
+            try:
+                return self.attempt(work)
+            except RetryWithRoom:
+                continue
+
+    def attempt(self, work):
         try:
             return work()
         except OSError as error:
@@ -355,7 +385,36 @@ class LocalModel:
                                  "restarts: close it, and start it again to continue the swarm.") from error
             if "out of memory" not in str(error).lower():
                 raise
-            raise ModelError(f"The GPUs ran out of memory with {self.name}. Other jobs may be using them. Free some memory or choose a smaller model.") from error
+        # The frames of the error hold tensors, so what the model used can only be freed here, after it.
+        self.freeCache()
+        if self.freePeers():
+            self.report(f"{self.name} needed more memory of its GPU: the models that wait on it let theirs go, and they load again when they work.")
+            raise RetryWithRoom()
+        tokens = self.promptTokens
+        reading = f" while it read a conversation of {tokens:,} tokens" if tokens else ""
+        raise ModelMemoryError(f"The GPUs ran out of memory with {self.name}{reading}. A long conversation needs memory beyond the model itself, and other models or jobs on that GPU "
+                               "use it too. Give the agent less to read at once, give this model a GPU of its own, or choose a smaller or compressed model.", tokens)
+
+    def freeCache(self):
+        gc.collect()
+        if self.torch is not None:
+            self.torch.cuda.empty_cache()
+
+    # A model that waits on the same GPU holds memory that this one needs now: it lets it go, and loads again when it works. It says if one did.
+    def freePeers(self):
+        place = str(getattr(self.model, "device", ""))
+        freed = False
+        for model in list(LocalModel.models):
+            if model is self or model.model is None or str(getattr(model.model, "device", "")) != place or not model.lock.acquire(blocking=False):
+                continue
+            try:
+                model.model = model.tokenizer = None
+                freed = True
+            finally:
+                model.lock.release()
+        if freed:
+            self.freeCache()
+        return freed
 
     # Frees the memory of the GPUs. After an error of CUDA the GPU cannot be cleared anymore, and that must not stop the program.
     def unload(self):

@@ -46,8 +46,6 @@ class SessionSaved:
         saved = self.findSaved(payload.get("id"))
         if not all(member.get("recipe") for member in saved["members"].values()):
             raise ValueError("This swarm was made by another program, so it cannot be continued here.")
-        if any((member.get("model") or {}).get("user") for member in saved["members"].values()):
-            raise ValueError("You lead this swarm yourself, from the command line: continue it there (swarmup_cli.py open).")
         agents, providers, gated, codex = [], {}, [], False
         following = self.isFollowUp(saved)
         for name, member in saved["members"].items():
@@ -55,8 +53,8 @@ class SessionSaved:
             fields = [{**describeField(field, answers), "required": field.get("required", False) and not finished} for field in secretFields(task, answers)]
             info = member["model"]
             agents.append({"name": name, "role": member["role"], "task": task, "status": member["status"], "finished": finished, "fields": fields,
-                           "accounts": task == "literature" and not finished, "model": describeModel(info), "missing": findMissingPackages(info) if info else []})
-            if info and not info["local"] and info["provider"] and not finished:
+                           "accounts": task == "literature" and not finished, "model": describeModel(info), "missing": findMissingPackages(info) if info and not info.get("user") else []})
+            if info and not info["local"] and not info.get("user") and info["provider"] and not finished:
                 providers[info["provider"]] = self.describeKeys()[info["provider"]]
             codex = codex or bool(info and info.get("cli") == "codex" and not finished)
             if info and info["local"] and isGated(info["name"]) and not os.environ.get("HF_TOKEN") and not finished:
@@ -83,13 +81,13 @@ class SessionSaved:
         if errors:
             raise FormError(errors)
         if usable:
-            client = self.makeClient(info, name)
+            client = self.userLeader(name) if info.get("user") else self.makeClient(info, name)
         answers = restoreAnswers(task, recipe["answers"], secrets)
         loop = buildLoop(task, client, answers)
         self.connect(loop, name)
         self.agentNumber += 1
         rebuilt.append({"id": f"agent{self.agentNumber}", "task": task, "name": name, "answers": answers, "model": info, "client": client,
-                        "waitsFor": list(data["waitsFor"]), "missing": findMissingPackages(info) if info else [], "description": describeLoop(loop)})
+                        "waitsFor": list(data["waitsFor"]), "missing": findMissingPackages(info) if info and not info.get("user") else [], "description": describeLoop(loop)})
         return loop
 
     def rememberKeys(self, payload):
@@ -110,7 +108,7 @@ class SessionSaved:
         self.reset()
         rebuilt.sort(key=lambda spec: spec["name"] != saved["leader"])
         self.mission, self.specs, self.mode, self.swarm, self.dirty, self.costs = saved["mission"], rebuilt, saved["mode"], swarm, False, swarm.costs
-        if saved.get("managed") and self.specs:
+        if saved.get("managed") and self.specs and not (saved["members"][saved["leader"]]["model"] or {}).get("user"):
             self.buildMode = "leader" if self.leaderSpec() else self.buildMode
             self.manage(swarm, self.leaderSpec() or self.specs[0])
         state = saved.get("architect") or {}

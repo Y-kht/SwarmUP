@@ -1,5 +1,5 @@
 # Runs one script wheel, in a process of its own (wheel_tools.py starts it with python -I, so nothing of SwarmUP is imported by chance):
-#     python -I wheel_runner.py <wheel.py> <arguments.json> <result.json>
+#     python -I wheel_runner.py <wheel.py> <arguments.json> <result.json> [folders of the packages of the user]
 # It loads the wheel from its file, calls run(arguments, folder) in the folder it was started in, and writes what happened as JSON:
 # {"ok": true, "output": text for the agent, "data": the value run gave, "printed": what the wheel printed}, or
 # {"ok": false, "error": {"type", "message"}, "trace": the traceback, for the architect only, "printed"}.
@@ -38,6 +38,7 @@ def runWheel(path, arguments):
 
 def main(argv):
     path, argumentsPath, resultPath = argv[1:4]
+    sys.path.extend(folder for folder in (argv[4] if len(argv) > 4 else "").split(os.pathsep) if folder and folder not in sys.path)
     with open(argumentsPath, encoding="utf-8") as handle:
         arguments = json.load(handle)
     printed = io.StringIO()

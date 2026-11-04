@@ -3,7 +3,7 @@ from agent_tools import READ_LINES, onToolbox
 from mcp_kit import ServerSpec, ToolSpec
 
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 TEXT = {"type": "string"}
 PATH = {"type": "string", "description": "A path in your folder, or in @temp/, @memory/ or @long-term/."}
 WHERE = {"type": "string", "description": "A folder in your folder, or @temp, @memory or @long-term (or a folder in them). Empty for your folder."}
@@ -24,9 +24,10 @@ TOOLS = [
              {"path": PATH, "start_line": {"type": "integer", "description": "The first line to read, 1 by default."},
               "line_count": {"type": "integer", "description": f"How many lines to read, {READ_LINES} at most."}}, ["path"],
              run=onToolbox("read_file"), readOnly=True, idempotent=True),
-    ToolSpec("write_file", "Create a file, or replace all of its text. To change a part of a file that exists, use files__edit_file. " + CARD,
-             {"path": PATH, "content": {"type": "string", "description": "The whole text of the file."}, "reason": REASON}, ["path", "content"],
-             run=onToolbox("write_file"), destructive=True, idempotent=True),
+    ToolSpec("write_file", "Create a file, or replace all of its text, or add to its end (append): write a long file in parts. To change a part of a file that exists, use files__edit_file. " + CARD,
+             {"path": PATH, "content": {"type": "string", "description": "The whole text of the file, or the part to add to its end."},
+              "append": {"type": "boolean", "description": "True: add the text at the end of the file, instead of replacing it."}, "reason": REASON}, ["path", "content"],
+             run=onToolbox("write_file"), destructive=True),
     ToolSpec("edit_file", "Replace a passage of a text file with another one. Copy old_text exactly from the file (read it first): it must be found once, "
              "unless replace_all is true. " + CARD,
              {"path": PATH, "old_text": TEXT, "new_text": TEXT, "replace_all": {"type": "boolean"}, "reason": REASON}, ["path", "old_text", "new_text"],
