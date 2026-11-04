@@ -407,6 +407,9 @@
 
 /* ---------- The MCP layer: the calls of a mission, the text an agent writes now ---------- */
 .calls-table td { vertical-align: top; }
+.calls-table tr.clickable { cursor: pointer; }
+.calls-table tr.clickable:hover td { background: var(--surface-2, rgba(127, 127, 127, 0.08)); }
+.learning-text { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 60vh; overflow: auto; }
 .calls-table code { font-size: 12px; }
 .live-text { max-height: 220px; overflow: auto; white-space: pre-wrap; font-size: 13px; }
 .live-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--success); animation: pulse 1.4s infinite; vertical-align: middle; }

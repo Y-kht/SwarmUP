@@ -9,15 +9,11 @@
 # A project is given by its id, its name or its folder; without it, the project of the current folder.
 import json
 import os
-import time
 
-from miner_service import ProjectLock, LOCK_FILE
-from pattern_digest import renderBrief, renderPattern, renderTable, searchJournal
-from pattern_miner import Miner
-from pattern_registry import describeNote, findNotes
-from pattern_store import ACTIONABLE, DB_FILE, PatternStore
-from project_identity import listProjects, projectDir, projectFor, resolveProject
-from wheel_store import catalogFor, loadWheel, readApprovals, readCatalog, revoke, approve, retireWheel, describeWheel
+from architect_admin import approveWheel, architectNotes, hasPatterns, mine, openStore, patternBrief, patternDetail, patternTable, requireWheel, retireByUser, revokeWheel, searchJournals, wheelTable
+from pattern_store import ACTIONABLE
+from project_identity import listProjects, projectFor, resolveProject
+from wheel_store import describeWheel
 
 
 def addPatternArguments(commands):
@@ -45,7 +41,7 @@ def projectOf(text):
             raise ValueError(f"No project is known as {text!r}. See them with: swarmup_cli.py patterns projects")
         return project
     project = projectFor(os.getcwd())[0]
-    if not (projectDir(project) / DB_FILE).exists():
+    if not hasPatterns(project):
         known = listProjects()
         if len(known) == 1:
             return known[0]["id"]
@@ -53,87 +49,44 @@ def projectOf(text):
     return project
 
 
-def openStore(project):
-    path = projectDir(project) / DB_FILE
-    if not path.exists():
-        raise ValueError(f"The project {project} has no pattern yet: its swarms did not run since the architect exists, or mine it with: swarmup_cli.py patterns mine {project}")
-    return PatternStore(path, readOnly=True)
-
-
-def mine(project, rebuild):
-    lock = ProjectLock(projectDir(project) / LOCK_FILE)
-    if not lock.take():
-        return "A swarm of this project mines it now: what it found is already in the store."
-    started = time.time()
-    try:
-        miner = Miner(project)
-        try:
-            read = miner.rebuild() if rebuild else sum(iter(lambda: miner.poll(), 0))
-            counts = miner.store.counts()
-        finally:
-            miner.close()
-    finally:
-        lock.free()
-    return f"Read {read:,} entries in {time.time() - started:.1f} s. The project has {counts['patterns']:,} patterns: " + \
-        ", ".join(f"{count} {status}" for status, count in sorted(counts["byStatus"].items()))
-
-
 def runPatterns(options):
     if options.action == "projects":
         projects = listProjects()
         return "\n".join(f"- {project['id']}: {project.get('folder') or 'no folder'}, {len(project.get('missions') or {})} missions" for project in projects) or \
             "No project yet: the architect learns from the swarms that run from now on."
-    if options.action in ("show", "search"):
-        project = projectOf(options.project)
-        if options.action == "search":
-            return searchJournal(project, options.target, limit=options.top)
-        store = openStore(project)
-        try:
-            return renderPattern(store, options.target.lstrip("#"), examples=3)
-        finally:
-            store.close()
+    if options.action == "search":
+        return searchJournals(projectOf(options.project), options.target, limit=options.top)
+    if options.action == "show":
+        return patternDetail(projectOf(options.project), options.target)
     project = projectOf(options.target or options.project)
     if options.action == "mine":
         return mine(project, options.rebuild)
-    store = openStore(project)
-    try:
-        if options.action == "brief":
-            return renderBrief(store, project)
-        kinds = tuple(options.kind) or ACTIONABLE
-        if options.json:
-            return json.dumps(store.patterns(kinds, options.status or None, limit=options.top), ensure_ascii=False, indent=1, default=str)
-        return renderTable(store, kinds, options.status or None, options.top)
-    finally:
-        store.close()
+    if options.action == "brief":
+        return patternBrief(project)
+    if options.json:
+        store = openStore(project)
+        try:
+            return json.dumps(store.patterns(tuple(options.kind) or ACTIONABLE, options.status or None, limit=options.top), ensure_ascii=False, indent=1, default=str)
+        finally:
+            store.close()
+    return patternTable(project, options.kind, options.status, options.top)
 
 
 def runWheels(options):
     if options.action == "notes":
-        notes = findNotes(options.query, limit=50)
-        return "\n".join(f"- {describeNote(note)}" for note in notes) or "No note of an architect yet."
+        return "\n".join(f"- {note['text']}" for note in architectNotes(options.query)) or "No note of an architect yet."
     if options.action == "list":
-        catalog = catalogFor(projectOf(options.project)) if options.project else {name: entry for name, entry in readCatalog()["wheels"].items() if not entry.get("retired")}
-        approvals = readApprovals()
-        lines = [f"- {describeWheel(entry)}" + (" [approved always]" if any(pin.startswith(f"{name}@{entry['hash'][:8]}") for pin in approvals) else "")
-                 for name, entry in catalog.items()]
-        return "\n".join(lines) or "No wheel yet: the architect writes them from what the agents repeat."
+        return wheelTable(projectOf(options.project) if options.project else None)
     if not options.name:
         raise ValueError(f"Name the wheel: swarmup_cli.py wheels {options.action} NAME")
-    wheel = loadWheel(options.name)
     if options.action == "show":
-        if wheel is None:
-            raise ValueError(f"There is no wheel {options.name}.")
+        wheel = requireWheel(options.name)
         return f"{describeWheel(wheel)}\nIt covers: {', '.join(wheel.get('covers') or []) or 'nothing recorded'}\nMade by: {wheel.get('author')}\n\n{wheel['text']}"
     if options.action == "approve":
-        if wheel is None:
-            raise ValueError(f"There is no wheel {options.name}.")
-        approve(wheel["pin"], "on the command line")
-        return f"Version {wheel['version']} of {options.name} runs without asking from now on. A new version asks again."
+        return approveWheel(options.name, "on the command line")
     if options.action == "revoke":
-        return f"{revoke(options.name)} approvals of {options.name} were taken back: it asks again before it runs."
-    if retireWheel(options.name, options.why, by="the user") is None:
-        raise ValueError(f"There is no live wheel {options.name}.")
-    return f"{options.name} is retired: no agent gets it anymore, and the architect will not write it again unless the agents need it."
+        return revokeWheel(options.name)
+    return retireByUser(options.name, options.why)
 
 
 def runArchitectCommand(options):

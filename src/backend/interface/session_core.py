@@ -32,7 +32,8 @@ CONTEXT_LIMIT = 6
 # or answer the swarm, so they never wait behind a slow one.
 FREE_ACTIONS = ("checkEmail", "checkMessenger", "findChats", "searchPublishers", "browse", "pickPath", "lookupModel", "price", "testModel", "modelCatalog", "answer",
                 "approve", "reject", "correct", "message", "startNow", "openLink", "openFolder", "refreshUnfinished", "quit", "taskForm",
-                "codexAccount", "calls", "mcpServers", "mcpInspect", "wheels")
+                "codexAccount", "calls", "mcpServers", "mcpInspect", "wheels", "setWheels", "learning", "patterns", "patternBrief", "patternDetail", "searchPatterns", "minePatterns", "wheelDetail",
+                "approveWheel", "revokeWheel", "retireWheel", "architectNotes")
 
 
 # ==============
@@ -76,7 +77,8 @@ class Session(SessionSteps, SessionModels, SessionRuns, SessionSaved, SessionMcp
             "setMode", "start", "execute", "answer", "approve", "reject", "correct", "message", "startNow", "prepareStop", "stop", "clearJob", "newSwarm",
             "resumeForm", "resume", "prepareCancel", "abandon", "refreshUnfinished", "openLink", "codexAccount", "codexSignIn", "codexCancel", "joinLive",
             "removeLive", "setBuildMode", "buildWithLeader", "setBudget", "saveSettings", "quit", "addAgents", "setSwarmFolder", "followUp", "calls", "mcpServers",
-            "mcpAdd", "mcpInspect", "mcpApprove", "mcpRemove", "setArchitect", "wheels", "setWheels")}
+            "mcpAdd", "mcpInspect", "mcpApprove", "mcpRemove", "setArchitect", "wheels", "setWheels", "learning", "patterns", "patternBrief", "patternDetail", "searchPatterns",
+            "minePatterns", "wheelDetail", "approveWheel", "revokeWheel", "retireWheel", "architectNotes")}
 
     def reset(self):
         self.mission = ""
@@ -312,7 +314,7 @@ class Session(SessionSteps, SessionModels, SessionRuns, SessionSaved, SessionMcp
             info, member = swarm.getInfo(name), swarm.getMember(name)
             client = member["agent"].agent
             agents.append({**info, "model": describeModel(info["model"]), "task": (member.get("recipe") or {}).get("task"), "description": info["task"],
-                           "calls": counts.get(name),
+                           "calls": counts.get(name), "wheels": list(getattr(member["agent"], "wheels", None) or []),
                            "usage": {key: client.usage.get(key, 0) for key in ("calls", "input", "output")} if hasattr(client, "usage") else None,
                            "removable": name != swarm.getLeader()})
         try:
@@ -343,8 +345,9 @@ class Session(SessionSteps, SessionModels, SessionRuns, SessionSaved, SessionMcp
 
     def describeGpus(self):
         needed = round(sum(spec["model"]["vram"] for spec in self.specs if spec["model"]), 1)
+        own = round(sum(spec["model"]["vram"] for spec in self.specs if spec["model"] and getattr(spec["client"], "isLoaded", False)), 1)
         gpus = readGpus()
-        return checkVram(needed, gpus) if gpus or needed else None
+        return checkVram(needed, gpus, own) if gpus or needed else None
 
     def describe(self):
         with self.lock:

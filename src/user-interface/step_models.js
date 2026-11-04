@@ -63,10 +63,12 @@ function modelKind(model) {
 }
 
 function modelIcon(model) {
+  if (model?.user) return 'user';
   return { cli: 'terminal', local: 'cpu', api: 'cloud' }[modelKind(model)];
 }
 
 function modelName(model) {
+  if (model?.user) return 'You lead it';
   if (!model?.cli) return model?.name || '';
   const agent = store.catalog.codingAgents[model.cli];
   return model.name === store.catalog.defaultCliModel ? `${agent.label} (its default model)` : `${agent.label} · ${model.name}`;
@@ -81,10 +83,10 @@ function modelRow(agent) {
         h('span', { class: 'small muted' }, taskOf(agent.task).label), h('span', { class: 'grow' }),
         model ? button('Change', { size: 'sm', iconName: 'refresh', onClick: () => openModelPicker(agent) }) : button('Choose a model', { kind: 'primary', size: 'sm', iconName: 'plus', onClick: () => openModelPicker(agent) })),
       model ? h('div', { class: 'row wrap' }, h('span', { class: 'model-chip' }, icon(modelIcon(model), 'sm'), h('span', {}, modelName(model))),
-        model.local ? badge(`${model.vram} GB of VRAM${model.bits < 16 ? `, ${model.bits}-bit` : ''}`, 'primary') :
+        model.user ? null : model.local ? badge(`${model.vram} GB of VRAM${model.bits < 16 ? `, ${model.bits}-bit` : ''}`, 'primary') :
           model.cli === 'codex' ? badge('Your ChatGPT plan', 'honey', 'user') : model.cli ? badge('Your Anthropic API key', 'honey', 'key') : badge(model.company, 'info'),
         model.gated ? badge('Licence needed', 'warning', 'lock') : null,
-        !model.local ? (agent.tested === 'ok' ? badge('Connection works', 'success', 'check') : agent.tested === 'failed' ? badge('Connection failed', 'danger', 'x') :
+        !model.local && !model.user ? (agent.tested === 'ok' ? badge('Connection works', 'success', 'check') : agent.tested === 'failed' ? badge('Connection failed', 'danger', 'x') :
           button('Test the connection', { kind: 'ghost', size: 'sm', iconName: 'zap', busy: ui.busy[`test-${agent.id}`], onClick: () => testModel(agent) })) : null) :
         h('div', { class: 'small faint' }, 'No model yet.'),
       agent.missing.length ? callout('warning', 'download', h('b', {}, `This model needs ${agent.missing.join(', ')}.`), h('div', {}, 'Install them in a terminal, then check again:'), codeLine(missingCommand),
@@ -242,7 +244,11 @@ function modelPickerModal(modal) {
             h('div', { class: 'cc-text' }, 'The models of OpenAI, Anthropic, Google and DeepSeek. Every use is billed, and you need an API key.')), h('span', { class: 'radio' })),
         h('button', { type: 'button', class: ['choice-card', where === 'cli' && 'selected'], onClick: () => { modal.where = 'cli'; if (modal.cli === 'codex') loadCodex(); render(); } },
           h('span', { class: 'cc-icon', style: { background: 'var(--honey-soft)', color: 'var(--honey-text)' } }, icon('terminal', 'lg')), h('div', {}, h('div', { class: 'cc-title' }, 'A coding agent', badge('Claude Code · Codex', 'honey')),
-            h('div', { class: 'cc-text' }, 'Claude Code or Codex on this computer. It can also read files and run commands, each time with your approval.')), h('span', { class: 'radio' }))),
+            h('div', { class: 'cc-text' }, 'Claude Code or Codex on this computer. It can also read files and run commands, each time with your approval.')), h('span', { class: 'radio' })),
+        catalog.isLeader && modal.task !== 'leader' ? h('button', { type: 'button', class: 'choice-card', onClick: async () => {
+          if (await act('chooseModel', { agentId: modal.agentId, user: true }, { busy: 'chooseModel' })) { closeModal(); toast(`You lead the swarm: what it asks ${modal.agentName} comes to you.`, 'success'); } } },
+          h('span', { class: 'cc-icon' }, icon('user', 'lg')), h('div', {}, h('div', { class: 'cc-title' }, 'I lead the swarm myself'),
+            h('div', { class: 'cc-text' }, 'What the swarm asks its leader comes to you, and you answer in your own words. The agents still ask you to approve their work.'))) : null),
       where === 'local' ? h('div', { class: 'card pad', style: { boxShadow: 'none' } }, gpuMeter(catalog.gpu, extra, modal.selected?.local ? shorten(modal.selected.name, 30) : 'This model'),
         h('div', { class: 'row wrap', style: { marginTop: '14px' } }, h('b', { class: 'small' }, 'Memory saver'),
           h('div', { class: 'segmented' }, store.catalog.bits.map(bits => h('button', { type: 'button', class: modal.bits === bits && 'active', onClick: () => { modal.bits = bits; loadCatalog(modal); } },

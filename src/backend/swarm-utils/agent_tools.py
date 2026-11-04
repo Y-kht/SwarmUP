@@ -275,11 +275,13 @@ class Toolbox(TransferTools, ProcessTools):
             self.logChange(spot, f"{verb.capitalize()} {spot.path}.")
         return f"Done: {verb} {spot.name} ({len(text.splitlines())} lines)."
 
-    def write_file(self, path, content, reason=""):
+    def write_file(self, path, content, reason="", append=False):
         spot = self.target(path)
         before = self.currentText(spot)
         if before is not None:
             self.checkKnown(spot)
+        if append and before:
+            return self.store(spot, before + ("" if before.endswith("\n") else "\n") + content, before, reason, "add to")
         return self.store(spot, content, before, reason, "create" if before is None else "replace")
 
     def edit_file(self, path, old_text, new_text, replace_all=False, reason=""):

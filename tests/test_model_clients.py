@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -19,8 +20,8 @@ import internet_cache
 import model_clients
 import model_support
 from harness_utils import ConnectionLost
-from model_clients import ApiModel, LocalModel, createModel
-from model_support import ModelConnectionError, ModelError, findMissingPackages, getApiKey, getHubFolder, isDownloaded, lookupHuggingFace
+from model_clients import ApiModel, LocalModel, createModel, readToolCalls
+from model_support import ModelConnectionError, ModelError, ModelMemoryError, findMissingPackages, getApiKey, getHubFolder, isDownloaded, lookupHuggingFace
 from models_library import getModelInfo
 from test_harness_utils import isolateInternetCache
 
@@ -525,6 +526,130 @@ class LocalModelTests(unittest.TestCase):
         self.assertEqual(totals(model.usage), {"calls": 2, "input": 10, "output": 6})
         self.assertEqual(len(reports), 2)
         self.assertIn("Loading Qwen/Qwen3.5-9B", reports[0])
+
+    def testTheMemoryOfTheGpusIsAskedToComeBackAfterAnUnloadUnlessTheUserChoseOtherwise(self):
+        libraries = FakeLibraries()
+        with mock.patch.dict(os.environ, {"PYTORCH_ALLOC_CONF": "max_split_size_mb:64"}), libraries.patch():
+            os.environ.pop("PYTORCH_CUDA_ALLOC_CONF", None)
+            LocalModel("Qwen/Qwen3.5-9B").input("Say hi")
+            self.assertEqual(os.environ["PYTORCH_ALLOC_CONF"], "max_split_size_mb:64")
+            self.assertEqual(os.environ["PYTORCH_CUDA_ALLOC_CONF"], "expandable_segments:True")
+
+    def testItKeepsARecordOfTheTokensOfEachCall(self):
+        libraries = FakeLibraries()
+        with libraries.patch():
+            model = LocalModel("Qwen/Qwen3.5-9B")
+            self.assertFalse(model.isLoaded)
+            model.input("Say hi")
+            self.assertTrue(model.isLoaded)
+        self.assertEqual([(record["input"], record["output"]) for record in model.usage["records"]], [(5, 3)])
+
+    # A long text in a call often has a quote or a backslash that is not escaped: it is no reason to lose ten minutes of work.
+    def testALongTextWithAnUnescapedQuoteOrBackslashIsStillRead(self):
+        cases = {'{"name": "files__write_file", "arguments": {"path": "a.md", "content": "They call it "transient experience", and it works."}}': "They call it \"transient experience\", and it works.",
+                 '{"name": "files__write_file", "arguments": {"path": "a.md", "content": "A \\* star and a \\_ line\\nand \\"quoted\\" words"}}': "A \\* star and a \\_ line\nand \"quoted\" words",
+                 '{"name": "files__write_file", "parameters": {"content": "First line\nsecond line", "path": "a.md"}}': "First line\nsecond line"}
+        for body, content in cases.items():
+            calls, rest = readToolCalls(f"<tool_call>\n{body}\n</tool_call>")
+            self.assertEqual((calls[0]["name"], calls[0]["arguments"]["path"], calls[0]["arguments"]["content"], rest), ("files__write_file", "a.md", content, ""), body)
+            self.assertNotIn("problem", calls[0])
+
+    def testOtherArgumentsOfALooseCallKeepTheirTypes(self):
+        calls, rest = readToolCalls('<tool_call>{"name": "files__write_file", "arguments": {"content": "a "b" c", "append": true, "count": 3, "path": "x.md"}}</tool_call>')
+        self.assertEqual(calls[0]["arguments"], {"content": 'a "b" c', "append": True, "count": 3, "path": "x.md"})
+
+    def testACallThatCannotBeReadSaysWhereAndKeepsItsText(self):
+        calls, rest = readToolCalls("<tool_call>{name: broken</tool_call>")
+        self.assertEqual(calls[0]["name"], "unknown")
+        self.assertIn("at character", calls[0]["problem"])
+        self.assertEqual(calls[0]["text"], "{name: broken")
+
+    def testACutAnswerIsSaidAndACutCallIsNeverAnAnswer(self):
+        libraries = FakeLibraries(answer="The first part of the")
+        with libraries.patch():
+            model = LocalModel("Qwen/Qwen3.5-9B", maxNewTokens=3)
+            reply = model.converse("", [{"role": "user", "content": "Write."}], [])
+        self.assertEqual((reply["text"], reply["calls"], reply["cut"]), ("The first part of the", [], True))
+        libraries = FakeLibraries(answer="<tool_call>\n{\"name\": \"files__write_file\", \"arguments\": {\"path\": \"a.md\", \"content\": \"Long text")
+        with libraries.patch():
+            reply = LocalModel("Qwen/Qwen3.5-9B", maxNewTokens=3).converse("", [{"role": "user", "content": "Write."}], [])
+        self.assertEqual((reply["text"], reply["cut"], [call["name"] for call in reply["calls"]]), ("", True, ["files__write_file"]))
+        self.assertNotIn("problem", reply["calls"][0])
+        libraries = FakeLibraries(answer="{\"name\": \"files__write_file\", \"parameters\": {\"content\": \"Long text")
+        with libraries.patch():
+            reply = LocalModel("Qwen/Qwen3.5-9B", maxNewTokens=3).converse("", [{"role": "user", "content": "Write."}], [])
+        self.assertEqual((reply["text"], [call["name"] for call in reply["calls"]]), ("", ["files__write_file"]))
+        libraries = FakeLibraries(answer="A short answer.")
+        with libraries.patch():
+            reply = LocalModel("Qwen/Qwen3.5-9B", maxNewTokens=50).converse("", [{"role": "user", "content": "Write."}], [])
+        self.assertFalse(reply["cut"])
+
+    def testRunningOutOfMemorySaysTheTokensOfTheConversationAndFreesTheMemory(self):
+        libraries = FakeLibraries()
+        with libraries.patch():
+            model = LocalModel("Qwen/Qwen3.5-9B")
+            model.input("Say hi")
+            cleared = libraries.calls["cache"]
+            model.model.generate = mock.Mock(side_effect=RuntimeError("CUDA out of memory. Tried to allocate 2 GiB."))
+            with self.assertRaises(ModelMemoryError) as caught:
+                model.converse("", [{"role": "user", "content": "Read."}], [])
+        self.assertEqual(caught.exception.tokens, 5)
+        self.assertIn("5 tokens", str(caught.exception))
+        self.assertEqual(libraries.calls["cache"], cleared + 1)
+
+    # A model that waits on the GPU holds memory the working one needs: it lets it go, the working one goes on, and it loads again when it works.
+    def testAModelThatRunsOutOfMemoryFirstFreesTheModelsThatWaitOnItsGpu(self):
+        libraries, reports = FakeLibraries(), []
+        with libraries.patch():
+            working, waiting = LocalModel("Qwen/Qwen3.5-9B", report=reports.append), LocalModel("Qwen/Qwen3.5-4B")
+            working.input("Say hi")
+            waiting.input("Say hi")
+            answer = working.model.generate
+            working.model.generate = mock.Mock(side_effect=[RuntimeError("CUDA out of memory."), answer(input_ids=Ids(range(5)))])
+            self.assertEqual(working.input("Read this."), "The answer.")
+            self.assertFalse(waiting.isLoaded)
+            self.assertTrue(working.isLoaded)
+            self.assertTrue(any("let theirs go" in text for text in reports))
+            self.assertEqual(waiting.input("Say hi again"), "The answer.")
+            self.assertTrue(waiting.isLoaded)
+
+    def testAModelThatWritesKeepsItsMemoryWhenAnotherRunsOut(self):
+        libraries = FakeLibraries()
+        with libraries.patch():
+            first, second = LocalModel("Qwen/Qwen3.5-9B"), LocalModel("Qwen/Qwen3.5-4B")
+            first.input("Say hi")
+            second.input("Say hi")
+            with second.lock:
+                first.model.generate = mock.Mock(side_effect=RuntimeError("CUDA out of memory."))
+                with self.assertRaises(ModelMemoryError):
+                    first.input("Read this.")
+            self.assertTrue(second.isLoaded)
+
+    # Two models on one GPU never write at the same time: each needs room beyond what it holds, and the two together would run out of it.
+    def testTwoModelsOnOneGpuWriteOneAfterTheOther(self):
+        libraries = FakeLibraries()
+        running, most, guard = [0], [0], threading.Lock()
+        original = libraries.transformers.AutoModelForCausalLM.from_pretrained
+        def slowModel(*arguments, **options):
+            model = original(*arguments, **options)
+            answer = model.generate
+            def generate(**inputs):
+                with guard:
+                    running[0] += 1
+                    most[0] = max(most[0], running[0])
+                time.sleep(0.05)
+                with guard:
+                    running[0] -= 1
+                return answer(**inputs)
+            model.generate = generate
+            return model
+        libraries.transformers.AutoModelForCausalLM.from_pretrained = staticmethod(slowModel)
+        with libraries.patch():
+            models = [LocalModel("Qwen/Qwen3.5-9B"), LocalModel("Qwen/Qwen3.5-4B")]
+            threads = [threading.Thread(target=model.input, args=("Say hi",)) for model in models]
+            [thread.start() for thread in threads]
+            [thread.join() for thread in threads]
+        self.assertEqual(most[0], 1)
 
     def testTheUserIsOnlyWarnedAboutTheDownloadWhenThereIsOne(self):
         for downloaded, warned in ((False, True), (True, False)):

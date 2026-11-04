@@ -1,6 +1,6 @@
 {
  "files": {
-  "version": "1.0.0",
+  "version": "1.1.0",
   "tools": {
    "list_files": {
     "description": "List the files and folders of your folder, or of a folder in it, or of @temp, @memory or @long-term, at every depth, with their sizes. Use it first to see what is there. Use files__find_files to look for names, and files__search_files to look for words.",
@@ -111,7 +111,7 @@
     "timeout": 120
    },
    "write_file": {
-    "description": "Create a file, or replace all of its text. To change a part of a file that exists, use files__edit_file. In your folder, the user approves the change first, and it can be put back. In @temp it needs no approval. In @memory and @long-term the memory rules apply.",
+    "description": "Create a file, or replace all of its text, or add to its end (append): write a long file in parts. To change a part of a file that exists, use files__edit_file. In your folder, the user approves the change first, and it can be put back. In @temp it needs no approval. In @memory and @long-term the memory rules apply.",
     "input": {
      "type": "object",
      "properties": {
@@ -121,7 +121,11 @@
       },
       "content": {
        "type": "string",
-       "description": "The whole text of the file."
+       "description": "The whole text of the file, or the part to add to its end."
+      },
+      "append": {
+       "type": "boolean",
+       "description": "True: add the text at the end of the file, instead of replacing it."
       },
       "reason": {
        "type": "string",
@@ -138,7 +142,7 @@
     "hints": {
      "readOnlyHint": false,
      "destructiveHint": true,
-     "idempotentHint": true,
+     "idempotentHint": false,
      "openWorldHint": false
     },
     "timeout": 120
@@ -984,7 +988,7 @@
   }
  },
  "architect": {
-  "version": "1.0.0",
+  "version": "1.1.0",
   "tools": {
    "read_patterns": {
     "description": "Read the patterns the agents of this project repeat, the best first: without filters, the brief of your pass (what repeats and is not automated, the emerging patterns, the wheels and how they do, the notes that may match). It changes nothing.",
@@ -1150,7 +1154,7 @@
        "items": {
         "type": "string"
        },
-       "description": "The ids of the patterns, like #12, as the brief shows them."
+       "description": "The ids of the patterns it covers, like #12, as the brief shows them. Without it: the pattern to decide about first."
       },
       "scope": {
        "type": "string",
@@ -1171,8 +1175,7 @@
      "required": [
       "name",
       "kind",
-      "code",
-      "covers"
+      "code"
      ],
      "additionalProperties": false
     },
@@ -1211,7 +1214,7 @@
        "items": {
         "type": "string"
        },
-       "description": "The ids of the patterns, like #12, as the brief shows them."
+       "description": "The ids of the patterns it covers, like #12, as the brief shows them. Without it: the pattern to decide about first."
       },
       "scope": {
        "type": "string",
@@ -1236,9 +1239,7 @@
      "required": [
       "name",
       "kind",
-      "code",
-      "covers",
-      "why"
+      "code"
      ],
      "additionalProperties": false
     },
@@ -1288,7 +1289,7 @@
        "items": {
         "type": "string"
        },
-       "description": "The ids of the patterns, like #12, as the brief shows them."
+       "description": "The ids of the patterns it covers, like #12, as the brief shows them. Without it: the pattern to decide about first."
       },
       "text": {
        "type": "string"

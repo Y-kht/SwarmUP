@@ -9,6 +9,14 @@ from harness_utils import stripFences
 
 
 TOOL_CALL_PATTERN = re.compile(r"<tool_call>\s*(.*?)\s*(?:</tool_call>|$)", re.DOTALL)
+STARTED_CALL = re.compile(r"\s*(?:<tool_call>|(?:```(?:json)?\s*)?\[?\s*\{\s*\"name\")")
+CALL_NAME = re.compile(r"\"name\"\s*:\s*\"([^\"]+)\"")
+LOOSE_CALL = re.compile(r"\{\s*\"name\"\s*:\s*\"([^\"]+)\"\s*,\s*\"(?:arguments|parameters)\"\s*:\s*\{(.*)\}\s*\}", re.DOTALL)
+LOOSE_KEY = re.compile(r"\s*,?\s*\"([A-Za-z_]\w*)\"\s*:\s*")
+LOOSE_TEXT_END = re.compile(r"(?<!\\)\"(?=\s*(?:,\s*\"[A-Za-z_]\w*\"\s*:|$))")
+# A quote that nothing escapes (an even number of backslashes before it), and a backslash that starts no escape of JSON.
+LOOSE_QUOTE = re.compile(r"(?<!\\)((?:\\\\)*)\"")
+BAD_ESCAPE = re.compile(r"\\(?![\"\\/bfnrtu])")
 
 
 # What went wrong with a call to an API, in words a user understands. The libraries of Anthropic and OpenAI have the same error classes.
@@ -179,12 +187,57 @@ def localMessages(system, messages, tools, native):
 
 def readCall(body):
     try:
-        data = json.loads(body)
+        data = readLooseCall(body)
         arguments = data.get("arguments", data.get("parameters", {}))
         arguments = json.loads(arguments) if isinstance(arguments, str) else arguments
         return {"id": f"call_{uuid.uuid4().hex[:12]}", "name": str(data["name"]), "arguments": arguments}
-    except (ValueError, KeyError, TypeError, AttributeError):
-        return {"id": f"call_{uuid.uuid4().hex[:12]}", "name": "unknown", "arguments": {}, "problem": "this tool call is not valid JSON. Write it again."}
+    except (ValueError, KeyError, TypeError, AttributeError) as error:
+        return {"id": f"call_{uuid.uuid4().hex[:12]}", "name": "unknown", "arguments": {}, "text": body,
+                "problem": f"this tool call is not valid JSON ({describeJsonError(error)}). Write it again, with every quote and backslash of a text escaped."}
+
+
+def describeJsonError(error):
+    return f"{error.msg} at character {error.pos}" if isinstance(error, json.JSONDecodeError) else str(error)
+
+
+# A call as JSON, or as a small model writes it: a long text in an argument often has a quote or a backslash that is not escaped, and that is no reason
+# to lose it. The first error is the one that is told if nothing works.
+def readLooseCall(body):
+    try:
+        return json.loads(body, strict=False)
+    except ValueError as error:
+        loose = LOOSE_CALL.fullmatch(body.strip())
+        if not loose:
+            raise error
+        try:
+            return {"name": loose.group(1), "arguments": readLooseArguments(loose.group(2))}
+        except ValueError:
+            raise error from None
+
+
+# The arguments of a call, where a text ends at a quote that is followed by the next key or by the end: any other quote inside it is part of the text.
+def readLooseArguments(text):
+    arguments, position, decoder = {}, 0, json.JSONDecoder(strict=False)
+    while position < len(text.rstrip()):
+        key = LOOSE_KEY.match(text, position)
+        if not key:
+            raise ValueError("not a key")
+        position = key.end()
+        if text[position:position + 1] != '"':
+            arguments[key.group(1)], position = decoder.raw_decode(text, position)
+            continue
+        end = LOOSE_TEXT_END.search(text, position + 1)
+        if not end:
+            raise ValueError("a text does not end")
+        arguments[key.group(1)] = readLooseText(text[position + 1:end.start()])
+        position = end.start() + 1
+    return arguments
+
+
+def readLooseText(raw):
+    fixed = LOOSE_QUOTE.sub(r'\1\\"', raw)
+    fixed = BAD_ESCAPE.sub(r"\\\\", fixed)
+    return json.loads(f'"{fixed}"', strict=False)
 
 
 def newCallId():
@@ -206,6 +259,19 @@ def readToolCalls(text, tools=None):
         if items and all(isinstance(item, dict) and "name" in item for item in items) and (not names or all(item["name"] in names for item in items)):
             return [readCall(json.dumps(item)) for item in items], ""
     return readLeaderBlocks(text, names)
+
+
+# What a model wrote when its tokens ended. A call it was writing is the call it meant, which is not run (CUT_CALL tells it why): it never becomes
+# the text of its answer, and it is not called invalid. Any other text is the start of an answer.
+def readCutCalls(text, tools=None):
+    calls, rest = readToolCalls(text, tools)
+    if calls and not any(call.get("problem") for call in calls):
+        return calls, rest
+    if not calls and not STARTED_CALL.match(text):
+        return calls, rest
+    named = CALL_NAME.findall(text)
+    good = [call for call in calls if not call.get("problem")]
+    return [*good, {"id": newCallId(), "name": named[-1] if named else "unknown", "arguments": {}}], ""
 
 
 # One JSON value, or several written one after the other (Llama writes {...}; {...}). A list gives its items. None if it is not only JSON.

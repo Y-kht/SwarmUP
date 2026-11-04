@@ -223,6 +223,7 @@ function agentDetail(run, agent) {
     h('div', { class: 'card-body' },
       h('div', { class: 'detail-section' }, h('h4', {}, 'Its task'), h('p', { class: 'muted' }, agent.description),
         agent.waitsFor.length && !agent.isLeader ? h('p', { class: 'small', style: { marginTop: '6px' } }, icon('clock', 'sm'), ` Waits for ${agent.waitsFor.join(', ')} and receives their results.`) : null),
+      agentWheels(run, agent),
       liveSection(agent),
       ready ? h('div', { class: 'detail-section' }, h('div', { class: 'row', style: { marginBottom: '8px' } }, h('h4', { class: 'grow', style: { margin: '0' } }, `Its ${what} waits for you`), badge(`Draft ${agent.revision}`, 'outline')),
         h('div', { class: 'draft-box ready' }, agent.draft),

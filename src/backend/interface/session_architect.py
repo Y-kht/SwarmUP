@@ -1,15 +1,21 @@
 # The architect in the window (Session in session_core.py): the model the user chooses for it in the step of the models (the same as an agent
-# of the swarm, the leader by default, or a model of its own), what it does while the swarm runs, and the wheels of each agent.
+# of the swarm, the leader by default, or a model of its own), what it does while the swarm runs, the wheels of each agent, and the page of what
+# the architect learned: the patterns of each project, the wheels with their approvals, and the notes (architect_admin.py, as the command line).
+from architect_admin import approveWheel, architectNotes, describeProjects, hasPatterns, mine, patternBrief, patternCounts, patternDetail, patternRows, retireByUser, revokeWheel, searchJournals, wheelDetail, wheelRows
 from architect_loop import pickArchitect
 from architect_manager import attachArchitect
 from harness_utils import ARCHITECT_NAME
 from interface_views import describeModel
 from leader_wheels import checkWheels, giveWheels, projectOfFolder
+from pattern_store import ACTIONABLE
 from wheel_store import catalogFor
 
 
 # The architect has a spec like the agents, so the picker of the models works for it too.
 ARCHITECT_ID = "architect"
+PATTERNS_SHOWN = 100
+PATTERN_KINDS = list(ACTIONABLE)
+PATTERN_STATUSES = ["new", "emerging", "repeating", "cross", "covered", "noted", "dismissed"]
 
 
 class SessionArchitect:
@@ -93,3 +99,44 @@ class SessionArchitect:
             self.dirty = True
         spec["answers"]["wheels"] = names
         return {"wheels": names}
+
+    # ---------- What the architect learned, project by project. ----------
+    # The projects SwarmUP knows, the one of this mission first, and the wheels of the chosen project.
+    def learning(self, payload):
+        projects, current = describeProjects(), self.projectOfSpecs()
+        projects.sort(key=lambda project: project["id"] != current)
+        known = {project["id"] for project in projects}
+        project = payload.get("project") if payload.get("project") in known else projects[0]["id"] if projects else None
+        return {"projects": projects, "project": project, "counts": patternCounts(project) if project and hasPatterns(project) else None, "wheels": wheelRows(project),
+                "kinds": PATTERN_KINDS, "statuses": PATTERN_STATUSES}
+
+    def patterns(self, payload):
+        kinds, statuses = [payload["kind"]] if payload.get("kind") else [], [payload["status"]] if payload.get("status") else []
+        return {"patterns": patternRows(payload.get("project"), kinds, statuses, PATTERNS_SHOWN)}
+
+    def patternBrief(self, payload):
+        return {"text": patternBrief(payload.get("project"))}
+
+    def patternDetail(self, payload):
+        return {"text": patternDetail(payload.get("project"), payload.get("id"))}
+
+    def searchPatterns(self, payload):
+        return {"text": searchJournals(payload.get("project"), str(payload.get("text") or ""))}
+
+    def minePatterns(self, payload):
+        return {"text": mine(payload.get("project"), bool(payload.get("rebuild")))}
+
+    def wheelDetail(self, payload):
+        return {"wheel": wheelDetail(str(payload.get("name") or ""))}
+
+    def approveWheel(self, payload):
+        return {"text": approveWheel(str(payload.get("name") or ""), "in the window")}
+
+    def revokeWheel(self, payload):
+        return {"text": revokeWheel(str(payload.get("name") or ""))}
+
+    def retireWheel(self, payload):
+        return {"text": retireByUser(str(payload.get("name") or ""), payload.get("why"))}
+
+    def architectNotes(self, payload):
+        return {"notes": architectNotes(str(payload.get("query") or ""))}

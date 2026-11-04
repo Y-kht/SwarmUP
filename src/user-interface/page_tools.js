@@ -24,7 +24,7 @@ const ui = {
   view: 'home', modal: null, stack: [], selected: null, busy: {}, errors: {}, expanded: {}, visited: new Set(), feedFilter: 'all',
   missionDraft: null, folderDrafts: {}, waitsDraft: null, orderChoice: null, mode: null, resume: null, particles: [], seenFeed: 0,
   composer: {}, corrections: {}, messages: {}, renderedOnce: false, animate: true, forms: {}, codex: { loading: false, data: null }, budgetDraft: null, costsOpen: false,
-  promptDrafts: {}, ruleDrafts: {}, specialisedOpen: false, swarmFolderDraft: null, ownFolders: null, followUp: null, afterSwitch: false,
+  promptDrafts: {}, ruleDrafts: {}, specialisedOpen: false, swarmFolderDraft: null, ownFolders: null, followUp: null, afterSwitch: false, learning: null,
 };
 let pointerDown = false, renderPending = false;
 

@@ -33,6 +33,14 @@ class ModelError(Exception):
     pass
 
 
+# The GPUs ran out of memory. tokens is the size of the conversation the model was reading (0 when it was not reading one): the conversation can
+# make room and try again (agent_conversation.py), so the agent goes on.
+class ModelMemoryError(ModelError):
+    def __init__(self, message, tokens=0):
+        super().__init__(message)
+        self.tokens = tokens
+
+
 # The model cannot be reached because the connection is lost. A swarm pauses the agent instead of failing it (see ConnectionLost).
 class ModelConnectionError(ModelError, ConnectionLost):
     pass

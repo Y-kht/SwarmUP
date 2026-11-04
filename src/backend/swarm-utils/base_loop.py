@@ -14,6 +14,7 @@ from harness_utils import ConnectionLost, USER_LOCK, asConnectionLost, checkLeng
 
 
 PLAN_LENGTH = 150
+SAME_DRAFTS = 2
 
 
 # The parent of all loops. A loop only has to define its tools, its task, and how to verify the draft.
@@ -208,6 +209,10 @@ class Loop:
     # Every model is reached the same way, through its adapter (model_adapters.py).
     def askAgent(self, prompt, own=True, tools=None):
         tools = own if tools is None else tools
+        # One message without tools touches no conversation, so it never waits for a long request of the agent (the leader lists what the swarm
+        # did before a stop, while it works). A coding agent has one session, so it stays in turn.
+        if not own and not tools and not getattr(adapterOf(self.agent), "runsTools", False):
+            return talk(self, prompt, own, tools)
         with self.thinking:
             return talk(self, prompt, own, tools)
 
@@ -363,7 +368,7 @@ class Loop:
             if key:
                 self.remember(key, draft)
             return draft
-        draft, feedback, attempt = "", "", 0
+        draft, feedback, attempt, same = "", "", 0, 0
         while True:
             attempt += 1
             prompt = task
@@ -373,10 +378,13 @@ class Loop:
                 prompt = prompts.CONVERSATION_REVISION_PROMPT.format(feedback=feedback) if conversing else \
                     f"{task}\n\nYour previous draft:\n{draft}\n\nImprove it. What to change: {feedback}"
             messagesBefore = len(self.userMessages)
+            before = draft
             draft = self.askAgent(prompt, own)
+            same = same + 1 if draft == before else 0
             problem = verify(draft) or self.checkNewMessages(messagesBefore)
             self.note("draft", own=own, attempt=attempt, problem=str(problem or "")[:1500], length=len(draft or ""), planning=self.planning)
-            if problem and attempt < self.numberOfLoops:
+            # A model that keeps giving the same draft will not change it by being asked again: the time of a long draft is not spent on it.
+            if problem and attempt < self.numberOfLoops and same < SAME_DRAFTS:
                 feedback = problem
                 continue
             if not ask:

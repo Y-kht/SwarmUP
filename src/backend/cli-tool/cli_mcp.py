@@ -20,7 +20,7 @@ def addMcpArguments(commands):
     mcp = commands.add_parser("mcp", help="the MCP servers of other programs that your agents can use (list, add, approve, remove)")
     mcp.add_argument("action", choices=("list", "add", "approve", "remove"))
     mcp.add_argument("name", nargs="?", help="the name of the server: small letters, digits and _")
-    mcp.add_argument("--command", default="", help="the program that starts a server of this computer (stdio)")
+    mcp.add_argument("--command", dest="program", default="", help="the program that starts a server of this computer (stdio)")
     mcp.add_argument("--args", default="", help="its arguments, in one string")
     mcp.add_argument("--env", action="append", default=[], help="a variable of its environment, as KEY=VALUE (several times for several)")
     mcp.add_argument("--url", default="", help="the address of a server on the network (Streamable HTTP)")
@@ -34,16 +34,6 @@ def addMcpArguments(commands):
     calls.add_argument("--lines", type=int, default=200)
 
 
-def pairs(items):
-    found = {}
-    for item in items:
-        key, separator, value = item.partition("=")
-        if not separator or not key.strip():
-            raise ValueError(f"{item} is not KEY=VALUE.")
-        found[key.strip()] = value
-    return found
-
-
 def describeServer(name, config):
     where = f"{config['command']} {' '.join(config.get('args') or [])}".strip() if config["transport"] == "stdio" else config["url"]
     agents = "every agent" if config.get("agents") == "all" else ", ".join(config.get("agents") or []) or "no agent"
@@ -55,7 +45,10 @@ def approve(name, confirmed, ask=input):
     servers = mcp_external.loadServers()
     if name not in servers:
         raise ValueError(f"There is no server called {name}. See them with: swarmup_cli.py mcp list")
-    tools = RUNTIME.call(mcp_external.inspectServer(servers[name]), INSPECT_SECONDS)
+    try:
+        tools = RUNTIME.call(mcp_external.inspectServer(servers[name]), INSPECT_SECONDS)
+    except Exception as error:
+        raise ValueError(f"SwarmUP could not connect to {name}: {mcp_external.describeProblem(error)}") from None
     print(mcp_external.describeInspection(name, tools))
     warned = any(tool["findings"] for tool in tools)
     if warned:
@@ -81,8 +74,8 @@ def runMcp(options, ask=input):
         print(f"{options.name} is removed.")
     elif options.action == "add":
         agents = "all" if options.agents.strip() in ("", "all") else [name.strip() for name in options.agents.split(",") if name.strip()]
-        mcp_external.addServer(options.name, "http" if options.url else "stdio", options.command, shlex.split(options.args), pairs(options.env), options.url,
-                               pairs(options.header), agents)
+        mcp_external.addServer(options.name, "http" if options.url else "stdio", options.program, shlex.split(options.args), mcp_external.readPairs(options.env), options.url,
+                               mcp_external.readPairs(options.header), agents)
         print(f"{options.name} is added. Nothing is given to the agents before you approve it:")
         approve(options.name, options.yes, ask)
     else:

@@ -224,7 +224,11 @@ task (everything you did and made, not only this change), even when nothing else
 
 
 OLD_RESULT = "[This old result was taken out to keep the conversation short. Ask again if you need it.]"
-CUT_CALL = "your answer was cut because it was too long, so this call is incomplete. Do the work in smaller steps (for example files__edit_file instead of files__write_file)."
+CUT_CALL = "your answer was cut because it was too long, so this call is incomplete. Do the work in smaller steps: write the first part of a long file with files__write_file, then add each next part with files__write_file and append true."
+OLD_STEPS = "[Older steps of this conversation were taken out to fit the memory of the GPUs. Your task above stays. Keep notes of what you need with memory__keep_note.]"
+CUT_CALLS = "Your long calls could not be run: they were cut, or their text was not valid JSON. Do not call a tool now: write your whole work as your answer, in words. It can be as long as it needs, and it is kept as your result."
+CUT_ANSWER = "Your answer was cut because it was too long. Go on from the exact word where it stopped, without repeating anything and without an introduction."
+CUT_RESULT = "\n[The rest of this result was taken out: it is too long for the memory of the GPUs. Read smaller parts (like 200 lines at a time), and keep notes of what you need.]"
 LAST_STEP = "You have one step left for this request: give your answer now, without calling any tool."
 
 

@@ -9,6 +9,7 @@ from harness_utils import FETCH_ERRORS, describeError
 from interface_views import FormError, describeDownload, describeModel, describePrice
 from internet_cache import getModelCost
 from mission_costs import formatDollars
+from model_adapters import USER_LEADER, UserLeader
 from model_support import ModelError, findMissingPackages, getApiKey, isDownloaded, lookupHuggingFace
 from models_library import API_KEYS, BITS, DEFAULT_CLI_MODEL, MODELS_API, MODELS_CLI, MODELS_LOCAL, RECOMMENDED_API, RECOMMENDED_LOCAL, getModelInfo, isGated
 from swarm_harness import Swarm
@@ -16,6 +17,18 @@ from tasks_library import TASKS, buildLoop, describeLoop, getTask, publicAnswers
 
 
 TEST_PROMPT = "Reply with the single word OK."
+
+
+# What UserLeader needs to speak to the user: in the window, what it says goes to the conversation, and what it asks is a question of the leader.
+class SessionConsole:
+    def __init__(self, session):
+        self.session = session
+
+    def say(self, text, window=None):
+        self.session.notify(window, text)
+
+    def ask(self, question, window=None):
+        return str(self.session.ask(window, question) or "")
 
 
 # The models of the agents (Session in session_core.py): the lists to choose from with the checks of the GPUs and of the budget,
@@ -92,6 +105,8 @@ class SessionModels:
     def chooseModel(self, payload):
         spec = self.findSpec(payload.get("agentId"))
         self.checkIdle(spec)
+        if payload.get("user"):
+            return self.leadYourself(spec)
         name = str(payload.get("name", "")).strip()
         if payload.get("cli"):
             info = getModelInfo(name, cli=payload["cli"])
@@ -131,6 +146,19 @@ class SessionModels:
         spec.update(model=info, client=client, missing=findMissingPackages(info), tested="")
         self.dirty = self.dirty or not spec.get("pending")
         return {"warning": check["message"] if info["local"] else over, "missing": spec["missing"], "download": describeDownload(info) if info["local"] else None}
+
+    # The user leads the swarm instead of a model: what the swarm asks the model of the leader comes to the user as a question of the leader.
+    def leadYourself(self, spec):
+        if self.specs[0] is not spec or spec["task"] == "leader":
+            raise ValueError("Only the first agent of a swarm that you build, the leader, can be you.")
+        if hasattr(spec["client"], "unload"):
+            spec["client"].unload()
+        spec.update(model=dict(USER_LEADER), client=self.userLeader(spec["name"]), missing=[], tested="")
+        self.dirty = True
+        return {"warning": "", "missing": [], "download": None}
+
+    def userLeader(self, name):
+        return UserLeader(SessionConsole(self), name)
 
     # ---------- Agents that join or leave the swarm while it runs (or between two runs, keeping what was approved). ----------
     # A new agent joins the group that works now (see Swarm.addAgent): it can wait for agents already there, and nobody waits for it.

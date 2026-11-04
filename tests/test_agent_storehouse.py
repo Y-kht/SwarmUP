@@ -158,6 +158,51 @@ class ReadTests(StorehouseTestCase):
             with self.assertRaisesRegex(ValueError, "pip install pypdf"):
                 self.read("paper.pdf")
 
+    # A PDF is mostly its pictures: its text is far smaller than the file, so it may be bigger than a text file.
+    def testADocumentMayBeBiggerThanATextFile(self):
+        (self.work / "paper.pdf").write_bytes(b"%PDF-1.4 and many pictures")
+        (self.work / "notes.md").write_text("many words, too many to be read")
+        with mock.patch.object(agent_storehouse, "MAX_READ_BYTES", 10), mock.patch.object(agent_storehouse, "readPdf", return_value="The text of the paper."):
+            self.assertIn("The text of the paper.", self.read("paper.pdf"))
+            with self.assertRaisesRegex(ValueError, "too many to be read"):
+                self.read("notes.md")
+            with mock.patch.object(agent_storehouse, "MAX_DOCUMENT_BYTES", 10), self.assertRaisesRegex(ValueError, "too many to be read"):
+                self.read("paper.pdf")
+
+    # A search reads what an agent can read: the text of a PDF or of a Word document, never the bytes of its file.
+    def testASearchReadsTheTextOfDocumentsWithTheLinesOfReadFile(self):
+        (self.work / "paper.pdf").write_bytes(b"%PDF-1.4\n<xmp:CreatorTool>a tool of the raw file</xmp:CreatorTool>\n")
+        pages = "Learning from experience\nAgents keep a skill library\nof what worked."
+        with mock.patch.object(agent_storehouse, "readPdf", return_value=pages):
+            self.assertEqual(searchFiles(self.work, "skill library"), "- paper.pdf:2: Agents keep a skill library")
+            self.assertIn("No text file", searchFiles(self.work, "CreatorTool"))
+            self.assertIn("2\tAgents keep a skill library", self.read("paper.pdf"))
+
+    def testASearchFindsWordsThatALineOfADocumentCutsInTwo(self):
+        (self.work / "paper.pdf").write_bytes(b"%PDF-1.4")
+        with mock.patch.object(agent_storehouse, "readPdf", return_value="They use tool\ncreation at run time.\nNothing else."):
+            self.assertEqual(searchFiles(self.work, "tool creation"), "- paper.pdf:1: They use tool")
+
+    def testASearchSaysWhichDocumentsItCouldNotRead(self):
+        (self.work / "paper.pdf").write_bytes(b"%PDF-1.4")
+        with mock.patch.dict(sys.modules, {"pypdf": None}):
+            answer = searchFiles(self.work, "wasps")
+        self.assertIn("No text file of the folder contains wasps.", answer)
+        self.assertIn("paper.pdf", answer)
+        self.assertIn("pip install pypdf", answer)
+
+    # A long document is read once: searching six papers again and again must not read them again and again.
+    def testADocumentIsOnlyExtractedAgainWhenItChanges(self):
+        path = self.work / "paper.pdf"
+        path.write_bytes(b"%PDF-1.4")
+        with mock.patch.object(agent_storehouse, "readPdf", return_value="Some text.") as reader:
+            agent_storehouse.extractText(path)
+            agent_storehouse.extractText(path)
+            self.assertEqual(reader.call_count, 1)
+            path.write_bytes(b"%PDF-1.4 and more")
+            agent_storehouse.extractText(path)
+            self.assertEqual(reader.call_count, 2)
+
     def testNothingOutsideTheFolderCanBeRead(self):
         (self.files / "secret.txt").write_text("secret")
         for path in ("../secret.txt", str(self.files / "secret.txt")):

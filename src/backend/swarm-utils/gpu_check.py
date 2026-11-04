@@ -95,8 +95,10 @@ def readGpus():
 
 # What the GPUs can host, in GB. total is all their memory, and free is what no other job uses at this moment, which keeps changing.
 # fits says the swarm could run on these GPUs if nothing else used them, and runnable says it can run right now.
-def checkVram(needed, gpus):
-    total, free = round(sum(gpu["total"] for gpu in gpus), 1), round(sum(gpu["free"] for gpu in gpus), 1)
+# own is what the models of the swarm already hold: it is part of what the swarm needs, so it is free for the swarm, and no other job uses it.
+def checkVram(needed, gpus, own=0.0):
+    total = round(sum(gpu["total"] for gpu in gpus), 1)
+    free = round(min(sum(gpu["free"] for gpu in gpus) + own, total), 1)
     used = round(total - free, 1)
     message = ""
     if needed and not gpus:

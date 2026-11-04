@@ -17,7 +17,7 @@ from agent_journal import Journal
 from architect_loop import ArchitectLoop, pickArchitect
 from architect_manager import ArchitectManager, attachArchitect
 from cli_models import USER_LEADER
-from cli_program import chooseArchitect
+from cli_program import chooseArchitect, closeArchitect
 from harness_utils import ARCHITECT_NAME
 from leader_manager import LeaderManager
 from mcp_gateway import Gateway
@@ -159,6 +159,56 @@ class LifecycleTests(ArchitectTestCase):
                              for line in swarm.journal.path.read_text().splitlines()))
 
     # What does not repeat yet is refused as a wheel: the architect writes a note instead, which the architects of every project read.
+    # A small model lists patterns kind after kind until its steps are over: after a few lists it is told to decide, and it starts from a pattern in its prompt.
+    def testAPassStartsFromAPatternAndAModelThatOnlyListsIsToldToDecide(self):
+        self.earlierMission()
+        chat = ArchitectChat([call("architect__read_patterns", number, status="repeating", kind=f"kind{number}") for number in range(4)])
+        swarm, architect = self.swarm(chat)
+        self.runSwarm(swarm)
+        waitUntil(lambda: architect.reports, "the pass")
+        self.assertIn("DECIDE ABOUT THIS PATTERN FIRST", chat.prompts[0])
+        self.assertIn("you have read enough lists", " ".join(chat.prompts))
+
+    # A small model leaves out which patterns its wheel covers: it covers the pattern it was asked to decide about.
+    def testAWheelWithoutCoversCoversThePatternOfThePass(self):
+        self.earlierMission()
+        chat = ArchitectChat([call("architect__save_wheel", 1, name="install_and_test", kind="script", code=WHEEL)])
+        swarm, architect = self.swarm(chat)
+        self.runSwarm(swarm)
+        waitUntil(lambda: architect.reports, "the pass")
+        self.assertIn("install_and_test", catalogFor(self.project))
+        self.assertTrue(catalogFor(self.project)["install_and_test"]["covers"])
+
+    # A small local model decides about one pattern at a time, with only the tools of a decision; a model of an API has the whole brief.
+    def testALocalModelDecidesAboutOnePatternAtATime(self):
+        self.earlierMission()
+        chat = ArchitectChat([say("Dismissed.")] * 5)
+        local = getModelInfo("Qwen/Qwen3-8B")
+        swarm, architect = self.swarm(chat, choice=local)
+        self.runSwarm(swarm)
+        waitUntil(lambda: architect.reports, "the pass")
+        self.assertIn("Decide about this one pattern now", chat.prompts[0])
+        self.assertLessEqual(len(chat.prompts), architect_manager.GUIDED_PATTERNS)
+        self.assertEqual(sorted(chat.tools[0]), sorted(f"architect__{tool}" for tool in architect_manager.GUIDED_TOOLS))
+        self.assertIn("#", architect.reports[-1]["text"])
+
+    def testAModelOfAnApiKeepsTheWholeBriefAndAllItsTools(self):
+        self.earlierMission()
+        chat = ArchitectChat()
+        swarm, architect = self.swarm(chat)
+        self.runSwarm(swarm)
+        waitUntil(lambda: architect.reports, "the pass")
+        self.assertIn("DECIDE ABOUT THIS PATTERN FIRST", chat.prompts[0])
+        self.assertIn("architect__read_patterns", chat.tools[0])
+
+    def testAWheelWithoutCoversCoversThePatternOfThePassAlsoInAGuidedPass(self):
+        self.earlierMission()
+        chat = ArchitectChat([call("architect__save_wheel", 1, name="install_and_test", kind="script", code=WHEEL), say("Saved.")])
+        swarm, architect = self.swarm(chat, choice=getModelInfo("Qwen/Qwen3-8B"))
+        self.runSwarm(swarm)
+        waitUntil(lambda: architect.reports, "the pass")
+        self.assertTrue(catalogFor(self.project)["install_and_test"]["covers"])
+
     def testWhatDoesNotRepeatYetBecomesANote(self):
         self.earlierMission(times=2)
         chat = ArchitectChat([lambda loop: call("architect__save_wheel", 1, name="install_and_test", kind="script", code=WHEEL, covers=[patternId(loop, "fix")], why="x"),
@@ -169,6 +219,9 @@ class LifecycleTests(ArchitectTestCase):
         original = architect.ensureLoop
         architect.ensureLoop = lambda: setattr(chat, "loop", original()) or chat.loop
         self.runSwarm(swarm)
+        # The run did too little for a last pass of its own: when the architect is at rest, this test asks for one.
+        waitUntil(lambda: architect.thread is None, "the end of the work of the architect")
+        architect.service = MINERS.acquire(self.project, id(architect))
         architect.runPass("end")
         self.assertEqual(readCatalog()["wheels"], {})
         self.assertIn("None of these patterns repeats yet", chat.prompts[1])
@@ -204,6 +257,50 @@ class LifecycleTests(ArchitectTestCase):
         waitUntil(lambda: architect.state == "idle", "the end of the pass", 5)
         self.assertIsNone(architect.thread)
         self.assertIsNone(MINERS.get(self.project))
+
+    # The last pass of a run is what the swarm learned: the user who ends the mission at once does not cut it.
+    def testEndingTheMissionWaitsForTheLastPassOfTheArchitect(self):
+        self.earlierMission()
+        chat = ArchitectChat([say("One.")], delay=0.3)
+        swarm, architect = self.swarm(chat)
+        self.runSwarm(swarm)
+        said = []
+        closeArchitect(swarm, types.SimpleNamespace(say=said.append))
+        self.assertEqual(architect.state, "idle")
+        self.assertEqual(architect.reports[-1]["outcome"], "done")
+        self.assertIsNone(architect.thread)
+        self.assertTrue(any("what it learned" in text for text in said))
+
+    def testNoLastPassMeansNothingToWaitFor(self):
+        swarm, architect = self.swarm(ArchitectChat())
+        said = []
+        started = time.monotonic()
+        closeArchitect(swarm, types.SimpleNamespace(say=said.append))
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertEqual(said, [])
+
+    # A local model of its own holds the memory of a GPU only while the architect works: the agents need it the rest of the time.
+    def testAModelOfItsOwnLetsItsMemoryGoAfterEachPass(self):
+        self.earlierMission()
+        chat = ArchitectChat([say("One.")])
+        unloaded = []
+        chat.unload = lambda: unloaded.append(True)
+        swarm, architect = self.swarm(chat)
+        self.runSwarm(swarm)
+        waitUntil(lambda: architect.reports, "the last pass")
+        waitUntil(lambda: unloaded, "the memory of its model to be let go")
+        architect.close()
+        self.assertGreaterEqual(len(unloaded), 1)
+
+    def testASharedModelIsNotUnloadedByTheArchitect(self):
+        self.earlierMission()
+        chat = ArchitectChat([say("One.")])
+        unloaded = []
+        chat.unload = lambda: unloaded.append(True)
+        swarm, architect = self.swarm(chat)
+        architect.how = "share"
+        architect.unloadModel()
+        self.assertEqual(unloaded, [])
 
     def testAShareOfTheBudgetIsTheMostTheArchitectSpends(self):
         swarm, architect = self.swarm(ArchitectChat())

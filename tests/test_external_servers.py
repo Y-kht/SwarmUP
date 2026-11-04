@@ -1,14 +1,19 @@
+import contextlib
+import io
+import os
 import sys
 import tempfile
 import unittest
 from patching import everywhere
 from pathlib import Path
+from unittest import mock
 
 # The modules of SwarmUP are in the folders of src/backend. Their names have hyphens, so they are not packages: each folder goes on the path.
 sys.path[:0] = [str(folder) for folder in sorted((Path(__file__).resolve().parent.parent / "src" / "backend").iterdir()) if folder.is_dir() and not folder.name.startswith(("_", "."))]
 import cli_mcp
 import harness_utils
 import mcp_external
+import swarmup_cli
 from base_loop import Loop
 from mcp_gateway import Gateway
 from mcp_runtime import RUNTIME
@@ -83,6 +88,29 @@ class ApprovalTests(ExternalTestCase):
         self.assertEqual(self.names(self.loop("Editor")), [])
 
 
+class FileTests(ExternalTestCase):
+    # What is given to a server can be a token, so only the user can read the file of the servers.
+    @unittest.skipIf(os.name == "nt", "the rights of a file are those of Windows there")
+    def testOnlyTheUserCanReadTheFileOfTheServers(self):
+        mcp_external.addServer("secret_one", "stdio", command="x", env={"TOKEN": "abc"})
+        self.assertEqual(mcp_external.configPath().stat().st_mode & 0o777, 0o600)
+        mcp_external.configPath().chmod(0o644)
+        mcp_external.addServer("secret_two", "stdio", command="x")
+        self.assertEqual(mcp_external.configPath().stat().st_mode & 0o777, 0o600)
+
+    def testAProblemIsSaidInTheWordsOfItsFirstRealError(self):
+        class Group(Exception):
+            def __init__(self, *exceptions):
+                self.exceptions = exceptions
+        self.assertEqual(mcp_external.describeProblem(Group(Group(ConnectionError("All connection attempts failed")))), "All connection attempts failed")
+        self.assertEqual(mcp_external.describeProblem(ValueError("simple")), "simple")
+
+    def testThePairsAreRead(self):
+        self.assertEqual(mcp_external.readPairs(["A=1", "B = two=2"]), {"A": "1", "B": " two=2"})
+        with self.assertRaisesRegex(ValueError, "is not KEY=VALUE"):
+            mcp_external.readPairs(["nothing"])
+
+
 class RugPullTests(ExternalTestCase):
     def testAToolThatChangesIsHiddenAndTheUserIsTold(self):
         self.add()
@@ -110,6 +138,35 @@ class RugPullTests(ExternalTestCase):
         fresh = window.mcpInspect({"name": "calc"})["inspection"]
         window.mcpApprove({"name": "calc", "hashes": [tool["hash"] for tool in fresh]})
         self.assertTrue(mcp_external.loadServers()["calc"]["approved"])
+
+
+# The whole command line, from its arguments: an option of a command must not take the place of the name of the command.
+class MainTests(ExternalTestCase):
+    def main(self, *arguments):
+        printed = io.StringIO()
+        with mock.patch.object(swarmup_cli, "startDaemon", side_effect=AssertionError("a session must not start")), contextlib.redirect_stdout(printed):
+            swarmup_cli.main(list(arguments))
+        return printed.getvalue()
+
+    def testTheCommandsOfTheServersRunWithOrWithoutAProgram(self):
+        self.assertIn("No MCP server yet", self.main("mcp", "list"))
+        output = self.main("mcp", "add", "calc", "--command", sys.executable, "--args", FIXTURE, "--env", "A=1", "--yes")
+        self.assertIn("calc is added", output)
+        self.assertEqual(mcp_external.loadServers()["calc"]["command"], sys.executable)
+        self.assertEqual(mcp_external.loadServers()["calc"]["env"], {"A": "1"})
+        self.assertIn("calc", self.main("mcp", "list"))
+        self.assertIn("calc is removed", self.main("mcp", "remove", "calc"))
+
+    def testAServerThatCannotBeReachedIsSaidInWords(self):
+        with self.assertRaises(SystemExit) as caught, contextlib.redirect_stderr(io.StringIO()) as said:
+            with mock.patch.object(cli_mcp.RUNTIME, "call", side_effect=OSError("All connection attempts failed")):
+                self.main("mcp", "add", "far_one", "--url", "http://127.0.0.1:1/mcp", "--yes")
+        self.assertEqual(caught.exception.code, 1)
+        self.assertIn("could not connect to far_one: All connection attempts failed", said.getvalue())
+
+    def testEveryOptionKeepsTheNameOfItsCommand(self):
+        for arguments in (["patterns", "--kind", "error"], ["wheels", "list", "--project", "x"], ["calls", "1", "--agent", "A"], ["history", "--json"], ["mcp", "list", "--url", "u"], ["mcp", "add", "x", "--command", "y"]):
+            self.assertEqual(swarmup_cli.makeParser().parse_args(arguments).command, arguments[0])
 
 
 class CommandLineTests(ExternalTestCase):

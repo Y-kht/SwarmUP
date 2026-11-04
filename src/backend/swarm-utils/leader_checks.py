@@ -332,7 +332,7 @@ class LeaderChecks:
             extra = {key: value for key, value in extra.items() if letters(key) not in ACTION_KEYS and (letters(key) not in IGNORED_KEYS or squash(key) in fields)}
             values, problems = self.readSettings(task, {**extra, **settings})
             errors += problems
-            answers, missing, problems = self.readAnswers(task, values)
+            answers, missing, problems = self.readAnswers(task, values, bool(waits))
             errors += [f"{key}: {problem}" if key else problem for key, problem in problems]
             description = self.describe(task, answers, missing)
         else:
@@ -344,14 +344,17 @@ class LeaderChecks:
                 "price": self.describePrice(info) if info else "", "wheels": wheels}
 
     # The answers of the task from the values. The settings the leader did not give, and that are needed (a password, the address of the user),
-    # are what the user must give: the fields of missing. A value the leader gave that is wrong is an error for the leader.
-    def readAnswers(self, task, values):
+    # are what the user must give: the fields of missing. A value the leader gave that is wrong is an error for the leader. A file that does not
+    # exist yet is no error for an agent that waits for others (it formats or checks what they write): it is read when the agent starts.
+    def readAnswers(self, task, values, waits=False):
         answers, problems = readAnswers(task, values)
         fields = {field["key"]: field for field in getFields(task)}
         missing, errors = [], []
         for key, problem in problems.items():
             field = fields.get(key)
-            if field and values.get(key) in (None, "", [], {}) and (field["kind"] in SECRET_KINDS or field.get("required")):
+            if waits and field and field["kind"] == "file" and str(values.get(key) or "").strip():
+                answers[key] = str(values[key]).strip()
+            elif field and values.get(key) in (None, "", [], {}) and (field["kind"] in SECRET_KINDS or field.get("required")):
                 missing.append({**field, "problem": ""})
             else:
                 errors.append((key, problem))

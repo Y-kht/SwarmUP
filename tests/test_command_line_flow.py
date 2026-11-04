@@ -6,6 +6,7 @@ import re
 import sys
 import tempfile
 import threading
+import types
 import unittest
 from datetime import datetime
 from patching import everywhere
@@ -15,6 +16,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 # The modules of SwarmUP are in the folders of src/backend. Their names have hyphens, so they are not packages: each folder goes on the path.
 sys.path[:0] = [str(folder) for folder in sorted((Path(__file__).resolve().parent.parent / "src" / "backend").iterdir()) if folder.is_dir() and not folder.name.startswith(("_", "."))]
+import cli_models
 import swarmup_cli as cli
 import harness_utils
 from base_loop import Loop
@@ -781,7 +783,7 @@ class ModelFlowCase(GpuTestCase):
 
 class LocalModelTests(ModelFlowCase):
     def testTheFirstListOnlyShowsTheModelsThatFitAndTheOthersAreRefused(self):
-        script = Script(["1", "4", "2", "4", "1"])
+        script = Script(["1", "4", "2", "4", "2", "1"])
         info, model = self.choose(script)
         text = script.text()
         self.assertEqual(info["name"], "google/gemma-4-E4B-it")
@@ -814,6 +816,20 @@ class LocalModelTests(ModelFlowCase):
         self.assertIn("[too big for the GPUs]", cli.labelLocal(self.swarm, "meta-llama/Llama-3.3-70B-Instruct"))
         self.assertNotIn("[", cli.labelLocal(self.swarm, "microsoft/Phi-4-mini-instruct"))
         self.assertIn("[too big for the GPUs]", cli.labelLocal(self.swarm, "google/gemma-4-31B-it"))
+
+    # The window and the leader can choose a compressed model: the command line offers it when a model does not fit.
+    def testAModelThatIsTooBigCanBeCompressed(self):
+        big = cli_models.getModelInfo("Qwen/Qwen3-8B")
+        swarm = types.SimpleNamespace(checkModel=lambda info, replacing=None: {"allowed": info["bits"] < 16})
+        script = Script(["1"])
+        chosen = cli_models.offerCompressed(script.console(), swarm, big, None)
+        self.assertEqual((chosen["name"], chosen["bits"], chosen["vram"]), ("Qwen/Qwen3-8B", 8, 9.8))
+        self.assertIn("8 bits: it needs 9.8 GB of VRAM", script.text())
+        self.assertIn("4 bits: it needs 4.9 GB of VRAM", script.text())
+        self.assertEqual(cli_models.offerCompressed(Script(["2"]).console(), swarm, big, None)["bits"], 4)
+        self.assertIsNone(cli_models.offerCompressed(Script(["3"]).console(), swarm, big, None))
+        tight = types.SimpleNamespace(checkModel=lambda info, replacing=None: {"allowed": False})
+        self.assertIsNone(cli_models.offerCompressed(Script([]).console(), tight, big, None))
 
     def testWhenTheSwarmFillsTheGpusNoOtherLocalModelCanBeChosenButApiModelsCan(self):
         self.add(Script(["1", "2"]), "Writer", 1, 3)

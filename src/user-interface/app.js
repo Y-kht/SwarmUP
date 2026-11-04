@@ -206,7 +206,7 @@ function renderModal() {
     const modal = ui.modal;
     const builders = {
       tasks: taskPickerModal, agent: agentFormModal, browse: browseModal, model: modelPickerModal, help: helpModal, stop: stopModal, cancel: cancelModal,
-      join: joinModal, removeAgent: removeAgentModal, settings: settingsModal, deleteMission: deleteMissionModal, calls: callsModal,
+      join: joinModal, removeAgent: removeAgentModal, settings: settingsModal, deleteMission: deleteMissionModal, calls: callsModal, wheel: wheelModal, retireWheel: retireWheelModal, pattern: patternModal,
       quit: () => confirmModal({ title: 'Quit SwarmUP?', iconName: 'power', confirm: 'Quit', danger: true, text: store.state.tabs.some(tab => ['running', 'waiting'].includes(tab.state)) ? 'Some missions are running. They are saved now, and you can continue them at the next start.' : 'Every mission that ran stays in the history. A team you built but did not run is lost when you quit.',
         run: async () => { const data = await act('quit', {}, { busy: 'confirm' }); if (data) document.body.replaceChildren(h('div', { class: 'splash' }, h('div', { class: 'splash-logo' }, logo()), h('div', { class: 'splash-text' }, data.message))); } }),
       confirmNew: () => confirmModal({ title: 'Start a new swarm in this tab?', iconName: 'plus', confirm: 'Start a new swarm', danger: true, text: 'The mission, the agents and their models of this tab are cleared (a mission that ran stays in the history). To keep them, open a new mission in the sidebar instead. The API keys you gave stay in memory.',
@@ -219,7 +219,7 @@ function renderModal() {
   layer.onclick = () => { if (!questions.length || ui.view === 'run') { if (ui.modal && ['help', 'tasks'].includes(ui.modal.type)) closeModal(); } };
 }
 
-const VIEWS = { home: viewHome, mission: viewMission, agents: viewAgents, folders: viewFolders, models: viewModels, teamwork: viewTeamwork, launch: viewLaunch, run: viewRun, resume: viewResume };
+const VIEWS = { home: viewHome, mission: viewMission, agents: viewAgents, folders: viewFolders, models: viewModels, teamwork: viewTeamwork, launch: viewLaunch, run: viewRun, resume: viewResume, learning: viewLearning };
 
 
 // ==============

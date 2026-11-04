@@ -25,7 +25,14 @@ class MathCheckLoop(Loop):
     def __init__(self, agent, filePath, numberOfLoops=5):
         super().__init__(agent, numberOfLoops, "MATH_CHECK_RULES.md")
         self.path = Path(filePath)
-        self.original = self.path.read_text(encoding="utf-8")
+        self.text = None
+
+    # The text may be the work of an agent this one waits for, so it is read when the agent starts.
+    @property
+    def original(self):
+        if self.text is None:
+            self.text = self.path.read_text(encoding="utf-8")
+        return self.text
 
     def describeTask(self):
         return f"Referee the mathematical text {self.path.name}: check its theorems, proofs and logic, and report every gap or error."
@@ -72,6 +79,9 @@ class MathCheckLoop(Loop):
         return ""
 
     def run(self):
+        if not self.path.is_file():
+            self.notifyUser(f"There is no file at {self.path}: nothing to check.")
+            return None
         task = prompts.MATH_CHECK_PROMPT.format(findingFormat=prompts.FINDING_FORMAT, document=self.original)
         report = self.reviewLoop(task, self.checkReport, key="report")
         if report is None:

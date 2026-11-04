@@ -194,7 +194,7 @@ class AgentLink:
                     try:
                         self.sessions[name] = await stack.enter_async_context(mcp_external.openSession(config, self.callbacks(name, False)))
                     except Exception as error:
-                        self.notice(f"The MCP server {name} could not start, so its tools are not given: {error}")
+                        self.notice(f"The MCP server {name} could not start, so its tools are not given: {mcp_external.describeProblem(error)}")
                         continue
                     self.trusted[name], self.configs[name] = False, config
                 self.closing = asyncio.Event()

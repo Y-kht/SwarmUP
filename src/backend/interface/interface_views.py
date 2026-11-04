@@ -38,6 +38,8 @@ class FormError(ValueError):
 def describeModel(info):
     if not info:
         return None
+    if info.get("user"):
+        return {**info, "company": "", "gated": False, "label": "You lead it"}
     cli = info.get("cli")
     if cli:
         agent = MODELS_CLI[cli]
@@ -50,7 +52,7 @@ def describeModel(info):
 
 # Whether a model can be made without asking anything more: a local model, Codex (signed in through Codex), or a model with its API key.
 def hasCredentials(info, keys):
-    return bool(info["local"] or info.get("cli") == "codex" or keys.get(info["provider"]) or getApiKey(info["provider"]))
+    return bool(info["local"] or info.get("user") or info.get("cli") == "codex" or keys.get(info["provider"]) or getApiKey(info["provider"]))
 
 
 # What kind of question the agents ask, and the buttons that answer it. The text box stays for every question that takes words.

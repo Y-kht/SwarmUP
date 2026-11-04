@@ -15,7 +15,8 @@ import pattern_store
 from agent_journal import Journal
 from cli_patterns import addPatternArguments, runPatterns, runWheels
 from miner_service import LOCK_FILE, MINERS, MinerService, ProjectLock
-from pattern_digest import renderBrief, renderPattern, renderTable, searchJournal
+from pattern_digest import draftForStreak, focusPatterns, renderBrief, renderFocus, renderPattern, renderTable, searchJournal
+from wheel_checks import checkWheel
 from pattern_errors import classifyError
 from pattern_miner import Miner, forgetMission
 from pattern_registry import findNotes, saveNote
@@ -539,6 +540,50 @@ class DigestTests(MinerTestCase):
         self.assertLessEqual(len(renderBrief(miner.store, self.project, chars=800)), 800)
         table = renderTable(miner.store)
         self.assertIn("#", table)
+
+    # What no wheel can do only fills the brief: a call of the leader, or a call a model repeats. The focus starts with what costs steps, not with what only reads.
+    def testTheBriefLeavesOutWhatNoWheelCanDoAndTheFocusStartsWithACostlyPattern(self):
+        for mission in ("m1", "m2"):
+            self.habit(mission)
+            journal = self.journalOf(mission)
+            for number in range(4):
+                journal.add("bad", "Leader", id=f"b{number}", name="leader__remove_agent", why="repeated", problem="you already made this same call")
+                self.call(mission, "Leader", "remove_agent", {"name": "Coder"}, server="leader", number=number)
+                self.call(mission, "Coder", "read_file", {"path": "notes.md"}, number=number, size=9000, result="x" * 9000)
+        miner = self.miner()
+        while miner.poll():
+            pass
+        store = miner.store
+        brief = renderBrief(store, self.project)
+        self.assertNotIn("leader__remove_agent", brief)
+        rows = focusPatterns(store)
+        self.assertTrue(rows)
+        self.assertFalse(any("leader__" in row["shape"] for row in rows))
+        self.assertIn(rows[0]["kind"], ("fix", "error", "sequence", "command", "streak"))
+        focus = renderFocus(store)
+        self.assertTrue(focus.startswith("DECIDE ABOUT THIS PATTERN FIRST:"))
+        self.assertIn(f"#{rows[0]['id']}", focus)
+        self.assertIn("<data from=\"journal\">", focus)
+
+    def testADraftForAStreakIsAWheelThatPassesTheChecks(self):
+        row = {"kind": "streak", "shape": "files__read_file(line_count, path, start_line, document.pdf)"}
+        draft = draftForStreak(row)
+        manifest = json.loads(draft[draft.index("{"):])
+        self.assertEqual(manifest["steps"], [{"tool": "files__read_file", "each": "items", "arguments": {"path": "{item}"}}])
+        self.assertIn("read file for each path", manifest["summary"])
+        covers = [{"fp": "f1", "status": "repeating", "kind": "streak", "data": {}}]
+        self.assertEqual(checkWheel(json.dumps(manifest), "steps", manifest["name"], covers, "project", {})[1], [])
+        searching = draftForStreak({"kind": "streak", "shape": "files__search_files(path, text, folder)"})
+        self.assertEqual(json.loads(searching[searching.index("{"):])["steps"][0]["arguments"], {"text": "{item}"})
+        self.assertEqual(draftForStreak({"kind": "error", "shape": "x"}), "")
+        self.assertEqual(draftForStreak({"kind": "streak", "shape": "leader__add_agent(name)"}), "")
+
+    def testNoFocusWithoutAPatternThatRepeats(self):
+        self.habit("m1")
+        miner = self.miner()
+        while miner.poll():
+            pass
+        self.assertEqual(renderFocus(miner.store), "")
 
     def testAPatternIsShownWithExamplesFromTheJournalsMarkedAsData(self):
         miner = self.miner()

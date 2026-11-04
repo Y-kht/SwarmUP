@@ -31,6 +31,11 @@ SKIPPED_FOLDERS = {"__pycache__", "node_modules", "venv", "env", "site-packages"
 TREE_LIMIT = 200
 SCAN_LIMIT = 20000
 MAX_READ_BYTES = 20000000
+# A PDF or a Word document is mostly its pictures: its text is much smaller than the file.
+MAX_DOCUMENT_BYTES = 300000000
+DOCUMENT_SUFFIXES = (".pdf", ".docx")
+DOCUMENTS_KEPT = 64
+documentTexts = {}
 FIND_LIMIT = 100
 SEARCH_LIMIT = 80
 SEARCH_FILE_BYTES = 2000000
@@ -219,6 +224,17 @@ def readDocx(path):
     return "\n".join("".join(node.text or "" for node in paragraph.iter(f"{WORD_NAMESPACE}t")) for paragraph in document.iter(f"{WORD_NAMESPACE}p"))
 
 
+# The text of a document, kept while the file stays as it is: a search reads every document of the folder, again and again.
+def readDocument(path, modified, size):
+    key = (str(path), modified, size)
+    if key not in documentTexts:
+        text = readDocx(path) if path.suffix.lower() == ".docx" else readPdf(path)
+        while len(documentTexts) >= DOCUMENTS_KEPT:
+            documentTexts.pop(next(iter(documentTexts)))
+        documentTexts[key] = text
+    return documentTexts[key]
+
+
 def readPdf(path):
     try:
         import pypdf
@@ -232,13 +248,12 @@ def readPdf(path):
 
 # The text of a file. Text files in UTF-8 (or UTF-16), Word documents and PDF files are read. Other binary files are refused.
 def extractText(path):
-    size = path.stat().st_size
-    if size > MAX_READ_BYTES:
+    status = path.stat()
+    size = status.st_size
+    if size > (MAX_DOCUMENT_BYTES if path.suffix.lower() in DOCUMENT_SUFFIXES else MAX_READ_BYTES):
         raise ValueError(f"{path.name} has {size:,} bytes, too many to be read.")
-    if path.suffix.lower() == ".docx":
-        return readDocx(path)
-    if path.suffix.lower() == ".pdf":
-        return readPdf(path)
+    if path.suffix.lower() in DOCUMENT_SUFFIXES:
+        return readDocument(path, status.st_mtime_ns, size)
     data = path.read_bytes()
     if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
         return data.decode("utf-16", errors="replace")
@@ -267,21 +282,35 @@ def searchFiles(folder, words):
     wanted, root, hits = comparable(cleanRequest(words)), Path(folder).resolve(), []
     if not wanted:
         raise ValueError("Write the words to search for.")
+    unread = []
     for path, size in scanFolder(root)["files"]:
-        if size is None or size > SEARCH_FILE_BYTES:
+        document = Path(path).suffix.lower() in DOCUMENT_SUFFIXES
+        if size is None or (size > SEARCH_FILE_BYTES and not document):
             continue
         try:
-            data = (root / path).read_bytes()
+            lines = searchableLines(root / path, document)
         except OSError:
             continue
-        if b"\0" in data[:BINARY_PROBE]:
+        except ValueError as error:
+            unread.append(str(error))
             continue
-        for number, line in enumerate(data.decode("utf-8", errors="replace").splitlines(), 1):
-            if wanted in comparable(line):
+        for number, line in enumerate(lines, 1):
+            # In a document, a line ends where the page ends it: the words can go on in the next line.
+            following = lines[number] if document and number < len(lines) else ""
+            if wanted in comparable(line) or (following and wanted not in comparable(following) and wanted in comparable(f"{line} {following}")):
                 hits.append(f"- {path}:{number}: {line.strip()[:LINE_CHARS]}")
                 if len(hits) >= SEARCH_LIMIT:
                     return "\n".join(hits) + "\n- ... more lines match: search for more precise words."
-    return "\n".join(hits) or f"No text file of the folder contains {cleanRequest(words)}."
+    found = "\n".join(hits) or f"No text file of the folder contains {cleanRequest(words)}."
+    return found + (f"\nThese files could not be searched: {' '.join(unread)}" if unread else "")
+
+
+# The lines of a file as files__read_file numbers them. A file that is not text has none.
+def searchableLines(path, document):
+    if document:
+        return extractText(path).splitlines()
+    data = path.read_bytes()
+    return [] if b"\0" in data[:BINARY_PROBE] else data.decode("utf-8", errors="replace").splitlines()
 
 
 # ==============

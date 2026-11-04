@@ -26,6 +26,7 @@ DEFAULT_SECONDS = 120
 MAX_SECONDS = 600
 CODE_LINES = 80
 STEP_CHARS = 4000
+MOST_ITEMS = 20
 RUNNER = Path(__file__).resolve().with_name("wheel_runner.py")
 TEMPLATE = re.compile(r"\{(\w+)\}")
 
@@ -109,6 +110,12 @@ def commandLine(parts):
     return subprocess.list2cmdline(parts) if os.name == "nt" else shlex.join(parts)
 
 
+# Where the packages of the user are, like pypdf, for a wheel that python -I would keep from them: every folder of this program but its own code.
+def packageFolders():
+    backend = RUNNER.parents[1]
+    return os.pathsep.join(folder for folder in sys.path if folder and backend not in Path(folder).resolve().parents and Path(folder).is_dir())
+
+
 def runScript(work, wheel, arguments, seconds):
     loop = work.loop
     box = Toolbox(loop, work)
@@ -120,7 +127,7 @@ def runScript(work, wheel, arguments, seconds):
     argumentsFile.write_text(json.dumps(arguments, ensure_ascii=False), encoding="utf-8")
     started = time.time()
     try:
-        code, printed = box.runInForeground(commandLine([sys.executable, "-I", str(RUNNER), str(script), str(argumentsFile), str(resultFile)]), box.root, seconds)
+        code, printed = box.runInForeground(commandLine([sys.executable, "-I", str(RUNNER), str(script), str(argumentsFile), str(resultFile), packageFolders()]), box.root, seconds)
         result = json.loads(resultFile.read_text(encoding="utf-8")) if resultFile.exists() else None
     finally:
         argumentsFile.unlink(missing_ok=True)
@@ -168,6 +175,14 @@ def runSteps(work, wheel, arguments):
     for number, step in enumerate(wheel["manifest"].get("steps") or [], 1):
         work.checkCancelled()
         tool = str(step.get("tool") or "")
+        if step.get("each"):
+            results, failures = runForEach(work, link, wheel, step, number, values)
+            shown += results
+            if failures and len(failures) >= len(results):
+                loop.note("wheel", name=wheel["name"], pin=wheel["pin"], action="run", ok=False, error={"type": "Step", "message": f"step {number} ({tool}) failed for every item: {failures[0][:500]}"},
+                          seconds=round(time.time() - started, 3))
+                raise ToolFailure(f"The wheel {wheel['name']} failed at step {number} ({tool}) for every item: {clip(failures[0], 1500)}\nDo the step by hand, and say so in your answer.")
+            continue
         text, error = link.call(tool, fill(step.get("arguments") or {}, values), callId=f"{wheel['name']}.{number}", origin=f"wheel:{wheel['name']}")
         if error:
             loop.note("wheel", name=wheel["name"], pin=wheel["pin"], action="run", ok=False, error={"type": "Step", "message": f"step {number} ({tool}): {text[:500]}"},
@@ -182,6 +197,22 @@ def runSteps(work, wheel, arguments):
         shown.append(f"Step {number} ({tool}):\n{clip(text, STEP_CHARS)}")
     loop.note("wheel", name=wheel["name"], pin=wheel["pin"], action="run", ok=True, seconds=round(time.time() - started, 3))
     return "\n\n".join(shown) or "Done: the wheel has no steps."
+
+
+# A step for each item of a list: what one item cannot do does not stop the others, and the agent sees it in the result of that item.
+def runForEach(work, link, wheel, step, number, values):
+    items, shown, failures = values.get(step["each"]) or [], [], []
+    if not isinstance(items, list):
+        raise ToolFailure(f"The wheel {wheel['name']} needs a list in {step['each']}. Give it again.")
+    for position, item in enumerate(items[:MOST_ITEMS], 1):
+        work.checkCancelled()
+        text, error = link.call(step["tool"], fill(step.get("arguments") or {}, {**values, "item": item}), callId=f"{wheel['name']}.{number}.{position}", origin=f"wheel:{wheel['name']}")
+        shown.append(f"{item}{' (it failed)' if error else ''}:\n{clip(text, STEP_CHARS)}")
+        if error:
+            failures.append(text)
+    if len(items) > MOST_ITEMS:
+        shown.append(f"Only the first {MOST_ITEMS} of the {len(items)} items were done: call the wheel again with the others.")
+    return shown, failures
 
 
 def isWheelTool(name):

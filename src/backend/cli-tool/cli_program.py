@@ -213,10 +213,15 @@ def describeArchitect(swarm):
     return f"The architect uses {info['name']}." if info else "The architect has no model: it only counts what the agents repeat."
 
 
-# The architect stops before the models are let go: a pass would load a local model again.
-def closeArchitect(swarm):
-    if swarm is not None and swarm.architect is not None:
-        swarm.architect.close()
+# The architect stops before the models are let go: a pass would load a local model again. Its last pass is what the swarm learned, so the mission
+# waits for it (a local model that it shares with the leader only works then). A session closed with kill does not wait.
+def closeArchitect(swarm, console=None):
+    if swarm is None or swarm.architect is None:
+        return
+    if console is not None and swarm.architect.isWorking():
+        console.say("The architect is writing down what it learned from this run, which can take some minutes. The mission is saved; the session ends after it.")
+        swarm.architect.finish()
+    swarm.architect.close()
 
 
 def chooseOrder(console, swarm):
