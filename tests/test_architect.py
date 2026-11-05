@@ -348,6 +348,33 @@ class ChoiceTests(ArchitectTestCase):
         self.assertFalse(architect.mayRunNow("signal"))
         self.assertTrue(architect.mayRunNow("end"))
 
+    # An agent that left has let its model go. The architect must not load it again: it goes on with the model of the leader.
+    def testTheModelOfAnAgentThatLeftIsNotUsedAgain(self):
+        swarm, local = Swarm("Mission"), getModelInfo("Qwen/Qwen3-8B")
+        leader, reader = types.SimpleNamespace(unload=lambda: None), types.SimpleNamespace(unload=lambda: None)
+        swarm.addAgent("Leader", ChatLoop(leader), "leader", "lead", model=local)
+        swarm.addAgent("Reader", ChatLoop(reader), "reader", "read", model=local)
+        architect = ArchitectManager(swarm, {"same": "Reader"})
+        self.assertIs(architect.ensureLoop().agent, reader)
+        swarm.removeAgent("Reader", "It failed.")
+        self.assertEqual(pickArchitect(swarm, {"same": "Reader"}), (local, "share"))
+        self.assertIs(architect.ensureLoop().agent, leader)
+
+    # After its last pass the architect gives back the model it shared with an agent that finished. The one of the leader stays for the next round.
+    def testAPassGivesBackASharedModelUnlessItIsTheOneOfTheLeader(self):
+        swarm, local, freed = Swarm("Mission"), getModelInfo("Qwen/Qwen3-8B"), []
+        leader, reader = types.SimpleNamespace(unload=lambda: freed.append("leader")), types.SimpleNamespace(unload=lambda: freed.append("reader"))
+        swarm.addAgent("Leader", ChatLoop(leader), "leader", "lead", model=local)
+        swarm.addAgent("Reader", ChatLoop(reader), "reader", "read", model=local)
+        architect = ArchitectManager(swarm, {"same": "Leader"})
+        architect.ensureLoop()
+        architect.unloadModel()
+        self.assertEqual(freed, [])
+        architect = ArchitectManager(swarm, {"same": "Reader"})
+        architect.ensureLoop()
+        architect.unloadModel()
+        self.assertEqual(freed, ["reader"])
+
     def testTheStateIsSavedAndTheArchitectIsAttachedOnce(self):
         swarm = Swarm("Mission")
         architect = attachArchitect(swarm, {"same": "Leader"})

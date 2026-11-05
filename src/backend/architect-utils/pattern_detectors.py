@@ -250,6 +250,10 @@ class Detectors:
         if entry.get("whileReady"):
             self.correction(db, entry, ref, batch, "user", entry.get("text"))
 
+    # What the user answered to a proposal of the leader, when it built the swarm or while it ran.
+    def on_proposal(self, db, entry, ref, batch):
+        self.correction(db, entry, ref, batch, "user", entry.get("message"))
+
     def on_route(self, db, entry, ref, batch):
         self.correction(db, entry, ref, batch, "leader", entry.get("comment"))
 

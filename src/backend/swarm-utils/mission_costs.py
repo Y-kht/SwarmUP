@@ -79,7 +79,7 @@ def formatDollars(amount):
 
 
 def checkBudget(value):
-    if value in (None, ""):
+    if value is None or not str(value).strip():
         return None
     try:
         budget = float(str(value).replace("$", "").replace(",", "").strip())

@@ -351,6 +351,11 @@ function onJobEnded(name, job) {
     else toast('No swarm was built: you rejected the proposal of the leader.', 'warning');
     if (job.state !== 'failed') api('clearJob', { name }).catch(() => {});
   }
+  if (name === 'newSwarm') {
+    if (job.state === 'failed') toast(job.error, 'danger');
+    else clearForNewSwarm();
+    api('clearJob', { name }).catch(() => {});
+  }
   if (name === 'cancel' && job.state === 'failed') toast(job.error, 'danger');
   if (name === 'changes' && job.state === 'failed') toast(job.error, 'danger');
 }

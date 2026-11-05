@@ -6,7 +6,6 @@ from datetime import datetime
 
 import agent_prompts as prompts
 from background_processes import stopProcesses
-from gpu_check import checkVram, readGpus
 from harness_utils import SUMMARY_LENGTH, USER_NAME, stripFences
 from model_adapters import adapterOf
 
@@ -17,8 +16,7 @@ LIVE_CHARS = 4000
 BROADCAST_NAMES = ("all", "everyone", "everybody", "team", "all agents")
 
 
-# The agents of a swarm (Swarm in swarm_harness.py): who joins and who leaves, their models and the VRAM they need, who waits for whom,
-# and what a user interface reads of them.
+# The agents of a swarm (Swarm in swarm_harness.py): who joins and who leaves, their models, who waits for whom, and what a user interface reads of them.
 class SwarmTeam:
     # An agent of the swarm, or one that was just removed and whose thread did not end yet.
     def anyMember(self, name):
@@ -78,11 +76,11 @@ class SwarmTeam:
     def newMember(self, name, agent, role, task, boss, waitsFor, model, recipe):
         return {"name": name, "agent": agent, "role": role, "task": task, "boss": boss, "waitsFor": list(waitsFor), "model": model, "recipe": recipe,
                 "status": "waiting", "result": None, "error": "", "mode": self.mode, "review": "", "draft": "", "problem": "",
-                "decision": None, "revision": 0, "startAt": None, "started": False, "resumeStart": None, "sitsOut": False, "wake": threading.Event()}
+                "decision": None, "revision": 0, "startAt": None, "started": False, "resumeStart": None, "sitsOut": False, "lost": [], "wake": threading.Event()}
 
     # Takes an agent out of the swarm (never the leader), while it runs or not. One that finished first gives its result to the agents that wait
-    # for it. One that did not finish is stopped at its next step, and the agents that wait for it go on without it. Its loop and its model are
-    # let go in the background (retire) once its thread ended: what it left half done in the files is put back, and its model frees its memory.
+    # for it. One that did not finish is stopped at its next step, and the leader decides about the agents that wait for it (swarm_losses.py). Its loop
+    # and its model are let go in the background (retire) once its thread ended: what it left half done in the files is put back, and its model frees its memory.
     def removeAgent(self, name, reason=""):
         with self.changed:
             if name == self.leader:
@@ -92,6 +90,8 @@ class SwarmTeam:
                 if name in other["waitsFor"]:
                     if member["result"] is not None:
                         self.deliverResult(name, other["name"])
+                    elif other["mode"] == "plan" or other["status"] not in ("done", "failed"):
+                        other["lost"].append({"name": name, "why": reason or member["error"] or "it left the swarm"})
                     other["waitsFor"] = [waited for waited in other["waitsFor"] if waited != name]
             del self.members[name]
             member["removed"] = True
@@ -169,31 +169,6 @@ class SwarmTeam:
     def getMode(self):
         return self.mode
 
-    # The VRAM in GB that the models of the agents need together, without the agent called replacing.
-    def getNeededVram(self, replacing=None):
-        return round(sum(member["model"]["vram"] for name, member in self.members.items() if member["model"] and name != replacing), 1)
-
-    # The VRAM in GB that the models of the agents hold now: the leader that built the swarm, the agents after their plan or the round before.
-    def getLoadedVram(self):
-        return round(sum(member["model"]["vram"] for member in self.members.values() if member["model"] and getattr(getattr(member["agent"], "agent", None), "isLoaded", False)), 1)
-
-    # What the user sees before choosing a model for an agent, or to replace the model of the agent called replacing.
-    # A local model that does not fit in the GPUs is not allowed, and the message says why. One that fits, but not in the memory
-    # that is free now, is allowed and the message is a warning. API models are always allowed, but they do not hide the warning of the swarm.
-    def checkModel(self, model, replacing=None):
-        taken = self.getNeededVram(replacing)
-        after = round(taken + model["vram"], 1)
-        status = checkVram(after, readGpus() if after else [], self.getLoadedVram())
-        name, vram, total = model["name"], model["vram"], status["total"]
-        if model["local"] and status["gpus"] and vram > total:
-            message = f"{name} needs about {vram} GB of VRAM, but your GPUs only have {total} GB in total. Choose a smaller model or an API model."
-        elif model["local"] and status["gpus"] and not status["fits"]:
-            message = (f"{name} needs about {vram} GB of VRAM. The other agents already take {taken} GB and your GPUs have {total} GB in total, "
-                       "so there is no room left. Choose a smaller model or an API model.")
-        else:
-            message = status["message"]
-        return {"allowed": status["fits"] or not model["local"], "vram": vram, "needed": after, "message": message}
-
     # Changes the model of an agent, for example to a smaller one. agent is the new loop that uses it, if the user interface made one.
     # While the swarm runs, only an agent that did not start yet can change its model, and its old model frees its memory.
     def setModel(self, name, model, agent=None):
@@ -225,17 +200,6 @@ class SwarmTeam:
 
     def getCosts(self):
         return self.costs.report(self.describeTeam())
-
-    # The VRAM the swarm needs so far next to what the GPUs have, for the user interface to show while the swarm is built.
-    # The message is empty, or the warning that the swarm cannot run now.
-    def getVramStatus(self):
-        return checkVram(self.getNeededVram(), readGpus(), self.getLoadedVram())
-
-    def checkGpus(self):
-        needed = self.getNeededVram()
-        status = checkVram(needed, readGpus() if needed else [], self.getLoadedVram())
-        if not status["runnable"]:
-            raise ValueError(status["message"])
 
     def setWaitsFor(self, name, waitsFor):
         self.getMember(name)["waitsFor"] = list(waitsFor)
@@ -447,7 +411,11 @@ class SwarmTeam:
     def planWithLeader(self):
         leader = self.getMember(self.leader)["agent"]
         agents = "\n".join(f"- {name}: {member['role']}. Task: {member['task']}" for name, member in self.members.items() if name != self.leader)
-        plan = leader.reviewLoop(prompts.SWARM_PLAN_PROMPT.format(mission=self.mission, agents=agents, example=prompts.SWARM_PLAN_EXAMPLE), self.checkPlan, own=False)
+        leader.journal = self.buildLog
+        try:
+            plan = leader.reviewLoop(prompts.SWARM_PLAN_PROMPT.format(mission=self.mission, agents=agents, example=prompts.SWARM_PLAN_EXAMPLE), self.checkPlan, own=False)
+        finally:
+            leader.journal = None
         if plan is None:
             return False
         for name, others in json.loads(stripFences(plan)).items():

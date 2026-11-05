@@ -326,6 +326,18 @@ class MinerTests(MinerTestCase):
         wheel = miner.store.patterns(("wheel",), limit=1)[0]
         self.assertEqual((wheel["count"], wheel["errors"]), (3, 1))
 
+    # What the user tells the leader about its proposals is what the architect reads as a correction. A plain approval says nothing.
+    def testTheAnswersOfTheUserToTheProposalsAreCorrections(self):
+        miner = self.miner()
+        journal = self.journalOf("m1")
+        for number in range(3):
+            journal.add("proposal", "Leader", action="build", text="A swarm of five agents", decision="rejected", message="Use two agents only, every swarm of mine is small.")
+            journal.add("proposal", "Leader", action="add", text="Add a checker", decision="approved", message="")
+        miner.poll()
+        [row] = miner.store.patterns(("correction",), limit=10)
+        self.assertEqual((row["count"], row["data"]["source"]), (3, "user"))
+        self.assertIn("Use two agents only", row["label"])
+
     def testTheCommandsACodingAgentRanItselfAreMinedLikeTheOthers(self):
         miner = self.miner()
         journal = self.journalOf("m1")

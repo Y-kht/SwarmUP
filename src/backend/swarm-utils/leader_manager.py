@@ -7,7 +7,7 @@ import traceback
 
 from harness_utils import USER_NAME
 from leader_parser import normalizeKeys, squash
-from leader_utils import askMissing
+from leader_utils import askMissing, describeAnswer
 from model_support import ModelError
 from tasks_library import TASKS, describeLoop, publicAnswers
 
@@ -132,6 +132,7 @@ class LeaderManager:
             return [], f"You proposed again what the user already rejected, so it was not shown to the user: {change['text']}."
         leader = self.leaderLoop()
         answer = (ask or leader.askProposal)(change["proposal"])
+        self.noteAnswer(change, answer)
         if not self.isOpen():
             return [], "The swarm stopped before the change could be made."
         if not isinstance(answer, dict) or answer.get("decision") != "approve":
@@ -147,6 +148,14 @@ class LeaderManager:
             return [], f"The user approved {change['text']}, but it could not be made: {error}"
         self.decisions.append(f"Approved and done: {change['text']}.")
         return [], f"The user approved your proposal, and it is done: {change['text']}."
+
+    # The answer of the user is part of what the swarm said: the journal keeps it for the architect, and the memory of the mission for the leader.
+    def noteAnswer(self, change, answer):
+        details = describeAnswer(change["proposal"], answer)
+        if self.swarm.journal is not None:
+            self.swarm.journal.add("proposal", self.swarm.getLeader(), **details)
+        if details["message"]:
+            self.swarm.record("addUserPrompt", self.swarm.round, details["message"], "a proposal of the leader", kind="Answer to")
 
     def apply(self, change, leader):
         action = change["action"]

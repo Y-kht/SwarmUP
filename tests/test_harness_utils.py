@@ -7,6 +7,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 import urllib.error
 from datetime import datetime, timedelta
@@ -1289,16 +1290,16 @@ class SwarmTests(LoopTestCase):
         swarm = self.makeSwarm(Bad=self.worker(fail=True), Free=self.worker("fine"))
         swarm.addAgent("Dependent", self.worker("never"), "dep", "needs bad", waitsFor=["Bad"])
         swarm.run()
-        self.assertEqual(swarm.getStatuses(), {"Leader": "done", "Bad": "failed", "Free": "done", "Dependent": "failed"})
-        self.assertIn("RuntimeError: boom", swarm.getInfo("Bad")["error"])
-        self.assertIn("Bad did not finish", swarm.getInfo("Dependent")["error"])
-        self.assertTrue(any("FAILED" in message["message"] for message in swarm.getMessages(sender="Dependent", receiver="Leader")))
+        self.assertEqual(swarm.getStatuses(), {"Leader": "done", "Free": "done", "Dependent": "done"})
+        self.assertEqual((swarm.removed[0]["name"], swarm.removed[0]["status"]), ("Bad", "failed"))
+        self.assertIn("RuntimeError: boom", swarm.removed[0]["reason"])
+        self.assertTrue(any("FAILED" in message["message"] for message in swarm.getMessages(sender="Bad", receiver="Leader")))
 
     def testAnAgentThatEndsWithoutAResultIsFailed(self):
         swarm = self.makeSwarm(Declined=self.worker(result=None))
         swarm.run()
-        self.assertEqual(swarm.getStatus("Declined"), "failed")
-        self.assertIn("did not approve", swarm.getInfo("Declined")["error"])
+        self.assertEqual(swarm.getAgents(), ["Leader"])
+        self.assertIn("did not approve", swarm.removed[0]["reason"])
 
     def testImpossiblePlansAreRefusedInsteadOfHanging(self):
         swarm = self.makeSwarm(A=self.worker(), B=self.worker())
@@ -1398,9 +1399,11 @@ class SwarmTests(LoopTestCase):
         with self.assertRaisesRegex(ValueError, "empty"):
             swarm.sendUserMessage("Writer", "   ")
         swarm.run()
-        for name in ("Writer", "Bad", "Leader"):
+        for name in ("Writer", "Leader"):
             with self.assertRaisesRegex(ValueError, "already finished"):
                 swarm.sendUserMessage(name, "too late")
+        with self.assertRaisesRegex(ValueError, "no agent called Bad"):
+            swarm.sendUserMessage("Bad", "too late")
         self.assertEqual(swarm.getMessages(sender=USER_NAME), [])
         with self.assertRaisesRegex(ValueError, "name of the user"):
             swarm.addAgent(USER_NAME, self.worker(), "role", "task")
@@ -1674,14 +1677,25 @@ class SwarmTests(LoopTestCase):
         self.assertEqual(swarm.getInfo("Writer")["result"], "formal draft")
         self.assertIn("What to change in your result: Use a formal tone", self.agentOf(swarm, "Writer").agent.prompts[1])
 
-    def testRejectingInExecuteModeFailsTheAgentAndItsDependentsButNotTheLeader(self):
-        swarm = self.reviewedSwarm("execute", ["Summary one: Writer", "leader draft", "Summary two: Writer Formatter Leader"], ["no", "yes"],
+    # A rejected draft is the choice of the user: the agent stays, and a later run can use it. The leader decides about the agent that waited for it.
+    def testRejectingInExecuteModeFailsTheAgentAndTheLeaderDecidesAboutItsDependents(self):
+        swarm = self.reviewedSwarm("execute", ["Summary one: Writer", '{"decision": "remove", "why": "It only formats the text of Writer."}', "leader draft", "Summary two: Writer Leader"], ["no", "yes"],
                                    Writer=["writer draft"], Formatter=["never written"])
         swarm.setWaitsFor("Formatter", ["Writer"])
+        formatter = self.agentOf(swarm, "Formatter")
         self.assertEqual(swarm.run(), "leader draft")
-        self.assertEqual(swarm.getStatuses(), {"Leader": "done", "Writer": "failed", "Formatter": "failed"})
+        self.assertEqual(swarm.getStatuses(), {"Leader": "done", "Writer": "failed"})
         self.assertTrue(any("FAILED" in line for line in self.agentOf(swarm, "Leader").inbox))
-        self.assertEqual(len(self.agentOf(swarm, "Formatter").agent.prompts), 0)
+        self.assertEqual(len(formatter.agent.prompts), 0)
+        self.assertIn("It only formats the text of Writer.", swarm.removed[0]["reason"])
+
+    def testAnAgentThatWaitedForARejectedAgentGoesOnIfTheLeaderKeepsIt(self):
+        swarm = self.reviewedSwarm("execute", ["Summary one: Writer", '{"decision": "keep", "why": "It can use the brief."}', "Summary two: Writer Formatter", "leader draft", "Summary three: Writer Formatter Leader"],
+                                   ["no", "yes", "yes"], Writer=["writer draft"], Formatter=["formatted"])
+        swarm.setWaitsFor("Formatter", ["Writer"])
+        self.assertEqual(swarm.run(), "leader draft")
+        self.assertEqual(swarm.getStatuses(), {"Leader": "done", "Writer": "failed", "Formatter": "done"})
+        self.assertIn("It can use the brief.", "\n".join(self.agentOf(swarm, "Formatter").inbox))
 
 
     def testAnApprovedAgentGoesOnWithoutWaitingForTheOthers(self):
@@ -2237,16 +2251,34 @@ class GpuReadingTests(unittest.TestCase):
 
     def testNvidiaGpusAreReadInGb(self):
         self.smi("NVIDIA RTX A5000, 24564, 24098\nNVIDIA RTX A5000, 24564, 23915\n")
-        self.assertEqual(gpu_check.readNvidiaGpus(), [{"name": "NVIDIA RTX A5000", "total": 25.8, "free": 25.3},
-                                                          {"name": "NVIDIA RTX A5000", "total": 25.8, "free": 25.1}])
+        self.assertEqual(gpu_check.readNvidiaGpus(), [{"index": 0, "name": "NVIDIA RTX A5000", "total": 25.8, "free": 25.3},
+                                                          {"index": 1, "name": "NVIDIA RTX A5000", "total": 25.8, "free": 25.1}])
 
     # The models only see the GPUs of CUDA_VISIBLE_DEVICES, so only those are counted. Names (like GPU-uuid) cannot be matched: all are counted.
     def testOnlyTheVisibleGpusAreCounted(self):
         self.smi("GPU A, 8192, 100\nGPU B, 8192, 200\nGPU C, 8192, 300\n")
         os.environ["CUDA_VISIBLE_DEVICES"] = "2,0"
-        self.assertEqual([gpu["name"] for gpu in gpu_check.readNvidiaGpus()], ["GPU C", "GPU A"])
+        self.assertEqual([(gpu["name"], gpu["index"]) for gpu in gpu_check.readNvidiaGpus()], [("GPU C", 2), ("GPU A", 0)])
         os.environ["CUDA_VISIBLE_DEVICES"] = "GPU-1234"
         self.assertEqual(len(gpu_check.readNvidiaGpus()), 3)
+
+    # What this program uses, as the driver counts it, is more exact than what its models reserved. A driver that does not tell leaves that number.
+    def testWhatThisProgramHoldsOnTheGpus(self):
+        gpus = [{"index": 2}, {"index": 3}]
+        torch = types.SimpleNamespace(cuda=types.SimpleNamespace(device_count=lambda: 2, memory_reserved=lambda number: [3000000000, 0][number]))
+        with mock.patch.dict(sys.modules):
+            sys.modules.pop("torch", None)
+            self.assertEqual(gpu_check.programMemory(gpus), [0.0, 0.0])
+        answers = {"--query-gpu=uuid": "GPU-a\nGPU-b\nGPU-c\nGPU-d\n", "--query-compute-apps=gpu_uuid,pid,used_gpu_memory": f"GPU-c, {os.getpid()}, 16242\nGPU-d, 999999, 5000\n"}
+        def run(command, **options):
+            return mock.Mock(returncode=0, stdout=answers[command[1]])
+        with mock.patch.dict(sys.modules, {"torch": torch}), mock.patch.object(gpu_check.subprocess, "run", run), mock.patch.dict(gpu_check.programCache, {"loaded": 0, "memory": None}), \
+                mock.patch.object(gpu_check, "findNvidiaSmi", lambda: "nvidia-smi"):
+            self.assertEqual(gpu_check.programMemory(gpus), [17.0, 0.0])
+        answers["--query-compute-apps=gpu_uuid,pid,used_gpu_memory"] = "[Not Supported]\n"
+        with mock.patch.dict(sys.modules, {"torch": torch}), mock.patch.object(gpu_check.subprocess, "run", run), mock.patch.dict(gpu_check.programCache, {"loaded": 0, "memory": None}), \
+                mock.patch.object(gpu_check, "findNvidiaSmi", lambda: "nvidia-smi"):
+            self.assertEqual(gpu_check.programMemory(gpus), [3.0, 0.0])
 
     def testLinesThatCannotBeReadAreSkippedAndNamesMayHaveCommas(self):
         self.smi("GPU A, 8192, 100\nGPU B, [N/A], [N/A]\nbroken\nVendor, Inc GPU, 4096, 4096\n\n")
@@ -2298,8 +2330,8 @@ class GpuReadingTests(unittest.TestCase):
         self.makeCard(folder.name, "card3", total="8589934592", used="0")
         (Path(folder.name) / "version").write_text("drm")
         with everywhere(harness_utils, "DRM_FOLDER", Path(folder.name)):
-            self.assertEqual(gpu_check.readAmdGpus(), [{"name": "AMD Radeon RX 7900 XT", "total": 17.2, "free": 16.0},
-                                                           {"name": "AMD GPU card3", "total": 8.6, "free": 8.6}])
+            self.assertEqual(gpu_check.readAmdGpus(), [{"index": 0, "name": "AMD Radeon RX 7900 XT", "total": 17.2, "free": 16.0},
+                                                           {"index": 1, "name": "AMD GPU card3", "total": 8.6, "free": 8.6}])
 
     def testWithoutTheLinuxFolderThereIsNoAmdGpu(self):
         with everywhere(harness_utils, "DRM_FOLDER", Path("/this/folder/does/not/exist")):

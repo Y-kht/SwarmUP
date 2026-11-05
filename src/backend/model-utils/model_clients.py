@@ -209,12 +209,22 @@ class LocalModel:
         self.lock = threading.Lock()
         self.stopping = threading.Event()
         self.promptTokens = self.written = 0
+        self.footprint = None
         LocalModel.models.add(self)
 
     # True while the model holds memory of the GPUs (Swarm.getLoadedVram).
     @property
     def isLoaded(self):
         return self.model is not None
+
+    # What the model holds now, while it is loaded: the GB of its weights, and the GPUs they are on (their numbers for PyTorch).
+    @property
+    def held(self):
+        model = self.model
+        if model is None:
+            return {"gb": 0.0, "gpus": []}
+        places = {str(place).rpartition(":")[2] for place in (getattr(model, "hf_device_map", None) or {"": getattr(model, "device", "")}).values()}
+        return {"gb": self.footprint or self.vram or 0.0, "gpus": sorted(int(place) for place in places if place.isdigit())}
 
     def load(self):
         # Without this, a small allocation keeps a big block of the GPU reserved after unload: a model that let its memory go would still hold it.
@@ -243,6 +253,7 @@ class LocalModel:
         self.torch, self.transformers = torch, transformers
         self.checkPlacement()
         self.checkSpread()
+        self.footprint = round(self.model.get_memory_footprint() / 1000000000, 1) if hasattr(self.model, "get_memory_footprint") else None
         self.report(f"{self.name} is ready.")
 
     # A model is put whole on the GPU with the most free memory when it fits there: it runs faster than spread over several GPUs, and it does

@@ -71,6 +71,19 @@ class SessionArchitect:
         if swarm is not None and swarm.architect is not None:
             swarm.architect.close()
 
+    # Whether the architect still writes down what the last run taught it.
+    def architectWorks(self):
+        return self.swarm is not None and self.swarm.architect is not None and self.swarm.architect.isWorking()
+
+    def closeAfterArchitect(self):
+        self.swarm.architect.finish()
+        self.close()
+
+    # The user does not wait for the last pass of the architect: it ends at its next step.
+    def skipLastPass(self, payload):
+        if self.architectWorks():
+            self.swarm.architect.cancel(model=True)
+
     def architectModelName(self):
         info = pickArchitect(self.swarm, self.architectChoice())[0] if self.swarm is not None else None
         return (info or {}).get("name") or ""

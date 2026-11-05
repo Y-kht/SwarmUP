@@ -351,8 +351,9 @@ class AgentLink:
         secrets = self.gateway.secretsOf(self.loop)
         self.gateway.records.add(self.loop.name, server, tool, arguments, outcome, seconds, len(text), round=getattr(session, "round", 1),
                                  secrets=secrets, note="" if outcome == "success" else text)
-        if self.gateway.journal is not None:
-            self.gateway.journal.call(self.loop, callId, origin, server, tool, arguments, outcome, seconds, text, trusted, secrets)
+        journal = self.gateway.journal or getattr(self.loop, "journal", None)
+        if journal is not None:
+            journal.call(self.loop, callId, origin, server, tool, arguments, outcome, seconds, text, trusted, secrets)
         if outcome != "success":
             self.gateway.emit("call", self.loop.name, tool=fullName(server, tool), outcome=outcome, note=text[:300])
         return text, outcome != "success"

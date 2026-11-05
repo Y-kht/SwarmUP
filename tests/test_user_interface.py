@@ -5,6 +5,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 from patching import everywhere
 from pathlib import Path
@@ -583,6 +584,86 @@ class CodingAgentTests(SessionTestCase):
 
 
 # The leader builds the swarm (leader_utils.py). Its model answers the prompts of the leader with the blocks a test gives it.
+class NewSwarmTests(SessionTestCase):
+    def working(self):
+        self.act("setMission", mission="Write about bees.")
+        self.chooseApi(self.addWriter())
+        swarm = self.session.currentSwarm()
+        ended, gate = [], threading.Event()
+        architect = swarm.architect
+        architect.thread = threading.Thread(target=lambda: (gate.wait(10), ended.append(True)), daemon=True)
+        architect.thread.start()
+        self.addCleanup(gate.set)
+        return swarm, architect, gate, ended
+
+    # The last pass of the architect is what the swarm learned: the tab is cleared once it ended, not before.
+    def testANewSwarmWaitsForTheLastPassOfTheArchitect(self):
+        swarm, architect, gate, ended = self.working()
+        data = self.act("newSwarm")
+        self.assertTrue(data["waiting"])
+        self.assertEqual(data["state"]["jobs"]["newSwarm"]["state"], "running")
+        self.assertEqual(self.session.mission, "Write about bees.")
+        self.assertIs(self.session.swarm, swarm)
+        self.assertFalse(architect.cancelled.is_set())
+        with self.assertRaisesRegex(ValueError, "work in progress"):
+            self.act("newSwarm")
+        gate.set()
+        waitUntil(lambda: self.session.jobs.get("newSwarm", {}).get("state") == "done", "the tab to be cleared")
+        self.assertEqual(ended, [True])
+        self.assertEqual(self.session.mission, "")
+        self.assertIsNone(self.session.swarm)
+        self.assertEqual(self.session.specs, [])
+
+    def testTheUserCanChooseNotToWaitForIt(self):
+        swarm, architect, gate, ended = self.working()
+        architect.finish = lambda seconds=0: gate.wait(10)
+        calls = []
+        architect.cancel = lambda model=False: (calls.append(model), gate.set())
+        self.act("newSwarm")
+        self.act("skipLastPass")
+        waitUntil(lambda: self.session.jobs.get("newSwarm", {}).get("state") == "done", "the tab to be cleared")
+        self.assertIsNone(self.session.swarm)
+        self.assertIs(calls[0], True)
+
+    def testWithNoPassAtWorkTheTabIsClearedAtOnce(self):
+        self.act("setMission", mission="Write about bees.")
+        self.chooseApi(self.addWriter())
+        self.session.currentSwarm()
+        data = self.act("newSwarm")
+        self.assertNotIn("waiting", data)
+        self.assertEqual((self.session.mission, data["state"]["jobs"]), ("", {}))
+
+
+class VramTests(SessionTestCase):
+    def testTheStateOfARunHasWhatTheGpusHoldNow(self):
+        self.act("setMission", mission="Write about bees.")
+        agentId = self.addWriter()
+        self.act("chooseModel", agentId=agentId, name="Qwen/Qwen3-8B", local=True, bits=8)
+        self.act("start", mode="execute")
+        run = self.session.describe()["run"]
+        live = run["liveVram"]
+        self.assertEqual((live["needed"], [gpu["index"] for gpu in live["gpus"]]), (self.session.specs[0]["model"]["vram"], [0]))
+        self.session.swarm.stopWork()
+
+    def testASwarmOfApiModelsHasNoMemoryToShow(self):
+        self.act("setMission", mission="Write about bees.")
+        self.chooseApi(self.addWriter())
+        self.act("start", mode="execute")
+        self.assertIsNone(self.session.describe()["run"]["liveVram"])
+        self.session.swarm.stopWork()
+
+    # An agent deleted from the steps frees the memory of its model at once. It loads again if the user brings it back.
+    def testAnAgentDeletedFromTheStepsFreesItsMemory(self):
+        self.act("setMission", mission="Write about bees.")
+        agentId = self.addWriter()
+        self.chooseApi(agentId)
+        spec, freed = self.session.specs[0], []
+        spec["client"].unload = lambda: freed.append(True)
+        self.act("removeAgent", agentId=agentId)
+        self.assertEqual(freed, [True])
+        self.assertEqual(self.session.trash["spec"]["name"], spec["name"])
+
+
 class LeaderModeTests(SessionTestCase):
     def setUp(self):
         super().setUp()
@@ -636,6 +717,13 @@ class LeaderModeTests(SessionTestCase):
         self.assertIn("notes.md", self.leaderModel.prompts[0])
         self.act("start", mode="execute")
         self.assertIsInstance(self.session.swarm.manager, leader_manager.LeaderManager)
+        # What the user answered while the swarm was built is in the journal of the mission and in its memory, for the architect and the leader.
+        waitUntil(lambda: self.session.swarm.journal is not None and self.session.swarm.journal.written, "the journal of the mission")
+        journal = self.session.swarm.journal.path.read_text(encoding="utf-8").splitlines()
+        answers = [json.loads(line) for line in journal if '"kind": "proposal"' in line]
+        self.assertEqual([(item["decision"], item["message"]) for item in answers[:2]], [("rejected", "Add a short version too."), ("approved", "")])
+        self.assertEqual({item["mission"] for item in answers}, {self.session.swarm.id})
+        self.assertIn("Add a short version too.", self.session.swarm.session.memory.readRound("USER_PROMPTS.md", 1))
         while self.session.swarm.isRunning():
             question = self.waitForQuestion()
             self.act("answer", id=question["id"], answer={"decision": "approve", "message": ""} if question["kind"] == "proposal" else "yes")
@@ -1007,6 +1095,23 @@ class WindowTests(unittest.TestCase):
 
 
 # The desk of the window: several missions at once, each in a tab, with the history of the missions.
+class ClosingTests(SessionTestCase):
+    # The tab goes at once. Its models are let go after the last pass of the architect, which would be lost otherwise.
+    def testATabThatIsClosedLetsItsArchitectFinishFirst(self):
+        desk = session_desk.Desk()
+        self.addCleanup(lambda: [settle(session) for session in list(desk.tabs.values())])
+        tab = next(iter(desk.tabs))
+        session, gate, closed = desk.session(tab), threading.Event(), threading.Event()
+        session.close = closed.set
+        session.architectWorks = lambda: True
+        session.swarm = types.SimpleNamespace(isRunning=lambda: False, architect=types.SimpleNamespace(finish=lambda: gate.wait(10)))
+        desk.act("closeTab", {"tab": tab}, tab)
+        self.assertNotIn(tab, desk.tabs)
+        self.assertFalse(closed.is_set())
+        gate.set()
+        waitUntil(closed.is_set, "the tab to let its models go")
+
+
 class DeskTests(SessionTestCase):
     def setUp(self):
         super().setUp()

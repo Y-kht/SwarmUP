@@ -1,24 +1,27 @@
-# The swarm: a team of loops that work together (see the description of Swarm below). Its parts are in swarm_team.py,
-# swarm_review.py and swarm_run.py, and its saved state in saved_swarms.py.
+# The swarm: a team of loops that work together (see the description of Swarm below). Its parts are in swarm_team.py, swarm_vram.py,
+# swarm_losses.py, swarm_review.py and swarm_run.py, and its saved state in saved_swarms.py.
 import os
 import threading
 import traceback
 from datetime import datetime
 
+from agent_journal import BuildLog
 from harness_utils import STATE_LOCK, STATE_VERSION
 from mission_costs import MissionCosts
 from model_adapters import adapterOf
 from saved_swarms import saveSwarmState
+from swarm_losses import SwarmLosses
 from swarm_review import SwarmReview
 from swarm_rounds import SwarmRounds
 from swarm_run import SwarmRun
 from swarm_team import SwarmTeam
+from swarm_vram import SwarmVram
 
 
 # What is saved of an agent of a swarm, apart from its loop and the lists.
-# The events that pass at once (the text an agent writes, the progress of a call, a call that failed): the state is not saved for them.
-PASSING_EVENTS = ("text", "progress", "call", "architect")
-SAVED_FIELDS = ("role", "task", "boss", "model", "recipe", "status", "result", "error", "mode", "review", "draft", "problem", "revision", "started", "sitsOut")
+# The events that pass at once (the text an agent writes, the progress of a call, a call that failed, the memory of the GPUs): the state is not saved for them.
+PASSING_EVENTS = ("text", "progress", "call", "architect", "vram")
+SAVED_FIELDS = ("role", "task", "boss", "model", "recipe", "status", "result", "error", "mode", "review", "draft", "problem", "revision", "started", "sitsOut", "lost")
 
 
 # ==============
@@ -27,7 +30,8 @@ SAVED_FIELDS = ("role", "task", "boss", "model", "recipe", "status", "result", "
 # The leader decides who waits for whom (waitsFor, or planWithLeader). The agents that wait for nobody
 # work at the same time. An agent only starts after the agents it waits for finished, and receives their results.
 # The leader works last. Each agent reports to the leader when it is done. getStages shows the groups of agents that work at the same time.
-# The status of an agent is waiting, working, done or failed. Only the agents that are working are active.
+# The status of an agent is waiting, working, done or failed. Only the agents that are working are active. An agent that fails for good leaves the
+# swarm, and the leader decides about the agents that waited for it (swarm_losses.py).
 # The get methods are made for a user interface to show the swarm as a tree and to follow it while it runs.
 # When the user clicks an agent of the tree (the leader too), sendUserMessage gives it a message without stopping it.
 # The message is logged with the sender USER_NAME, so getMessages(USER_NAME, name) shows what the user told an agent.
@@ -40,6 +44,7 @@ SAVED_FIELDS = ("role", "task", "boss", "model", "recipe", "status", "result", "
 # the sum of them. checkModel tells before the choice if the GPUs can host the model, and getVramStatus shows the total while the swarm is built.
 # A model that does not fit in the GPUs cannot be chosen (the user changes to a smaller one with setModel, or uses an API model).
 # One that fits but not in the memory that is free now can be chosen with a warning, and run refuses until the memory is free.
+# While it runs, getLiveVram tells what the GPUs hold now (swarm_vram.py).
 # The user can approve (approveDraft), reject (rejectDraft) or correct (correctDraft) an agent on its own by clicking on its name.
 # An approved agent goes on right away, without waiting for the others, and the agents that wait for it start when it is done.
 # When no agent is busy, the leader summarises where every agent stands, what the user already approved included, and the user
@@ -57,7 +62,7 @@ SAVED_FIELDS = ("role", "task", "boss", "model", "recipe", "status", "result", "
 # continues (continueWork, which tries again) or cancels. To cancel, the leader summarises every change that was made (summarizeChanges)
 # and the user confirms (stopWork) or goes on. startInBackground runs the swarm in its own thread, followed with isRunning, wait and outcome.
 # ==============
-class Swarm(SwarmTeam, SwarmReview, SwarmRun, SwarmRounds):
+class Swarm(SwarmTeam, SwarmVram, SwarmLosses, SwarmReview, SwarmRun, SwarmRounds):
     def __init__(self, mission):
         self.mission = mission
         self.members = {}
@@ -100,6 +105,9 @@ class Swarm(SwarmTeam, SwarmReview, SwarmRun, SwarmRounds):
         self.journal = None
         self.project = None
         self.architect = None
+        # What was said before the journal exists (agent_journal.py), and the memory of the GPUs the user interfaces last heard of (swarm_vram.py).
+        self.buildLog = BuildLog()
+        self.vramSeen = None
         # A mission has rounds: the first request of the user, then each follow-up. requests holds them all, {round, text, time}.
         self.round = 1
         self.requests = []

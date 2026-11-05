@@ -197,11 +197,28 @@ function questionModal(question) {
     body: questionCard(question, store.state.run, true) });
 }
 
+// A new swarm waits for the last pass of the architect, which is what the swarm learned. The tab is cleared when it ended.
+function lastPassModal() {
+  return modalFrame({ iconEl: h('span', { class: 'task-icon lg', style: { '--task': '#5B4CF0', '--task-soft': '#5B4CF026' } }, icon('sparkles', 'lg')), title: 'The architect is finishing', closable: false,
+    body: h('div', { class: 'stack' }, loading('It is writing down what it learned from this run. This can take some minutes on a local model.'), h('p', { class: 'small muted' }, 'This tab starts a new swarm as soon as it ends. If you do not wait, what it was writing is lost, and it learns it the next time the agents repeat it.')),
+    foot: [h('div', { class: 'spacer' }), button('Do not wait', { kind: 'ghost', busy: ui.busy.skipLastPass, onClick: () => act('skipLastPass', {}, { busy: 'skipLastPass' }) })] });
+}
+
+function clearForNewSwarm() {
+  ui.stack = [];
+  ui.modal = null;
+  Object.assign(ui, { missionDraft: null, folderDrafts: {}, waitsDraft: null, orderChoice: null, mode: null, selected: null });
+  ui.visited.clear();
+  store.feed = [];
+  go('mission');
+}
+
 function renderModal() {
   const layer = document.getElementById('modal');
   const questions = store.state.questions;
   let content = null;
   if (questions.length && ui.view !== 'run') content = questionModal(questions[0]);
+  else if (store.state.jobs.newSwarm?.state === 'running') content = lastPassModal();
   else if (ui.modal) {
     const modal = ui.modal;
     const builders = {
@@ -210,7 +227,7 @@ function renderModal() {
       quit: () => confirmModal({ title: 'Quit SwarmUP?', iconName: 'power', confirm: 'Quit', danger: true, text: store.state.tabs.some(tab => ['running', 'waiting'].includes(tab.state)) ? 'Some missions are running. They are saved now, and you can continue them at the next start.' : 'Every mission that ran stays in the history. A team you built but did not run is lost when you quit.',
         run: async () => { const data = await act('quit', {}, { busy: 'confirm' }); if (data) document.body.replaceChildren(h('div', { class: 'splash' }, h('div', { class: 'splash-logo' }, logo()), h('div', { class: 'splash-text' }, data.message))); } }),
       confirmNew: () => confirmModal({ title: 'Start a new swarm in this tab?', iconName: 'plus', confirm: 'Start a new swarm', danger: true, text: 'The mission, the agents and their models of this tab are cleared (a mission that ran stays in the history). To keep them, open a new mission in the sidebar instead. The API keys you gave stay in memory.',
-        run: async () => { if (await act('newSwarm', {}, { busy: 'confirm' })) { closeModal(); ui.stack = []; ui.modal = null; Object.assign(ui, { missionDraft: null, folderDrafts: {}, waitsDraft: null, orderChoice: null, mode: null, selected: null }); ui.visited.clear(); store.feed = []; go('mission'); } } }),
+        run: async () => { const data = await act('newSwarm', {}, { busy: 'confirm' }); if (data) { closeModal(); if (!data.waiting) clearForNewSwarm(); } } }),
     };
     content = builders[modal.type] ? builders[modal.type](modal) : null;
   }

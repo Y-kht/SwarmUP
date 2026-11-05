@@ -13,6 +13,9 @@ from tasks_library import DEFAULT_LOOPS, buildLoop, describeLoop, getTask, publi
 from user_settings import loadSettings
 
 
+NEW_SWARM_JOB = "newSwarm"
+
+
 # Building and running the swarm (Session in session_core.py): the leader that builds it, who waits for whom, the run, and what
 # the user does while it runs.
 class SessionRuns:
@@ -64,7 +67,7 @@ class SessionRuns:
         loop = buildLoop("leader", leader["client"], {**leader["answers"], "mission": self.mission})
         self.connect(loop, leader["name"])
         def work():
-            agents = designSwarm(loop, catalog)
+            agents = designSwarm(loop, catalog, self.buildLog)
             if agents is None:
                 return None
             self.applyPlan(leader, agents)
@@ -175,7 +178,7 @@ class SessionRuns:
         if leader and len(self.specs) == 1:
             raise ValueError(f"Ask {leader['name']} to build the swarm first, in the step of the mission.")
         swarm = Swarm(self.mission)
-        swarm.costs = self.costs
+        swarm.costs, swarm.buildLog = self.costs, self.buildLog
         for spec in self.specs:
             loop = buildLoop(spec["task"], spec["client"], spec["answers"])
             self.connect(loop, spec["name"])
@@ -327,14 +330,27 @@ class SessionRuns:
         self.addFeed(USER_NAME, f"Round {self.swarm.round}: {request}", "info", "answer")
         self.launch(self.swarm)
 
+    # The last pass of the architect is what the swarm learned, so a new swarm waits for it: the tab is cleared when it ended, or when the user does not
+    # want to wait anymore (skipLastPass).
     def newSwarm(self, payload):
         self.checkIdle()
         if any(job["state"] == "running" for job in self.jobs.values()):
             raise ValueError("Wait until the work in progress is finished.")
+        if not self.architectWorks():
+            self.clearSwarm()
+            return None
+        architect = self.swarm.architect
+        def work():
+            architect.finish()
+            self.clearSwarm()
+        self.runJob(NEW_SWARM_JOB, "The architect is writing down what it learned from this run", work)
+        return {"waiting": True}
+
+    def clearSwarm(self):
         self.unloadModels()
         with self.lock:
             self.reset()
-            self.jobs, self.feed, self.context = {}, [], {}
+            self.jobs, self.feed, self.context = {name: job for name, job in self.jobs.items() if job["state"] == "running"}, [], {}
         self.refreshUnfinished()
 
     def unloadModels(self):

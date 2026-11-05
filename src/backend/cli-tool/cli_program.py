@@ -154,7 +154,7 @@ def buildWithLeader(console, mission, specs, keys, tokens, models, costs):
     heading(console, "Step 2: the leader builds the swarm")
     console.say(f"{leader['name']} is building the swarm for your mission. It shows you its proposal, and nothing is made before you approve it.")
     try:
-        agents = designSwarm(loop, catalog)
+        agents = designSwarm(loop, catalog, swarm.buildLog)
     except (ValueError, ModelError) as error:
         console.say(str(error))
         return None
@@ -276,6 +276,8 @@ def report(console, swarm, outcome, models):
         info = swarm.getInfo(name)
         detail = f"approved plan: {shorten(info['plan'], 300)}" if swarm.getMode() == "plan" and info["plan"] else f"result: {shorten(info['result'], 300)}" if info["result"] else f"problem: {info['error']}"
         console.say(f"- {name}: {info['status']}. {detail}")
+    for item in swarm.removed:
+        console.say(f"- {item['name']}: left the swarm. {item['reason'] or 'No reason was given.'}")
     if swarm.getMode() == "plan" and len(swarm.getAgents()) > 1 and swarm.getSummary():
         console.say(f"\nThe summary plan of the leader:\n{swarm.getSummary()}")
     showUsage(console, models)

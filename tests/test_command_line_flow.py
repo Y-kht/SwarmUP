@@ -367,6 +367,51 @@ class CommandTests(SwarmTestCase):
         cli.runCommand(script.console(), swarm, line)
         return script.text()
 
+    LIVE = {"gpus": [{"index": 0, "name": "GPU A", "total": 24.0, "free": 8.0, "used": 16.0, "program": 15.0, "others": 1.0, "agents": ["Writer"]},
+                     {"index": 1, "name": "GPU B", "total": 24.0, "free": 23.5, "used": 0.5, "program": 0.0, "others": 0.5, "agents": []}],
+            "agents": [{"name": "Writer", "status": "working", "gb": 9.6, "gpus": [0]}], "needed": 28.8, "total": 48.0, "free": 31.5, "used": 16.5, "program": 15.0, "others": 1.5}
+
+    def localSwarm(self, running=True):
+        swarm = self.makeSwarm()
+        local = {"name": "Qwen", "local": True, "vram": 9.6, "provider": None}
+        for name in ("Leader", "Writer", "Formatter"):
+            swarm.members[name]["model"] = local
+        swarm.getLiveVram = lambda: self.LIVE
+        swarm.isRunning = lambda: running
+        return swarm
+
+    # While it runs the tree says what the GPUs hold now and who holds it. Before and after, what the swarm is expected to need.
+    def testTheTreeShowsTheLiveMemoryOfTheGpusWhileTheSwarmRuns(self):
+        lines = cli.renderTree(self.localSwarm()).split("\n")
+        self.assertEqual(lines[1], "VRAM now: 16.5 of 48.0 GB used (GPU 0: 16.0 of 24.0 GB, GPU 1: 0.5 of 24.0 GB). SwarmUP holds 15.0 GB, other jobs and the driver 1.5 GB.")
+        self.assertNotIn("expected", lines[0])
+        self.assertIn("Writer [writer] Qwen, local, 9.6 GB, holds 9.6 GB on GPU 0 ->", "\n".join(lines))
+        self.assertIn("Formatter [formatter] Qwen, local, 9.6 GB -> waiting", "\n".join(lines))
+        stopped = cli.renderTree(self.localSwarm(running=False))
+        self.assertNotIn("VRAM now", stopped)
+        self.assertIn("GB expected", stopped.split("\n")[0])
+
+    def testTheCommandVramTellsWhatEachGpuHolds(self):
+        text = self.run_(self.localSwarm(), "vram")
+        self.assertIn("GPU 0 (GPU A): 8.0 GB free, SwarmUP 15.0 GB, other jobs and the driver 1.0 GB. Its models: Writer 9.6 GB.", text)
+        self.assertIn("Hold nothing now: Leader (waiting), Formatter (waiting). A model loads when its agent starts.", text)
+        self.assertIn("expected to need 28.8 GB if all its agents worked at once", text)
+        self.assertIn("vram ", self.run_(self.localSwarm(), "help"))
+
+    # The numbers of the GPUs change all the time: alone, they do not print the tree again.
+    def testTheTreeIsNotPrintedAgainOnlyBecauseTheMemoryChanged(self):
+        swarm = self.localSwarm()
+        script = Script()
+        view = cli.TreeView(swarm, script.console())
+        view.onEvent({"kind": "run", "agent": "", "time": "10:00:00", "mode": "execute"})
+        view.flush()
+        printed = len(script.said)
+        self.LIVE["used"] = 20.5
+        self.addCleanup(self.LIVE.update, used=16.5)
+        view.onEvent({"kind": "joined", "agent": "New", "time": "10:00:01", "role": "x"})
+        view.flush()
+        self.assertEqual(script.said[printed:], ["[10:00:01] New joined the swarm (every agent was told)"])
+
     def testHelpTreeAndLog(self):
         swarm = self.makeSwarm()
         self.assertIn("approve <agent>", self.run_(swarm, "help"))

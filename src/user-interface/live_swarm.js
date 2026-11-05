@@ -42,6 +42,7 @@ function viewRun() {
         !run.running && run.state !== 'reopened' ? resultsCard(run) : null,
         joiningCard(),
         costCard(),
+        vramCard(run),
         architectCard(run),
         h('div', { class: 'card' }, h('div', { class: 'card-head' }, icon('activity'), h('h3', { class: 'grow' }, 'The swarm'), graphLegend()),
           h('div', { class: 'card-body', style: { padding: '8px 12px' } }, flowGraph(nodes, run.stages, run.leader, { mode: run.mode, selected: selectedName, onSelect: name => { ui.selected = name; render(); } }))),
@@ -78,6 +79,24 @@ function costCard() {
             row.unpriced ? h('span', { class: 'faint' }, ` + ${formatNumber(row.unpriced)} tokens at an unknown price`) : null)))) : null,
       ui.costsOpen ? priceDate() : null,
       ui.costsOpen ? h('div', { class: 'small faint' }, 'Computed from the tokens of every call and the published prices: the cache, the long prompts and the hours of DeepSeek are priced like the providers bill them. Claude Code gives its own cost. Your provider\'s bill is the reference.') : null));
+}
+
+// What the GPUs hold now: each GPU as its driver reads it, SwarmUP and the other jobs on it, and the agents whose model is in memory.
+function vramCard(run) {
+  const live = run.liveVram;
+  if (!live || !live.gpus.length) return null;
+  const percent = (value, total) => `${Math.min(100, value / (total || 1) * 100)}%`;
+  const holderOf = name => live.agents.find(holder => holder.name === name);
+  const idle = run.agents.filter(agent => agent.model?.local && !holderOf(agent.name));
+  return h('div', { class: 'card pad vram-card' }, h('div', { class: 'row', style: { marginBottom: '10px' } }, icon('gauge'), h('h3', { class: 'grow' }, 'VRAM now'), h('b', { class: 'small' }, `${live.used} of ${live.total} GB`)),
+    h('div', { class: 'stack tight' }, live.gpus.map(gpu => h('div', {},
+      h('div', { class: 'row between small', style: { marginBottom: '5px' } }, h('b', {}, `GPU ${gpu.index}`), h('span', { class: 'muted' }, `${gpu.used} of ${gpu.total} GB`)),
+      h('div', { class: 'meter', role: 'img', 'aria-label': `GPU ${gpu.index}: ${gpu.program} GB held by SwarmUP, ${gpu.others} GB used by other jobs and the driver, of ${gpu.total} GB` },
+        h('div', { class: 'swarm', style: { width: percent(gpu.program, gpu.total) } }), h('div', { class: 'used', style: { width: percent(gpu.others, gpu.total) } })),
+      gpu.agents.length ? h('div', { class: 'small muted', style: { marginTop: '5px' } }, gpu.agents.map(name => `${name}: ${holderOf(name).gb} GB`).join(' · ')) : null))),
+    h('div', { class: 'meter-legend' }, h('span', {}, h('i', { style: { background: 'var(--primary)' } }), `SwarmUP: ${live.program} GB`), h('span', {}, h('i', { style: { background: 'var(--text-3)' } }), `Other jobs and the driver: ${live.others} GB`)),
+    h('div', { class: 'small faint', style: { marginTop: '8px' } }, idle.length ? `${idle.map(agent => agent.name).join(', ')} hold${idle.length === 1 ? 's' : ''} nothing now: a model loads when its agent starts. ` : '',
+      `When it was built, the swarm was expected to need ${live.needed} GB if all its agents worked at once.`));
 }
 
 // The agents prepared in the live view that did not join yet: their model, then the step to join, or drop them.
@@ -137,7 +156,7 @@ function removeAgentModal(modal) {
   const waiting = run.agents.filter(other => (other.waitsFor || []).includes(agent.name)).map(other => other.name);
   const facts = [
     done ? 'Its result stays: what it made is kept, and the leader already has it.' : run.running ? 'It stops at its next step. What it left half done in your files is put back.' : 'It will not work in the next run.',
-    waiting.length ? `${waiting.join(', ')} ${done ? 'still receive its result' : 'go on without it'}.` : null,
+    waiting.length ? (done ? `${waiting.join(', ')} still receive its result.` : `${waiting.join(', ')} wait for it: the leader decides if they go on without it, or leave too.`) : null,
     agent.model?.local ? `Its model frees about ${agent.model.vram} GB of memory on your GPUs as soon as its last step ended.` : 'Its model is let go as soon as its last step ended.',
     'Every agent of the swarm is told that it left, so none of them counts on it anymore.',
   ].filter(Boolean);
@@ -376,7 +395,7 @@ function proposalCard(question, run, inModal) {
   } else if (proposal.action === 'remove') {
     const facts = [`${details.role}, ${details.status === 'done' ? 'done: its result stays, and the agents that need it keep it' : `${details.status}: it stops at its next step, and what it left half done is put back`}.`,
       details.model ? `Its model (${details.model}) frees its memory.` : null,
-      details.waitedBy?.length && details.status !== 'done' ? `${details.waitedBy.join(', ')} wait for it, and go on without it.` : null, 'Every agent of the swarm is told.'].filter(Boolean);
+      details.waitedBy?.length && details.status !== 'done' ? `${details.waitedBy.join(', ')} wait for it: the leader then decides if they go on without it, or leave too.` : null, 'Every agent of the swarm is told.'].filter(Boolean);
     body = h('div', { class: 'stack tight' }, h('div', { class: 'row' }, icon('trash', 'sm'), h('b', {}, `Remove ${proposal.agent}`)), h('ul', { class: 'steps small' }, facts.map(fact => h('li', {}, fact))));
   } else {
     body = h('div', { class: 'stack tight' }, h('div', { class: 'row wrap' }, icon('cpu', 'sm'), h('b', {}, proposal.agent), h('span', { class: 'muted small' }, details.from || 'no model'), icon('arrowRight', 'sm'), h('b', { class: 'small' }, details.to)),

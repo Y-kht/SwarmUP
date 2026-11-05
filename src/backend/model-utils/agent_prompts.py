@@ -303,6 +303,27 @@ Reply only with JSON that gives, for every concerned agent, what it must change,
 If no agent is concerned, because the correction is only about the wording of your summary, reply {{}}"""
 
 
+# It holds no values: a small model copies the values of an example, whatever the task says (seen in a real run).
+LOST_AGENT_EXAMPLE = '{"works_from": "...", "decision": "keep or remove", "why": "..."}'
+
+LOST_AGENT_PROMPT = """You are the leader of a swarm of agents working on this mission: {mission}
+{name} ({role}) waited for the result of agents that will not give it:
+{missing}
+Only the results of those agents are missing: the files of the folder and the tools of {name} still work.
+The task of {name}: {task}
+{named}
+Answer these three things, in this order:
+- works_from: what this task works on, in the words of the task: a file, the web, a list, a draft, a result...
+- decision: remove if that can only come from the agents above: it has nothing to work on, so it leaves the swarm and its model frees its memory. keep if {name} can get it by itself with its tools (a file of the folder, the web): it goes on without those results.
+- why: one sentence for the user.
+Reply only with JSON like {example}"""
+
+LOST_AGENT_QUESTION = """{name} waited for the result of agents that will not give it:
+{missing}
+Its task: {task}
+Can it still do it without those results? Answer yes to let it go on, or no to take it out of the swarm, which frees the memory of its model. (yes/no)"""
+
+
 FOLLOW_UP_ROUTE_PROMPT = """You are the leader of a swarm of agents working on this mission: {mission}
 The last round is over. Your report on it: {report}
 The user follows up with a new request: {request}

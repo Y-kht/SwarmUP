@@ -11,7 +11,7 @@ import threading
 import time
 import traceback
 
-from architect_loop import MAX_STEPS, ArchitectDesk, ArchitectLoop, pickArchitect
+from architect_loop import MAX_STEPS, ArchitectDesk, ArchitectLoop, pickArchitect, sharedMember
 from architect_prompts import ARCHITECT_FOCUS_PROMPT, ARCHITECT_PASS_PROMPT, ARCHITECT_PASS_REASONS
 from harness_utils import ARCHITECT_NAME, SwarmStopped
 from mcp_gateway import Gateway
@@ -172,11 +172,12 @@ class ArchitectManager:
 
     # ---------- One pass. ----------
     def ensureLoop(self):
-        if self.loop is not None:
-            return self.loop
         info, how = pickArchitect(self.swarm, self.choice)
+        shared = sharedMember(self.swarm, self.choice)["agent"].agent if how == "share" else None
+        if self.loop is not None and (shared is None or self.loop.agent is shared):
+            return self.loop
         if how == "share":
-            client = self.swarm.members[self.choice["same"]]["agent"].agent
+            client = shared
         else:
             client = self.makeClient(info) if self.makeClient else None
             if client is None:
@@ -246,8 +247,10 @@ class ArchitectManager:
         self.unloadModel()
 
     # A local model of its own is only needed during a pass: the agents need the memory of the GPU the rest of the time. It loads again for the next pass.
+    # The same goes for the model of an agent it shares, unless it is the one of the leader, which still works.
     def unloadModel(self):
-        if self.how == "own" and hasattr(self.client, "unload"):
+        leader = self.swarm.members.get(self.swarm.leader) or {}
+        if hasattr(self.client, "unload") and (self.how == "own" or self.client is not getattr(leader.get("agent"), "agent", None)):
             self.client.unload()
 
     # A small local model gets lost in an open task: it decides about the best patterns one at a time, each in a short conversation of its own, with
@@ -306,13 +309,14 @@ class ArchitectManager:
         self.notes = [*self.notes[-(REPORTS - 1):], {"id": note["id"], "text": note["text"][:300]}]
 
     # ---------- Stop and close. ----------
-    def cancel(self):
+    # A shared model works for its agent too, so a stop of the swarm does not end what it writes. model ends it all the same: no agent works anymore.
+    def cancel(self, model=False):
         self.cancelled.set()
         self.desk.stopped.set()
         if self.gateway is not None:
             self.gateway.cancelAll()
         client = self.client
-        if client is not None and hasattr(client, "cancel") and self.how == "own":
+        if client is not None and hasattr(client, "cancel") and (self.how == "own" or model):
             threading.Thread(target=client.cancel, daemon=True).start()
 
     # The last pass of a run is what the swarm learned. It says if the architect is still at work, and finish waits for it (a stop ends it at once).

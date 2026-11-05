@@ -11,7 +11,7 @@ from pathlib import Path
 sys.path[:0] = [str(folder) for folder in sorted((Path(__file__).resolve().parent.parent / "src" / "backend").iterdir()) if folder.is_dir() and not folder.name.startswith(("_", "."))]
 import agent_journal
 import harness_utils
-from agent_journal import ENTRY_CHARS, Journal, shapeArguments
+from agent_journal import ENTRY_CHARS, BuildLog, Journal, shapeArguments
 from base_loop import Loop
 from mcp_gateway import Gateway
 from mcp_policy import decidePermission
@@ -43,6 +43,44 @@ class JournalTestCase(unittest.TestCase):
 
     def journal(self, project="p"):
         return Journal(self.files / "m1" / ".swarmup", "m1", project=project, run="run1")
+
+
+class BuildLogTests(JournalTestCase):
+    # What was said before the mission had a journal goes in it when it first runs: with its own time, and under the mission and the project of the journal.
+    def testWhatWasSaidBeforeTheJournalExistsIsWrittenOnceWithItsTime(self):
+        log = BuildLog()
+        log.add("proposal", "Leader", action="build", decision="rejected", message="Only two agents.")
+        log.add("step", "Leader", text="thinking")
+        when = log.entries[0][3]["t"]
+        self.assertEqual(log.corrections(), ["Only two agents."])
+        journal = self.journal()
+        log.writeTo(journal)
+        first, second = entries(journal)
+        self.assertEqual((first["kind"], first["agent"], first["mission"], first["project"], first["message"], first["t"]), ("proposal", "Leader", "m1", "p", "Only two agents.", when))
+        self.assertEqual(second["kind"], "step")
+        log.writeTo(journal)
+        self.assertEqual(len(entries(journal)), 2)
+        self.assertEqual(log.corrections(), [])
+
+    def testTheSecretsOfTheLoopAreMaskedWhenTheyAreKept(self):
+        log, loop = BuildLog(), Loop(None)
+        loop.settings = {"password": "hunter22"}
+        log.add("step", "Leader", loop=loop, text="the password is hunter22, the key sk-ant-abcdefghijklmnopqrstuvwxyz")
+        loop.settings = {}
+        journal = self.journal()
+        log.writeTo(journal)
+        text = entries(journal)[0]["text"]
+        self.assertNotIn("hunter22", text)
+        self.assertNotIn("sk-ant-", text)
+
+    def testACallThroughTheGatewayIsKeptLikeInAJournal(self):
+        log, loop = BuildLog(), Loop(None)
+        loop.name = "Leader"
+        log.call(loop, "c1", "conversation", "files", "read_file", {"path": "a.txt"}, "success", 0.5, "hello")
+        journal = self.journal()
+        log.writeTo(journal)
+        entry = entries(journal)[0]
+        self.assertEqual((entry["kind"], entry["agent"], entry["tool"], entry["args"]), ("call", "Leader", "read_file", {"path": "a.txt"}))
 
 
 class WritingTests(JournalTestCase):

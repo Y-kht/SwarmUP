@@ -88,6 +88,11 @@ class ArchitectLoop(Loop):
         return None
 
 
+# The agent whose model the architect shares. One that left the swarm has let its model go, so the architect goes on with the model of the leader.
+def sharedMember(swarm, choice):
+    return swarm.members.get(choice["same"]) or swarm.members.get(swarm.leader) or {}
+
+
 # The model the architect runs on, from what the user chose at the setup of the swarm. choice is {"same": name of an agent} or the info
 # of a model (models_library.py). It gives (info, how): how is "share" for the instance of a local model of an agent, or "own" for a client
 # of its own (an API model, a model the user picked), or (None, "") when no model can run it (a swarm of the user and of Codex only).
@@ -95,9 +100,7 @@ def pickArchitect(swarm, choice):
     if not choice:
         return None, ""
     if "same" in choice:
-        name = choice["same"]
-        member = swarm.members.get(name)
-        info = (member or {}).get("model") or {}
+        info = sharedMember(swarm, choice).get("model") or {}
         if not info or info.get("user"):
             return None, ""
         if info.get("cli") == "codex":

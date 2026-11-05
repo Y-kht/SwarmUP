@@ -62,7 +62,11 @@ class Desk:
             return {}
         if session.isBusy():
             raise ValueError("This mission is working. Stop it first, or leave its tab open: it goes on while you look at another one.")
-        session.close()
+        # The last pass of the architect is what the mission taught it: the tab goes now, and its models are let go after the pass.
+        if session.architectWorks():
+            threading.Thread(target=session.closeAfterArchitect, daemon=True).start()
+        else:
+            session.close()
         with self.lock:
             self.tabs.pop(tab, None)
             if not self.tabs:

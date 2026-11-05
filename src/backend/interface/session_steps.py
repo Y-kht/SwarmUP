@@ -139,6 +139,9 @@ class SessionSteps:
         self.checkIdle()
         index = self.specs.index(spec)
         self.specs.remove(spec)
+        # Its model frees its memory now. It loads again if the user brings the agent back.
+        if hasattr(spec["client"], "unload"):
+            spec["client"].unload()
         for other in self.specs:
             other["waitsFor"] = [name for name in other["waitsFor"] if name != spec["name"]]
         self.trash = {"spec": spec, "index": index}

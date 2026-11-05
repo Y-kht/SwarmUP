@@ -1,7 +1,8 @@
 # The journal of a mission: one line of JSON for everything its agents do, in the order it happens, in .swarmup/journal.jsonl. Every model
 # step (what the model wrote and the calls it made), every call through the gateway (from every kind of agent, coding agents included), the
-# calls that never ran, the permissions, the drafts and their checks, the corrections of the user and of the leader, the messages and the
-# changes of state. The miner of patterns (pattern_miner.py) reads it while the swarm works, so the architect learns what repeats.
+# calls that never ran, the permissions, the drafts and their checks, the proposals of the leader with the answers of the user, the corrections of
+# the user and of the leader, the messages and the changes of state. What happens before a mission has its journal (the leader builds the swarm)
+# waits in a BuildLog, and the first run writes it at the start of the journal. The miner of patterns (pattern_miner.py) reads it while the swarm works, so the architect learns what repeats.
 # A line is written whole and at once (O_APPEND), several threads and programs can write the same journal, and a secret is never written.
 # The journal is only a record: a problem with it never stops an agent, and it is deleted with the mission.
 import hashlib
@@ -94,6 +95,33 @@ def fit(entry):
 
 def secretsOf(loop):
     return {str(value) for value in (getattr(loop, "settings", None) or {}).values() if value and len(str(value)) >= 4}
+
+
+# What a swarm says and does before it has a journal: the leader that builds it, the corrections of the user to its proposals, the order of the
+# agents. The folder of a mission only exists when it first runs, so the entries wait here with their time, and swarm_run.py writes them in the journal.
+class BuildLog:
+    def __init__(self):
+        self.entries = []
+        self.lock = threading.Lock()
+
+    def add(self, kind, agent="", loop=None, secrets=(), **fields):
+        known = set(secrets) | (secretsOf(loop) if loop is not None else set())
+        with self.lock:
+            self.entries.append((kind, agent, known, {"t": int(time.time() * 1000), **fields}))
+
+    def call(self, loop, callId, origin, server, tool, arguments, outcome, seconds, text, trusted=True, secrets=()):
+        Journal.call(self, loop, callId, origin, server, tool, arguments, outcome, seconds, text, trusted, secrets)
+
+    # What the user told the leader about its proposals, for the memory of the mission.
+    def corrections(self):
+        with self.lock:
+            return [fields["message"] for kind, _, _, fields in self.entries if kind == "proposal" and fields.get("message")]
+
+    def writeTo(self, journal):
+        with self.lock:
+            entries, self.entries = self.entries, []
+        for kind, agent, known, fields in entries:
+            journal.add(kind, agent, secrets=known, **fields)
 
 
 class Journal:
