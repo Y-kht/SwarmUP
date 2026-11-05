@@ -12,6 +12,7 @@ from wheel_store import catalogFor
 
 
 LEADER_MESSAGE_CHARS = 2000
+LIVE_VRAM = "VRAM now: "
 
 COMMANDS = """Commands (type them at any time while the swarm runs):
   tree                    show the tree of the swarm again
@@ -25,6 +26,7 @@ COMMANDS = """Commands (type them at any time while the swarm runs):
   add                     add an agent to the swarm while it runs (every agent is told)
   remove <agent> <why>    remove an agent from the swarm (it stops, its model frees its memory, every agent is told)
   cost                    what the mission spent so far, agent by agent, and what is left of its budget
+  vram                    what the GPUs hold now, GPU by GPU and agent by agent
   wheels                  the wheels of the project: scripts the architect wrote from what agents repeated
   wheels <agent> <names>  give an agent these wheels (names separated by commas; none takes them away)
   stop                    stop the swarm for good, after the leader lists what it already did (what is not finished is put back)
@@ -62,15 +64,23 @@ def describeState(node, mode):
     return waiting, "yellow"
 
 
-def renderNode(swarm, node, prefix, last, enabled):
+def describeHeld(holder):
+    if not holder:
+        return ""
+    where = f" on GPU {', '.join(str(gpu) for gpu in holder['gpus'])}" if holder["gpus"] else ""
+    return f", holds {holder['gb']} GB{where}"
+
+
+def renderNode(swarm, node, prefix, last, enabled, holders=None):
     state, color = describeState(node, swarm.getInfo(node["name"])["mode"])
     statuses = swarm.getStates()
     waits = f"  waits for: {', '.join(f'{other} ({statuses[other]})' for other in node['waitsFor'])}" if node["waitsFor"] else ""
     branch = "" if prefix is None else prefix + ("`-- " if last else "|-- ")
-    lines = [f"{branch}{paint(node['name'], 'bold', enabled)} [{node['role']}] {describeModel(node['model'])} -> {paint(state, color, enabled)}{waits}"]
+    held = describeHeld((holders or {}).get(node["name"]))
+    lines = [f"{branch}{paint(node['name'], 'bold', enabled)} [{node['role']}] {describeModel(node['model'])}{held} -> {paint(state, color, enabled)}{waits}"]
     children = node["children"]
     for number, child in enumerate(children):
-        lines += renderNode(swarm, child, "" if prefix is None else prefix + ("    " if last else "|   "), number == len(children) - 1, enabled)
+        lines += renderNode(swarm, child, "" if prefix is None else prefix + ("    " if last else "|   "), number == len(children) - 1, enabled, holders)
     return lines
 
 
@@ -79,13 +89,39 @@ def describeSpent(costs):
     return f"{formatDollars(costs['spent'])}{unknown}" + (f" of a budget of {formatDollars(costs['budget'])}" if costs["budget"] else "")
 
 
+# The line of what the GPUs hold now (getLiveVram in swarm_vram.py).
+def describeLiveVram(live):
+    gpus = ", ".join(f"GPU {gpu['index']}: {gpu['used']} of {gpu['total']} GB" for gpu in live["gpus"])
+    return f"{LIVE_VRAM}{live['used']} of {live['total']} GB used ({gpus}). SwarmUP holds {live['program']} GB, other jobs and the driver {live['others']} GB."
+
+
+# While the swarm runs, its tree says what the GPUs hold now. Before and after, it says what the swarm is expected to need.
 def renderTree(swarm, enabled=False):
     status = swarm.getVramStatus()
-    vram = f" | VRAM: {status['needed']} of {status['total']} GB expected, {status['free']} GB free now" if status["needed"] else ""
+    live = swarm.getLiveVram() if swarm.isRunning() and status["needed"] else None
+    vram = f" | VRAM: {status['needed']} of {status['total']} GB expected, {status['free']} GB free now" if status["needed"] and not live else ""
     costs = swarm.getCosts()
     spent = f" | cost: {describeSpent(costs)}" if costs["spent"] or costs["budget"] or costs["unpriced"] else ""
     header = f"Swarm: {shorten(swarm.mission, 70)} | mode: {swarm.getMode()}{vram}{spent}"
-    return "\n".join([header, *renderNode(swarm, swarm.getTree(), None, True, enabled)])
+    holders = {holder["name"]: holder for holder in live["agents"]} if live else {}
+    return "\n".join([header, *([describeLiveVram(live)] if live else []), *renderNode(swarm, swarm.getTree(), None, True, enabled, holders)])
+
+
+# The command vram: each GPU, who holds what on it, and the agents that hold nothing now.
+def describeVram(swarm):
+    live = swarm.getLiveVram()
+    if not live["gpus"]:
+        return "No supported GPU was found."
+    holders = {holder["name"]: holder for holder in live["agents"]}
+    lines = [describeLiveVram(live)]
+    for gpu in live["gpus"]:
+        models = ", ".join(f"{name} {holders[name]['gb']} GB" for name in gpu["agents"])
+        lines.append(f"  GPU {gpu['index']} ({gpu['name']}): {gpu['free']} GB free, SwarmUP {gpu['program']} GB, other jobs and the driver {gpu['others']} GB." + (f" Its models: {models}." if models else ""))
+    idle = [f"{name} ({swarm.getStatus(name)})" for name in swarm.getAgents() if (swarm.getInfo(name)["model"] or {}).get("local") and name not in holders]
+    if idle:
+        lines.append(f"  Hold nothing now: {', '.join(idle)}. A model loads when its agent starts.")
+    lines.append(f"  When it was built, the swarm was expected to need {live['needed']} GB if all its agents worked at once.")
+    return "\n".join(lines)
 
 
 def formatEvent(event):
@@ -171,9 +207,11 @@ class TreeView:
             return
         lines = [line for line in (formatEvent(event) for event in events) if line]
         tree = renderTree(self.swarm, self.console.color)
-        if tree != self.last and (lines or not self.last):
+        # What the GPUs hold changes all the time: alone, it does not print the tree again.
+        fixed = "\n".join(line for line in tree.split("\n") if not line.startswith(LIVE_VRAM))
+        if fixed != self.last and (lines or not self.last):
             lines += ["", tree, ""]
-            self.last = tree
+            self.last = fixed
         if lines:
             self.console.say("\n".join(lines))
 
@@ -256,6 +294,8 @@ def runCommand(console, swarm, line):
         console.say(renderTree(swarm, console.color))
     elif word == "cost":
         console.say(describeCosts(swarm))
+    elif word == "vram":
+        console.say(describeVram(swarm))
     elif word == "wheels":
         console.say(runWheelsCommand(swarm, words[1:]))
     elif word == "log":

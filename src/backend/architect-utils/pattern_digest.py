@@ -194,7 +194,7 @@ def contextOf(path, offset, agent, count=3):
             entry = json.loads(raw.decode("utf-8", "replace"))
         except ValueError:
             continue
-        if entry.get("agent") == agent and entry.get("kind") in ("request", "step", "call", "bad", "user", "draft", "review"):
+        if entry.get("agent") == agent and entry.get("kind") in ("request", "step", "call", "bad", "user", "draft", "review", "proposal"):
             entries.append(entry)
     return entries[-count:]
 

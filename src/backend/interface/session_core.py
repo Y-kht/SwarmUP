@@ -6,6 +6,7 @@ import threading
 import traceback
 from datetime import datetime
 
+from agent_journal import BuildLog
 from gpu_check import checkVram, readGpus
 from harness_utils import USER_NAME, describeError
 from interface_views import FormError, USER_ERRORS, describeAnswer, describeModel, describeQuestion, formatEvent
@@ -33,7 +34,7 @@ CONTEXT_LIMIT = 6
 FREE_ACTIONS = ("checkEmail", "checkMessenger", "findChats", "searchPublishers", "browse", "pickPath", "lookupModel", "price", "testModel", "modelCatalog", "answer",
                 "approve", "reject", "correct", "message", "startNow", "openLink", "openFolder", "refreshUnfinished", "quit", "taskForm",
                 "codexAccount", "calls", "mcpServers", "mcpInspect", "wheels", "setWheels", "learning", "patterns", "patternBrief", "patternDetail", "searchPatterns", "minePatterns", "wheelDetail",
-                "approveWheel", "revokeWheel", "retireWheel", "architectNotes")
+                "approveWheel", "revokeWheel", "retireWheel", "architectNotes", "skipLastPass")
 
 
 # ==============
@@ -78,7 +79,7 @@ class Session(SessionSteps, SessionModels, SessionRuns, SessionSaved, SessionMcp
             "resumeForm", "resume", "prepareCancel", "abandon", "refreshUnfinished", "openLink", "codexAccount", "codexSignIn", "codexCancel", "joinLive",
             "removeLive", "setBuildMode", "buildWithLeader", "setBudget", "saveSettings", "quit", "addAgents", "setSwarmFolder", "followUp", "calls", "mcpServers",
             "mcpAdd", "mcpInspect", "mcpApprove", "mcpRemove", "setArchitect", "wheels", "setWheels", "learning", "patterns", "patternBrief", "patternDetail", "searchPatterns",
-            "minePatterns", "wheelDetail", "approveWheel", "revokeWheel", "retireWheel", "architectNotes")}
+            "minePatterns", "wheelDetail", "approveWheel", "revokeWheel", "retireWheel", "architectNotes", "skipLastPass")}
 
     def reset(self):
         self.mission = ""
@@ -91,6 +92,8 @@ class Session(SessionSteps, SessionModels, SessionRuns, SessionSaved, SessionMcp
         self.order = "together"
         self.runInfo = {}
         self.trash = None
+        # What the leader said while it built the swarm, and what the user answered: the first run of the swarm writes it in its journal.
+        self.buildLog = BuildLog()
         self.resetArchitect()
 
     def touch(self):
@@ -341,7 +344,7 @@ class Session(SessionSteps, SessionModels, SessionRuns, SessionSaved, SessionMcp
                 "messages": swarm.getMessages()[-80:], "ready": swarm.getReadyAgents(), "resumed": self.runInfo.get("resume", False), **self.runInfo,
                 "removed": list(swarm.removed), "canJoin": not running or self.canJoin(swarm), "round": swarm.round, "requests": swarm.requests[-10:],
                 "missionId": swarm.id, "canFollowUp": not running and not self.isBusy(), "architect": self.describeArchitectRun(),
-                "vram": swarm.getVramStatus() if swarm.getNeededVram() else None}
+                "vram": swarm.getVramStatus() if swarm.getNeededVram() else None, "liveVram": swarm.getLiveVram() if swarm.getNeededVram() else None}
 
     def describeGpus(self):
         needed = round(sum(spec["model"]["vram"] for spec in self.specs if spec["model"]), 1)

@@ -3,6 +3,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -14,6 +15,7 @@ DRM_FOLDER = Path("/sys/class/drm")
 NO_GPU_MESSAGE = "No supported GPU was found (NVIDIA on Linux and Windows, AMD on Linux), so local models cannot run. Choose API models."
 
 gpuCache = {"loaded": 0, "gpus": []}
+programCache = {"loaded": 0, "memory": None}
 
 
 def bytesToGb(size):
@@ -44,7 +46,7 @@ def readNvidiaGpus():
     for line in result.stdout.splitlines() if result.returncode == 0 else []:
         try:
             *name, total, free = [part.strip() for part in line.split(",")]
-            gpus.append({"name": ", ".join(name), "total": bytesToGb(float(total) * MEBIBYTE), "free": bytesToGb(float(free) * MEBIBYTE)})
+            gpus.append({"index": len(gpus), "name": ", ".join(name), "total": bytesToGb(float(total) * MEBIBYTE), "free": bytesToGb(float(free) * MEBIBYTE)})
         except ValueError:
             continue
     return visibleGpus(gpus)
@@ -77,7 +79,7 @@ def readAmdGpus():
             name = (card / "device" / "product_name").read_text().strip()
         except OSError:
             name = ""
-        gpus.append({"name": name or f"AMD GPU {card.name}", "total": bytesToGb(total), "free": bytesToGb(total - used)})
+        gpus.append({"index": len(gpus), "name": name or f"AMD GPU {card.name}", "total": bytesToGb(total), "free": bytesToGb(total - used)})
     return gpus
 
 
@@ -91,6 +93,40 @@ def readGpus():
     if now - gpuCache["loaded"] > GPU_REFRESH_SECONDS:
         gpuCache.update(loaded=now, gpus=queryGpus())
     return gpuCache["gpus"]
+
+
+# What this program uses on each NVIDIA GPU, in GB, as the driver counts it: {the number of the GPU: GB}. A program has more on a GPU than what its models
+# reserved. None when the driver does not tell (a program in a container has another number for it).
+def readProgramOnNvidia():
+    command = findNvidiaSmi()
+    if not command:
+        return None
+    options = {"capture_output": True, "text": True, "timeout": GPU_TIMEOUT, "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
+    try:
+        uuids = subprocess.run([command, "--query-gpu=uuid", "--format=csv,noheader"], **options).stdout.split()
+        lines = subprocess.run([command, "--query-compute-apps=gpu_uuid,pid,used_gpu_memory", "--format=csv,noheader,nounits"], **options).stdout.splitlines()
+        rows = [[part.strip() for part in line.split(",")] for line in lines]
+        mine = {uuids.index(uuid): bytesToGb(float(used) * MEBIBYTE) for uuid, pid, used in rows if pid == str(os.getpid())}
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    return mine or None
+
+
+# What this program holds on the GPUs of the list now, in GB, one number for each. A program that loaded no local model has no PyTorch, and holds nothing.
+# When the driver does not tell, what PyTorch reserved is the closest number.
+def programMemory(gpus):
+    torch = sys.modules.get("torch")
+    if torch is None:
+        return [0.0 for gpu in gpus]
+    now = datetime.now().timestamp()
+    if now - programCache["loaded"] > GPU_REFRESH_SECONDS:
+        programCache.update(loaded=now, memory=readProgramOnNvidia())
+    if programCache["memory"] is not None:
+        return [programCache["memory"].get(gpu.get("index"), 0.0) for gpu in gpus]
+    try:
+        return [bytesToGb(torch.cuda.memory_reserved(number)) if number < torch.cuda.device_count() else 0.0 for number in range(len(gpus))]
+    except (AttributeError, RuntimeError):
+        return [0.0 for gpu in gpus]
 
 
 # What the GPUs can host, in GB. total is all their memory, and free is what no other job uses at this moment, which keeps changing.

@@ -73,7 +73,7 @@ class CallCostTests(unittest.TestCase):
         self.assertEqual(callCost(call(input=10, output=10), {"kind": "plan", "reference": 0.0}), 0.0)
 
     def testTheBudgetAndTheAmountsAreWrittenForPeople(self):
-        self.assertEqual([checkBudget(value) for value in ("5", "$12.50", "1,200", 3, "", None)], [5.0, 12.5, 1200.0, 3.0, None, None])
+        self.assertEqual([checkBudget(value) for value in ("5", "$12.50", "1,200", 3, "", "  ", None)], [5.0, 12.5, 1200.0, 3.0, None, None, None])
         for wrong in ("0", "-2", "ten", "nan", "inf"):
             with self.assertRaises(ValueError):
                 checkBudget(wrong)

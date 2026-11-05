@@ -31,9 +31,9 @@ FLUSH_SECONDS = 0.5
 # What the user types in the window of an agent is about that agent: "approve" approves it, "correct shorter" corrects it, and any other text is a message to it.
 AGENT_WORDS = ("approve", "reject", "start")
 AGENT_TEXT_WORDS = ("correct", "remove", "msg")
-SWARM_WORDS = ("help", "?", "tree", "log", "cost", "add", "stop", "kill", "quit")
+SWARM_WORDS = ("help", "?", "tree", "log", "cost", "vram", "add", "stop", "kill", "quit")
 # The commands that are never an answer to a question: while a question waits they still run (a real run lost a correction this way).
-ALWAYS_COMMANDS = ("cost", "add", "stop")
+ALWAYS_COMMANDS = ("cost", "vram", "add", "stop")
 # How often a question that can become useless checks if it still is needed.
 STALE_SECONDS = 0.5
 AGENT_EVENTS = ("activity", "status", "review", "scheduled", "model", "connectionLost", "joined", "removed", "call")
@@ -356,12 +356,15 @@ class Hub:
                 return None
             return "\n".join(([window.panel, ""] if window.panel else []) + list(window.lines)[-count:])
 
+    # What the GPUs hold is read before the lock of the hub is taken, like everything that is read of the swarm.
     def describeStatus(self):
+        swarm = self.swarm
+        vram = swarm.getLiveVram() if swarm is not None and swarm.isRunning() and swarm.getNeededVram() else None
         with self.lock:
             state = self.describeState()
             question = self.describeQuestion()["question"]
             return {"type": "status", "id": self.id, "session": self.id, **state, "question": question, "tree": self.windows[SWARM_WINDOW].panel,
-                    "windows": [window.name for window in self.windows.values()]}
+                    "windows": [window.name for window in self.windows.values()], "vram": vram}
 
     # Ends the session: a swarm that runs is saved so that it can be continued, the terminals are told, and the process ends.
     def end(self, message):

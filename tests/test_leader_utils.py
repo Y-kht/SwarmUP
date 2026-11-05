@@ -26,6 +26,7 @@ from leader_catalog import EXAMPLE_MODEL, LeaderCatalog
 from leader_manager import LeaderManager
 from leader_parser import isNoChange, parseOutput
 from model_messages import readToolCalls
+from agent_journal import BuildLog
 from leader_utils import designSwarm
 from models_library import API_KEYS, getModelInfo
 from swarm_harness import Swarm
@@ -488,6 +489,17 @@ class DesignTests(FolderTestCase):
         revise = next(prompt for prompt in model.prompts if "wants changes:" in prompt)
         self.assertIn("The user read the swarm you proposed and wants changes: Only the checker, please.", revise)
         self.assertIn('"name": "Writer"', revise.split("wants changes:")[1])
+
+    # The build happens before the mission has a journal: all of it waits in its log, what the leader wrote and what the user answered.
+    def testTheLogOfTheBuildKeepsTheProposalsAndTheAnswersOfTheUser(self):
+        model = LeaderModel(build=[block("build", agents=self.GOOD)], revise=[block("build", agents=self.GOOD[:1])])
+        leader, log = makeLeader(model, decisions=[{"decision": "reject", "message": "Only the checker, please."}]), BuildLog()
+        designSwarm(leader, makeCatalog(self.folder), log)
+        proposals = [fields for kind, _, _, fields in log.entries if kind == "proposal"]
+        self.assertEqual([(item["action"], item["decision"], item["message"]) for item in proposals], [("build", "rejected", "Only the checker, please."), ("build", "approved", "")])
+        self.assertIn("A swarm of 2 agents: Checker", proposals[0]["text"])
+        self.assertEqual(log.corrections(), ["Only the checker, please."])
+        self.assertIsNone(leader.journal)
 
     def testARejectedSwarmBuildsNothing(self):
         leader = makeLeader(LeaderModel(build=[block("build", agents=self.GOOD)]), decisions=[{"decision": "reject", "message": ""}])

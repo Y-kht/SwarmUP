@@ -118,6 +118,7 @@ class SwarmRun:
         if seconds > 0:
             member["wake"].clear()
             member["startAt"] = start
+            self.release(member)
             self.emit("scheduled", name, startAt=f"{start:%Y-%m-%d %H:%M}")
             with self.changed:
                 self.changed.notify_all()
@@ -135,8 +136,14 @@ class SwarmRun:
     def runLeader(self, name):
         self.waitForStart(name)
         self.runMember(name)
+        self.dropIfFailed(name, self.anyMember(name))
 
-    # One failing agent never stops the swarm. Its error is kept and reported to the leader.
+    # Plan mode: an agent that cannot even write its plan leaves the swarm, and the others go on.
+    def runPlanner(self, name):
+        self.runMember(name)
+        self.dropIfFailed(name, self.anyMember(name))
+
+    # One failing agent never stops the swarm. Its error is kept and reported to the leader, and it leaves the swarm (swarm_losses.py).
     # An agent that is already done or failed, because the swarm was interrupted after that, is not run again, and neither is one that was removed.
     def runMember(self, name):
         member = self.anyMember(name)
@@ -179,16 +186,6 @@ class SwarmRun:
             text = member["result"] if member["result"] is not None else member["error"]
             self.journal.add("result", name, mode=member["mode"], ok=member["result"] is not None, text=clip(text, 1500), length=len(str(text or "")))
 
-    # A worker that finished in execute mode needs its model no more in this run: a model on the GPUs lets its memory go for the agents that
-    # still work (the leader works last). It loads again if a later round needs it.
-    def release(self, member):
-        model = member["agent"].agent
-        if member["mode"] == "execute" and getattr(model, "local", False) is True and hasattr(model, "unload"):
-            try:
-                model.unload()
-            except Exception:
-                traceback.print_exc()
-
     # A result is delivered once: after a resume, the agent already has the results it received before the swarm stopped.
     def deliverResult(self, sender, receiver):
         result = str(self.members[sender]["result"])
@@ -196,31 +193,36 @@ class SwarmRun:
             self.communicate(sender, receiver, result)
 
     # Runs in its own thread. It waits for the agents it needs, works, and then reports to the leader. The agents it waits for are read again
-    # after each wait, because one of them may leave the swarm meanwhile (it is then not waited for anymore). An agent that left does not report.
+    # after each wait, because one of them may leave the swarm meanwhile (it is then not waited for anymore). While it waits, or sits a round out, its
+    # model holds no memory of the GPUs (after a plan, all of them are loaded). If an agent it waited for gives no result, the leader decides if it
+    # goes on (swarm_losses.py). An agent that left does not report.
     def runWorker(self, name):
         member = self.anyMember(name)
         try:
             if member["status"] in ("done", "failed") or member.get("removed"):
+                self.release(member)
                 return
+            if any(other in self.finished and not self.finished[other].is_set() for other in member["waitsFor"]):
+                self.release(member)
             for other in list(member["waitsFor"]):
                 if other in self.finished:
                     self.finished[other].wait()
             if member.get("removed"):
                 return
             waited = [other for other in member["waitsFor"] if other in self.members]
-            missing = [other for other in waited if self.members[other]["result"] is None]
-            if missing:
-                member["error"] = f"{', '.join(missing)} did not finish, so {name} could not start."
-                self.setStatus(name, "failed")
-            else:
-                for other in waited:
+            lost = [*member["lost"], *({"name": other, "why": self.members[other]["error"] or "it has no result"} for other in waited if self.members[other]["result"] is None)]
+            if lost and not self.stopped and not self.keepsWorking(name, member, lost):
+                return
+            for other in waited:
+                if self.members[other]["result"] is not None:
                     self.deliverResult(other, name)
-                self.waitForStart(name)
-                self.runMember(name)
+            self.waitForStart(name)
+            self.runMember(name)
             if not member.get("removed"):
                 outcome = member["result"] if member["status"] == "done" else f"FAILED. {member['error']}"
                 self.communicate(name, self.leader, f"{member['role']}: {outcome}")
                 self.release(member)
+                self.dropIfFailed(name, member)
         finally:
             if name in self.finished:
                 self.finished[name].set()
@@ -246,6 +248,7 @@ class SwarmRun:
         if not any(request["round"] == self.round for request in self.requests):
             self.requests.append({"round": self.round, "text": self.mission, "time": f"{datetime.now():%Y-%m-%d %H:%M:%S}"})
             self.record("addUserPrompt", self.round, self.mission, kind="The mission")
+        self.writeBuildLog()
         if not resume:
             self.messages, self.summary = (self.messages if following else []), ""
         previous = {name: member["result"] for name, member in self.members.items()}
@@ -304,6 +307,12 @@ class SwarmRun:
         except Exception:
             traceback.print_exc()
 
+    # What was said before the journal existed (the leader that built the swarm, the corrections of the user) goes first in it, and in the memory of the mission.
+    def writeBuildLog(self):
+        for message in self.buildLog.corrections():
+            self.record("addUserPrompt", self.round, message, "a proposal of the leader", kind="Answer to")
+        self.buildLog.writeTo(self.journal)
+
     def tellJournalProblem(self, text):
         if self.leader in self.members:
             threading.Thread(target=self.members[self.leader]["agent"].notifyUser, args=(text,), daemon=True).start()
@@ -328,6 +337,7 @@ class SwarmRun:
     def beat(self, stop):
         while not stop.wait(HEARTBEAT_SECONDS):
             self.checkpoint()
+            self.noteVram()
 
     # The run is over. Its state stays saved, in the history of the missions: finished (the user can follow up), stopped by the user, or, when
     # it was cut short by an error, interrupted, so the next start finds it at once and offers to continue it.
@@ -381,7 +391,7 @@ class SwarmRun:
     # Plan mode: all the agents, the leader too, write their plans at the same time. It returns the summary plan, or None if a plan was not approved.
     # If the user approved every plan on its own and never saw a summary, the leader writes one now.
     def runPlanning(self):
-        self.runStage(list(self.members), self.runMember, plan=True)
+        self.runStage(list(self.members), self.runPlanner, plan=True)
         if any(member["status"] != "done" for member in self.members.values()):
             return None
         if not self.summary:

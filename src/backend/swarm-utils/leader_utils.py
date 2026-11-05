@@ -28,6 +28,14 @@ REPAIR_ATTEMPTS = 3
 MAX_REVISIONS = 8
 
 ASK_ATTEMPTS = 3
+JOURNAL_TEXT_CHARS = 1500
+
+
+# A proposal of the leader and what the user answered, as the journal of the mission keeps it.
+def describeAnswer(proposal, answer):
+    answer = answer if isinstance(answer, dict) else {}
+    return {"action": proposal["action"], "text": str(proposal.get("text") or "")[:JOURNAL_TEXT_CHARS], "why": str(proposal.get("why") or "")[:JOURNAL_TEXT_CHARS],
+            "decision": "approved" if answer.get("decision") == "approve" else "rejected", "message": str(answer.get("message") or "").strip()[:JOURNAL_TEXT_CHARS]}
 
 
 # ==============
@@ -114,15 +122,17 @@ def findChat(agent):
 # The leader sees every file of the folder of the mission, and can read them before it proposes. It proposes the swarm with
 # leader__propose_swarm: SwarmUP checks it and gives back what is wrong, then the user approves it, rejects it, or says what to change, and the
 # leader proposes it again. It returns the agents (with every answer the user gave), or None if the user rejected it.
+# log (BuildLog in agent_journal.py) keeps all of it for the journal of the mission, which does not exist yet: the architect reads it like the rest.
 # ==============
-def designSwarm(leader, catalog):
+def designSwarm(leader, catalog, log=None):
     if catalog.folder and leader.folder is None:
         leader.setFolder(catalog.folder)
     desk = leader.leaderDesk = LeaderDesk(catalog, building=True)
+    leader.journal = log
     try:
         return proposeUntilApproved(leader, catalog, desk)
     finally:
-        leader.leaderDesk = None
+        leader.leaderDesk = leader.journal = None
 
 
 def proposeUntilApproved(leader, catalog, desk):
@@ -145,6 +155,7 @@ def proposeUntilApproved(leader, catalog, desk):
         text = f"A swarm of {len(agents)} {'agent' if len(agents) == 1 else 'agents'}: " + "; ".join(f"{agent['name']} ({agent['label']}, {agent['model']})" for agent in shown)
         proposal = {"action": "build", "agent": catalog.leader, "why": (desk.proposed["why"] or reply or "").strip(), "text": text, "agents": shown}
         answer = leader.askProposal({**proposal, "summary": describeProposal(proposal)})
+        leader.note("proposal", **describeAnswer(proposal, answer))
         if isinstance(answer, dict) and answer.get("decision") == "approve":
             if not askMissing(agents, catalog, leader):
                 raise ValueError("Some agents still miss what only you can give (a password, an address, an API key...), so the swarm cannot be made.")

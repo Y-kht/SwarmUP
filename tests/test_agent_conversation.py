@@ -513,7 +513,7 @@ class SwarmTests(ConversationTestCase):
         swarm.reviewer = None
         with mock.patch.object(WorkerLoop, "run", lambda self: self.askAgent("Work.") or None):
             swarm.run()
-        self.assertEqual(swarm.getStatus("Worker"), "failed")
+        self.assertEqual(swarm.removed[0]["status"], "failed")
         self.assertFalse((self.work / "half.txt").exists())
 
 

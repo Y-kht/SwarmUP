@@ -138,7 +138,7 @@ def describeProposal(proposal):
     if proposal["action"] == "add":
         return f"proposes to add an agent to the swarm:\n{describeAgentText(proposal['details'])}"
     details = proposal["details"]
-    waited = f" {', '.join(details['waitedBy'])} wait for it, and go on without it." if details.get("waitedBy") and details.get("status") != "done" else ""
+    waited = f" {', '.join(details['waitedBy'])} wait for it: the leader then decides if they go on without it, or leave too." if details.get("waitedBy") and details.get("status") != "done" else ""
     return f"proposes: {proposal['text']}.{waited}"
 
 
