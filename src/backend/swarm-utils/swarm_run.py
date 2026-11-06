@@ -8,6 +8,7 @@ from agent_journal import Journal, clip
 from agent_storehouse import makeRunName
 from background_processes import stopProcesses
 from harness_utils import STATE_LOCK, STOPPED_MESSAGE, SwarmStopped
+from leader_wheels import giveLoneWheels
 from mcp_gateway import Gateway
 from mission_memory import WorkSession
 from project_identity import projectOf, registerMission
@@ -244,6 +245,8 @@ class SwarmRun:
             self.gateway = Gateway(self.id, onEvent=self.onGatewayEvent)
         self.gateway.setFolder(self.session.folder)
         self.openJournal()
+        if self.onLoneWheel not in self.listeners:
+            self.addListener(self.onLoneWheel)
         self.record("setMission", self.mission, self.round, project=self.project)
         if not any(request["round"] == self.round for request in self.requests):
             self.requests.append({"round": self.round, "text": self.mission, "time": f"{datetime.now():%Y-%m-%d %H:%M:%S}"})
@@ -267,6 +270,7 @@ class SwarmRun:
                 if self.mode == "plan":
                     agent.approvedPlan = ""
             self.connectAgent(name, member, resume)
+        giveLoneWheels(self)
         if following:
             self.startRound(previous)
         self.active = True
@@ -293,6 +297,11 @@ class SwarmRun:
         agent.journal = self.journal
         agent.onConnectionLost, agent.onProgress = partial(self.waitForResume, name), self.checkpoint
         agent.leaderDesk = LeaderDesk(self.manager.catalog, manager=self.manager) if self.manager is not None and name == self.leader else None
+
+    # A wheel the architect just saved reaches an agent that works alone at once: it has no leader to give it (leader_wheels.py).
+    def onLoneWheel(self, event):
+        if event["kind"] == "wheel" and event.get("action") in ("saved", "updated", "retired"):
+            giveLoneWheels(self)
 
     # The journal of the mission (agent_journal.py): every run of the mission writes in the same one, which the miner of its project reads.
     def openJournal(self):

@@ -94,6 +94,8 @@ class Hub:
         # onChange writes the file of the session, onEnd stops the server and removes the file. exit ends the process.
         self.onChange, self.onEnd, self.exit = None, None, os._exit
         self.lastSummary = None
+        # A model that drives the session alone has its desk here (SoloDesk in cli_solo.py).
+        self.solo = None
         threading.Thread(target=self.runCommands, daemon=True).start()
 
     # ---------- The windows. Must be called with self.lock held. ----------
@@ -468,6 +470,8 @@ class SessionHandler(socketserver.StreamRequestHandler):
         elif kind == "input":
             problem = hub.input(request.get("window"), request.get("text", ""), request.get("question"))
             self.reply({"type": "error", "message": problem} if problem else {"type": "ok"})
+        elif kind == "solo":
+            self.reply(hub.solo.handle(request) if hub.solo is not None else {"type": "error", "message": "This session is not driven by a model: answer it with send."})
         elif kind == "kill":
             self.reply({"type": "ok"})
             hub.kill()

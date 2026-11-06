@@ -4,6 +4,7 @@
 from base_loop import Loop
 from cli_console import askUntilValid, chooseFrom, heading, shorten
 from cli_models import UserLeader, prepareApi, prepareLocal, signInCodex
+from model_adapters import Driver
 from cli_program import ConsoleMaker, addLive, chooseMode, closeArchitect, connect, startArchitect, startSwarm, unloadModels
 from cli_steps import askAccounts, askField
 from cli_view import renderTree, watchCosts
@@ -28,7 +29,7 @@ def describeInterrupted(saved):
 # The model of an agent of a swarm that is brought back. The API keys and the Hugging Face tokens are never saved, so they are asked again.
 def rebuildModel(console, info, keys, tokens, name="Leader"):
     if info.get("user"):
-        return UserLeader(console, name)
+        return Driver(console.desk, name) if info.get("driver") and getattr(console, "desk", None) is not None else UserLeader(console, name)
     if info.get("cli") == "codex":
         if not signInCodex(console):
             raise ModelError("Codex is not signed in, so this agent cannot continue.")

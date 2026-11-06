@@ -81,11 +81,25 @@ def makeDialog(webview, window):
     return choose
 
 
+# It says if the window opened. A computer without the engine of the system (no WebView2, no .NET) or with a damaged one goes on to the next kind of window.
+def tryWebviewWindow(webview, session, address):
+    try:
+        openWebviewWindow(webview, session, address)
+        return True
+    except KeyboardInterrupt:
+        raise
+    except Exception as error:
+        session.dialog = None
+        print(f"The window of the system could not open ({type(error).__name__}: {error}), so SwarmUP tries an application window of a browser.", flush=True)
+        return False
+
+
 def openWebviewWindow(webview, session, address):
     window = webview.create_window("SwarmUP", address, width=WINDOW_SIZE[0], height=WINDOW_SIZE[1], min_size=WINDOW_MINIMUM, confirm_close=True,
                                    background_color=WINDOW_BACKGROUND, text_select=True)
     session.dialog = makeDialog(webview, window)
-    webview.start(private_mode=False, storage_path=str(windowFolder("webview")))
+    # On Windows only WebView2: without it, pywebview would use the engine of Internet Explorer, which cannot show these pages.
+    webview.start(private_mode=False, storage_path=str(windowFolder("webview")), gui="edgechromium" if os.name == "nt" else None)
 
 
 def windowFolder(name):
@@ -126,8 +140,10 @@ def main():
         print("pywebview is not installed, so SwarmUP cannot open its own window. Install it with: pip install pywebview", flush=True)
     print(f"SwarmUP is running at {address}", flush=True)
     try:
-        if webview:
-            openWebviewWindow(webview, session, address)
+        opened = bool(webview) and tryWebviewWindow(webview, session, address)
+        browser = browser or (findAppBrowser() if webview and not opened and options.window == "auto" else None)
+        if opened:
+            pass
         elif browser:
             openAppWindow(browser, address)
         else:

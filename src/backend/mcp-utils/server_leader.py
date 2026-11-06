@@ -56,10 +56,12 @@ def managing(agent):
     return desk is not None and desk.manager is not None and not desk.building
 
 
-# A leader of a swarm that runs, model or user, managed or not: it can give wheels to its agents.
+# A leader of a swarm that runs, model or user, managed or not: it can give wheels to its agents. An agent alone gets them by itself (leader_wheels.py):
+# in a real run, one gave itself an empty list, and that list counted as the choice of the user, so it got no wheel anymore.
 def leading(agent):
     team = getattr(agent.loop, "team", None)
-    return forLeader(agent) and team is not None and getattr(team, "members", None) is not None and getattr(team, "active", False)
+    members = getattr(team, "members", None)
+    return forLeader(agent) and members is not None and len(members) > 1 and getattr(team, "active", False)
 
 
 def keeping(agent):

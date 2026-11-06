@@ -2,3 +2,4 @@ agent-files
 __pycache__/
 *.pdf
 *BOOKLET*
+standalone-executables

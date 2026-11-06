@@ -158,7 +158,8 @@ class Toolbox(TransferTools, ProcessTools):
         answer = self.work.permit(request) if self.work is not None else decidePermission(self.loop, request)
         if answer.get("decision") not in ("once", "run"):
             why = f" They said: {answer['message']}" if answer.get("message") else ""
-            raise ToolProblem(f"The user refused to let you {action}.{why} Go on without it, or ask your leader with team__send_message.")
+            ask = ", or ask your leader with team__send_message" if len(getattr(getattr(self.loop, "team", None), "members", ())) != 1 else ""
+            raise ToolProblem(f"The user refused to let you {action}.{why} Go on without it{ask}.")
 
     # A change of a place: in the folder of the agent, the user decides and the original is kept so it can be put back; in the temp folder
     # nothing is asked; in the memory, its rules decide (MissionMemory.refusal).
@@ -437,5 +438,7 @@ def hasSession(agent):
     return getattr(agent.loop, "session", None) is not None
 
 
+# An agent alone in its swarm has nobody to write to: it gets these tools when a second agent joins.
 def hasTeam(agent):
-    return getattr(agent.loop, "team", None) is not None
+    team = getattr(agent.loop, "team", None)
+    return team is not None and len(getattr(team, "members", ())) != 1

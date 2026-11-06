@@ -43,6 +43,11 @@ CONVERSATIONS_FOLDER = "conversations"
 BAD_CALLS = 3
 # The times a model may make exactly the same call in one request; after that it is told to use the result it has.
 SAME_CALLS = 2
+# A command or a wheel can give something new without the agent changing a file through its tools (a test that was fixed by a command): it has more tries.
+SAME_RUNS = 5
+RUNNING_TOOLS = ("processes__run_command", "wheels__")
+# After one of these worked, what the agent read and ran may be different: the same call is a new call, like the tests it runs again after a fix.
+CHANGING_TOOLS = ("files__write_file", "files__edit_file", "files__make_folder", "files__move_path", "files__delete_path", "transfer__copy_path", "transfer__paste_text")
 TEXT_SECONDS = 0.25
 
 
@@ -53,7 +58,10 @@ def describeAgent(loop, readOnly, own):
         return loop.systemPrompt()
     root = agentWorkspace(loop)
     workplace = prompts.FOLDER_WORKPLACE.format(folder=root, tree=describeTree(root)) if loop.folder else prompts.SCRATCH_WORKPLACE.format(folder=root)
-    parts = [prompts.AGENT_SYSTEM_PROMPT.format(name=loop.name, task=loop.describeTask() or "the requests of SwarmUP below.", workplace=workplace)]
+    alone = len(getattr(getattr(loop, "team", None), "members", ())) == 1
+    asking = "" if getattr(adapterOf(loop.agent), "hasOwnUser", False) else prompts.ASK_RULE
+    parts = [prompts.AGENT_SYSTEM_PROMPT.format(name=loop.name, task=loop.describeTask() or "the requests of SwarmUP below.", workplace=workplace,
+                                                team=prompts.ALONE_RULE if alone else prompts.TEAM_RULE, asking=asking)]
     if readOnly:
         parts.append(prompts.LOOK_ONLY_PROMPT)
     if own and loop.rules:
@@ -249,10 +257,14 @@ class Conversation:
 
     # A small model can call the same tool with the same arguments again and again. The third time, the call is not run: the model is told
     # to use the result it already has, so the request goes on instead of turning in a circle.
+    # A change of the files starts the count again: in a real run, an agent that fixed a bug was refused the third run of its tests.
+    # An adapter that runs its own loop from outside (repeatsFreely: a model that drives the command line) decides this itself.
     def repeated(self, call):
+        if getattr(adapterOf(self.loop.agent), "repeatsFreely", False):
+            return ""
         key = (call["name"], json.dumps(call.get("arguments") or {}, sort_keys=True, ensure_ascii=False))
         self.sameCalls[key] = self.sameCalls.get(key, 0) + 1
-        if self.sameCalls[key] <= SAME_CALLS:
+        if self.sameCalls[key] <= (SAME_RUNS if call["name"].startswith(RUNNING_TOOLS) else SAME_CALLS):
             return ""
         return (f"you already made this same call {self.sameCalls[key] - 1} times in this request, and its result is above. Use it, do something "
                 "else, or give your answer now.")
@@ -327,6 +339,8 @@ class Conversation:
                                   text=clipText(call.pop("text", ""), 1000, 500))
                     text, error = (f"Not done: {problem}", True) if problem else link.call(call["name"], call.get("arguments"), readOnly, callId=call.get("id"))
                     self.messages.append({"role": "tool", "id": call["id"], "name": call["name"], "content": text, "error": error})
+                    if not error and call["name"] in CHANGING_TOOLS:
+                        self.sameCalls = {}
                 news = self.news()
                 if step == steps - 2:
                     news = f"{news}\n\n{prompts.LAST_STEP}" if news else prompts.LAST_STEP

@@ -13,6 +13,7 @@ import threading
 import time
 from datetime import datetime
 
+from harness_utils import NO_WINDOW
 from mcp_kit import ToolFailure
 
 
@@ -48,7 +49,7 @@ def savePids(missionId, temp):
 # Stops a command with everything it started: politely first, then by force.
 def stopTree(pid):
     if os.name == "nt":
-        subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True)
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True, creationflags=NO_WINDOW)
         return
     try:
         os.killpg(pid, signal.SIGTERM)
@@ -148,7 +149,7 @@ class ProcessTools:
 
     # Waits for a command and says every few seconds that it still runs. A stop of the swarm stops it at once, with everything it started.
     def runInForeground(self, command, folder, seconds):
-        options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
+        options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | NO_WINDOW} if os.name == "nt" else {"start_new_session": True}
         with tempfile.TemporaryFile() as output:
             process = subprocess.Popen(command, shell=True, cwd=folder, stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, **options)
             started = told = time.monotonic()
@@ -177,7 +178,7 @@ class ProcessTools:
             number = 1 + max([int(path.stem[1:]) for path in logs.glob("p*.log") if path.stem[1:].isdigit()] + [len(running)])
             key = f"p{number}"
             log = logs / f"{key}.log"
-            options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
+            options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | NO_WINDOW} if os.name == "nt" else {"start_new_session": True}
             with open(log, "wb") as output:
                 process = subprocess.Popen(command, shell=True, cwd=folder, stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, **options)
             running[key] = {"process": process, "agent": self.loop.name, "command": command, "folder": str(folder), "log": log,

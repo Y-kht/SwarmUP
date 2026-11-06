@@ -5,6 +5,7 @@ import os
 import re
 import smtplib
 import socket
+import subprocess
 import threading
 import urllib.request
 import xml.etree.ElementTree as ElementTree
@@ -25,7 +26,8 @@ from pathlib import Path
 # folder of the SWARMUP_HOME environment variable (for a packaged command, or a test).
 PROJECT_FOLDER = Path(__file__).resolve().parents[3]
 AGENT_FILES = Path(os.environ["SWARMUP_HOME"]).expanduser() if os.environ.get("SWARMUP_HOME") else PROJECT_FOLDER / "agent-files"
-AGENT_RULES = PROJECT_FOLDER / "agent-rules"
+# An application cannot be changed, so its rules files are with the data of the user (standalone_app.py).
+AGENT_RULES = Path(os.environ["SWARMUP_RULES"]).expanduser() if os.environ.get("SWARMUP_RULES") else PROJECT_FOLDER / "agent-rules"
 GENERAL_RULES = "AGENT_RULES.md"
 MAX_CONTEXT_ITEMS = 5
 
@@ -59,6 +61,8 @@ STOPPED_MESSAGE = "The user stopped the swarm before this agent finished."
 # The agents of a swarm work at the same time, so they take turns to write the files and to speak to the user.
 CONTEXT_LOCK = threading.RLock()
 USER_LOCK = threading.RLock()
+# On Windows, a program without a console opens a window for each console program it starts: this keeps them hidden.
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 STATE_LOCK = threading.Lock()
 
 

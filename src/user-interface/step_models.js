@@ -89,8 +89,18 @@ function modelRow(agent) {
         !model.local && !model.user ? (agent.tested === 'ok' ? badge('Connection works', 'success', 'check') : agent.tested === 'failed' ? badge('Connection failed', 'danger', 'x') :
           button('Test the connection', { kind: 'ghost', size: 'sm', iconName: 'zap', busy: ui.busy[`test-${agent.id}`], onClick: () => testModel(agent) })) : null) :
         h('div', { class: 'small faint' }, 'No model yet.'),
-      agent.missing.length ? callout('warning', 'download', h('b', {}, `This model needs ${agent.missing.join(', ')}.`), h('div', {}, 'Install them in a terminal, then check again:'), codeLine(missingCommand),
-        h('div', {}, button('Check again', { size: 'sm', iconName: 'refresh', busy: ui.busy.checkPackages, onClick: () => act('checkPackages') }))) : null));
+      agent.missing.length ? callout('warning', 'download', h('b', {}, `This model needs ${agent.missing.join(', ')}.`), ...installHelp(agent.missing, missingCommand,
+        button('Check again', { size: 'sm', iconName: 'refresh', busy: ui.busy.checkPackages, onClick: () => act('checkPackages') }))) : null));
+}
+
+// The application installs what a model needs with a click, since it has no terminal (package_installer.py). Otherwise it is a command for the terminal.
+function installHelp(packages, command, again) {
+  const job = store.state.jobs.install;
+  if (!store.state.canInstall) return [h('div', {}, 'Install them in a terminal, then check again:'), codeLine(command), h('div', {}, again)];
+  const running = job?.state === 'running';
+  return [h('div', {}, running ? `Downloading ${packages.join(', ')}. This can take many minutes for large packages, and the window stays usable.` : 'SwarmUP can download them for you, into its own folder.'),
+    job?.state === 'failed' ? h('div', { class: 'small' }, job.error) : null,
+    h('div', { class: 'row wrap' }, button('Install', { kind: 'primary', size: 'sm', iconName: 'download', busy: running || ui.busy.installModelPackages, onClick: () => act('installModelPackages', { packages }) }), again)];
 }
 
 async function testModel(agent) {
@@ -364,8 +374,8 @@ function codingAgentPanel(modal) {
   if (modal.cli === 'claude-code') {
     const missing = modal.catalog.cli['claude-code'].missing;
     return h('div', { class: 'stack' }, cards,
-      missing.length ? callout('warning', 'download', h('b', {}, 'Claude Code needs its Python library.'), h('div', {}, 'It contains Claude Code itself. Install it in a terminal, then check again:'),
-        codeLine(`pip install -U ${missing.join(' ')}`), h('div', {}, button('Check again', { size: 'sm', iconName: 'refresh', busy: ui.busy.catalog, onClick: () => loadCatalog(modal) }))) :
+      missing.length ? callout('warning', 'download', h('b', {}, 'Claude Code needs its Python library, which contains Claude Code itself.'), ...installHelp(missing, `pip install -U ${missing.join(' ')}`,
+        button('Check again', { size: 'sm', iconName: 'refresh', busy: ui.busy.catalog, onClick: () => loadCatalog(modal) }))) :
         h('div', {}, h('div', { class: 'model-list' }, agents['claude-code'].models.filter(name => name === store.catalog.defaultCliModel ||
           (modal.catalog.cli['claude-code'].prices || []).find(entry => entry.name === name)?.status !== 'overBudget').map(name => {
           if (name === store.catalog.defaultCliModel) return option('claude-code', name, 'Let Claude Code choose', 'Its default model. Its price is only known once it ran.', true);

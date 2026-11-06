@@ -4,6 +4,7 @@ from datetime import datetime
 import agent_prompts as prompts
 from harness_utils import STOPPED_MESSAGE, SUMMARY_LENGTH, SwarmStopped, USER_NAME, isNo, isOnline, isYes, stripFences
 from memory_cache import describeLongTerm
+from model_adapters import adapterOf
 from mission_memory import USER_PROMPTS, splitRecord
 
 
@@ -244,7 +245,8 @@ class SwarmReview:
         summary = self.writeSummary(request)
         with leader.userLock:
             leader.notifyUser(f"[{self.leader}] Summary of the {what}s:\n{summary}")
-            leader.notifyUser(f"You can also check, approve or correct the {what} of each agent by clicking on its name in the swarm.")
+            if len(self.members) > 1:
+                leader.notifyUser(f"You can also check, approve or correct the {what} of each agent by clicking on its name in the swarm.")
             for name in shown:
                 if name in self.members and self.members[name]["problem"]:
                     leader.notifyUser(f"Warning for {name}: the automatic checks found a problem with its draft: {self.members[name]['problem']}")
@@ -386,6 +388,9 @@ class SwarmReview:
         if self.session is None:
             return
         memory, leader = self.session.memory, self.getMember(self.leader)["agent"]
+        # A model that drives the command line alone keeps what lasts when it sees fit, with its tool: it is not stopped for that at the end of each round.
+        if getattr(adapterOf(leader.agent), "hasOwnUser", False):
+            return
         written = memory.readRound(USER_PROMPTS, self.round)
         if not hasFeedback(written):
             return

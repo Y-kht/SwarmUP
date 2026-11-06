@@ -1207,7 +1207,7 @@ class EndToEndTests(ProgramCase):
                                "Collect the text of Writer and give the final report.", "", "n", "Boss",
                                "tasks", "4", "the sky", "100", "", "",
                                "",
-                               "4",
+                               "4", "1",
                                "2", "1", "n", "n",
                                "2", "1",
                                "yes", "Final report: the text is ready.\\nNothing else to do."])

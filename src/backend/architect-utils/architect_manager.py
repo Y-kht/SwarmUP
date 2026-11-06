@@ -150,14 +150,15 @@ class ArchitectManager:
         if self.mayRunNow("end") and self.worthEnd():
             self.runPass("end")
 
-    # The last pass of a run only when the run did something and something waits for the architect.
+    # The last pass of a run when a pattern just came to repeat, however short the run was (many short missions repeat too: in a real run of 27
+    # entries the pass never came), or when a run that did something can still learn from what repeats.
     def worthEnd(self):
         store = self.store()
         if store is None or self.swarm.journal is None:
             return False
-        if self.swarm.journal.written < MIN_ACTIVITY:
-            return False
-        return bool(store.pendingSignals()) or bool(store.patterns(statuses=("repeating", "cross"), limit=1))
+        if store.pendingSignals():
+            return True
+        return self.swarm.journal.written >= MIN_ACTIVITY and bool(store.patterns(statuses=("repeating", "cross"), limit=1))
 
     def mayRunNow(self, reason):
         if self.cancelled.is_set() or self.overBudget():
@@ -166,7 +167,7 @@ class ArchitectManager:
         if info is None:
             return False
         if reason == "signal":
-            if how == "share" or self.passesThisRun >= MAX_PASSES_WHILE_WORKING or time.time() - self.lastPass < PASS_GAP_SECONDS:
+            if how in ("share", "driver") or self.passesThisRun >= MAX_PASSES_WHILE_WORKING or time.time() - self.lastPass < PASS_GAP_SECONDS:
                 return False
         return True
 

@@ -66,6 +66,12 @@ class SwarmTeam:
             self.connectAgent(name, member, False)
             agent.inbox, agent.userMessages, agent.progress, agent.actions = [], [], {}, []
             self.communicate(self.leader, name, self.describe(name))
+            # The first agent was alone until now: it gets the tools of the team at its next step.
+            if self.gateway is not None:
+                for other in self.members:
+                    link = self.gateway.find(other)
+                    if link is not None:
+                        link.stale = True
             self.tellTeam(f"{name} joined the swarm: {role}. Task: {task}" + (f" It waits for {', '.join(waitsFor)}." if waitsFor else ""), exclude=name)
             if not stage["plan"]:
                 self.finished[name] = threading.Event()
@@ -297,6 +303,8 @@ class SwarmTeam:
             (f" {', '.join(finished)} finished, so they cannot read it." if finished and readers else "")
 
     def describeTeamFor(self, name):
+        if len(self.members) == 1 and name in self.members and not self.removed:
+            return f"You are {name}, and you work alone: there is no other agent in this swarm.{self.describeWheelsOf(name)}"
         lines = [f"You are {name}. The leader is {self.leader}: it works last, and receives the result of every agent."]
         for other, member in list(self.members.items()):
             waits = f" It waits for {', '.join(member['waitsFor'])}." if member["waitsFor"] and other != self.leader else ""
@@ -429,4 +437,5 @@ class SwarmTeam:
         team = "\n".join(f"- {other}{' (leader)' if other == self.leader else ''}: {info['role']}. Task: {info['task']}"
                          f"{' Waits for: ' + ', '.join(info['waitsFor']) + '.' if info['waitsFor'] and other != self.leader else ''}"
                          for other, info in self.members.items())
-        return f"Mission of the swarm: {self.mission}\nYou are {name}, the {member['role']}. Your task: {member['task']}\nThe agents of the swarm:\n{team}"
+        alone = "You work alone: there is no other agent in this swarm." if len(self.members) == 1 else f"The agents of the swarm:\n{team}"
+        return f"Mission of the swarm: {self.mission}\nYou are {name}, the {member['role']}. Your task: {member['task']}\n{alone}"
