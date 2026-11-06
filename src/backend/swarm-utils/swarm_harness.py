@@ -105,6 +105,8 @@ class Swarm(SwarmTeam, SwarmVram, SwarmLosses, SwarmReview, SwarmRun, SwarmRound
         self.journal = None
         self.project = None
         self.architect = None
+        # The desk of a model that drives the command line alone (SoloDesk in cli_solo.py): it is also its own architect.
+        self.driver = None
         # What was said before the journal exists (agent_journal.py), and the memory of the GPUs the user interfaces last heard of (swarm_vram.py).
         self.buildLog = BuildLog()
         self.vramSeen = None

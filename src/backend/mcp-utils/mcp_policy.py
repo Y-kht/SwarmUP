@@ -35,6 +35,9 @@ def judgePermission(loop, request):
         return decision("deny", PLAN_REFUSAL), "plan"
     if request.get("free") or (key == "change" and request.get("place", "") == "" and not loop.folder):
         return decision("once"), "free"
+    # The user chose at the start that the agent who drives SwarmUP approves by calling (cli_solo.py): it is recorded like every other decision.
+    if getattr(loop, "approvals", "") == "auto":
+        return decision("once"), "auto"
     shared = getattr(getattr(loop, "team", None), "allowedAll", None)
     if key in loop.allowed:
         return decision("once"), "remembered"

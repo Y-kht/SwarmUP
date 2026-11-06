@@ -200,6 +200,12 @@ def chooseApiModel(console, swarm, task, replacing=None):
         return getModelInfo(recommended[labels.index(picked)])
 
 
+# How the actions of the user who leads are approved: the user chooses it at the start.
+def chooseApprovals(console):
+    options = ["Ask: each change of a file, command or wheel waits for an answer here", "Auto: calling a tool is the approval, so nothing waits (every call is still recorded and can be put back)"]
+    return "auto" if chooseFrom(console, "\nHow must your own actions be approved?", options) == options[1] else ""
+
+
 def chooseKind(console, swarm, number, replacing=None, leader=False):
     status = checkVram(swarm.getNeededVram(replacing), readGpus())
     local = f"Local: runs on your GPUs ({status['total']} GB of VRAM, {status['free']} GB free now). Free to use and private, but the model must fit in the VRAM." if status["gpus"] \
@@ -365,6 +371,7 @@ def chooseModel(console, swarm, spec, number, total, keys, tokens, replacing=Non
         kind = chooseKind(console, swarm, number, replacing, leader=number == 1 and task != "leader")
         if kind == "user":
             console.say("\nYou lead the swarm: the questions of the leader come to you, in its window. The agents still ask you to approve their work.")
+            spec["answers"]["approvals"] = chooseApprovals(console)
             return dict(USER_LEADER), UserLeader(console, spec["name"])
         info = chooseLocalModel(console, swarm, task, replacing) if kind == "local" else chooseApiModel(console, swarm, task, replacing) if kind == "api" else \
             chooseCodingAgent(console, swarm, replacing)

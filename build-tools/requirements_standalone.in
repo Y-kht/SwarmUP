@@ -1,0 +1,16 @@
+# What the two apps carry, at the versions SwarmUP is tested with: a new major version of mcp or of a model library can break it (mcp 2 does).
+# torch and claude-agent-sdk are too big: the app downloads them when a model needs them (package_installer.py).
+# cryptography 48 is the last one with a wheel for the Macs with an Intel processor.
+mcp==1.28.1
+anthropic==0.118.0
+openai==2.47.0
+pydantic==2.12.5
+starlette==1.3.1
+uvicorn==0.51.0
+anyio==4.11.0
+httpx==0.28.1
+cryptography==48.0.1
+pypdf
+pywebview
+certifi
+pip

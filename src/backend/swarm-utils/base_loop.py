@@ -59,6 +59,8 @@ class Loop:
         self.onText = None
         # The wheels the leader gave the agent for its task (wheel_store.py): scripts of the architect, offered as tools by the wheels server.
         self.wheels = []
+        # How its actions are approved, when the user chose it at the start: auto means that a call of the agent is its own approval (mcp_policy.py).
+        self.approvals = ""
         # The journal of the mission (agent_journal.py), set by the swarm while it runs, and what the agent may reach when it is narrowed
         # ({server: "*" or tool names}, see inScope in mcp_gateway.py; None is everything its role allows).
         self.journal = None

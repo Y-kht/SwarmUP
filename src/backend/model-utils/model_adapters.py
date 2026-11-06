@@ -59,6 +59,7 @@ def renderPrompt(system, messages, tools):
 
 # A person (or an AI agent) who leads at the command line calls a tool with a command: /files__read_file path=notes.md, or
 # /files__read_file {"path": "notes.md"}. Anything else is the answer. It gives the calls, or None for an answer.
+# \n starts a new line in key=value. In JSON, \n is already a new line of its string: writing it as one first made the JSON invalid.
 def readCommand(text):
     text = text.strip()
     if not text.startswith("/") or len(text) < 2:
@@ -67,10 +68,11 @@ def readCommand(text):
     rest = rest.strip()
     if rest.startswith("{"):
         try:
-            arguments = json.loads(rest)
+            arguments = json.loads(rest, strict=False)
         except ValueError:
             return [{"id": f"call_{uuid.uuid4().hex[:12]}", "name": name, "arguments": {}, "problem": "the arguments are not valid JSON. Write them again."}]
     else:
+        rest = rest.replace("\\n", "\n")
         try:
             words = shlex.split(rest)
         except ValueError:
@@ -83,6 +85,13 @@ def readCommand(text):
             except ValueError:
                 arguments[key] = value
     return [{"id": f"call_{uuid.uuid4().hex[:12]}", "name": name, "arguments": arguments if isinstance(arguments, dict) else {}}]
+
+
+# Who types a command cannot say that id=12 is a text: the tool says it. The rest is checked by the gateway, as for every call.
+def typedArguments(name, arguments, tools):
+    properties = next(((tool.get("parameters") or {}).get("properties") or {} for tool in tools or [] if tool["name"] == name), {})
+    return {key: str(value) if (properties.get(key) or {}).get("type") == "string" and isinstance(value, (int, float)) and not isinstance(value, bool) else value
+            for key, value in arguments.items()}
 
 
 def describeCommands(tools):
@@ -103,6 +112,33 @@ def adapterOf(agent):
 USER_LEADER = {"name": "you", "local": False, "provider": None, "billions": None, "bits": None, "vram": 0.0, "cli": None, "user": True}
 
 
+# What is new for someone who reads the conversation from outside: all of it the first time, then what came after their last answer.
+def describeNews(system, messages):
+    last = max((number for number, message in enumerate(messages) if message["role"] == "assistant"), default=-1)
+    shown = [system] if last < 0 and system else []
+    return shown + [message["content"] if message["role"] == "user" else f"[Result of {message['name']}]\n{message['content']}" for message in messages[last + 1:]]
+
+
+# A model that runs the command line (Claude Code, for example) can be the only agent of a swarm: it then has the tools, the wheels and the
+# records of SwarmUP. It is not asked by SwarmUP: its loop runs outside, so each step of the conversation becomes a turn on its desk (SoloDesk in
+# cli_solo.py), which waits for its next call or its answer. Its own loop decides how often it repeats a call and who it asks.
+class Driver:
+    approvesItself, canShorten, repeatsFreely, hasOwnUser = True, False, True, True
+
+    def __init__(self, desk, name):
+        self.desk, self.name, self.usage = desk, name, {"calls": 0, "input": 0, "output": 0}
+
+    def converse(self, system, messages, tools, onText=None):
+        self.usage["calls"] += 1
+        reply = self.desk.take({"kind": "work", "agent": self.name, "text": "\n\n".join(describeNews(system, messages)), "tools": tools or []})
+        call = reply.get("call")
+        calls = [{"id": f"call_{uuid.uuid4().hex[:12]}", "name": call["name"], "arguments": typedArguments(call["name"], call.get("arguments") or {}, tools)}] if call else []
+        return {"text": "" if call else str(reply.get("answer") or ""), "calls": calls, "raw": None, "cut": False}
+
+    def cancel(self):
+        self.desk.release()
+
+
 # The user is an adapter of its own (model_adapters.py): it sees only what is new in the conversation, and calls the tools of the leader with
 # commands, like a model calls them (ADP-07). console is what the program that runs it gives: say(text, window) and ask(question, window).
 class UserLeader:
@@ -110,18 +146,21 @@ class UserLeader:
 
     def __init__(self, console, name):
         self.console, self.name, self.usage = console, name, {"calls": 0, "input": 0, "output": 0}
+        self.listed = set()
 
     # One line answers; \n in it starts a new line, so a long answer (a report, JSON) fits in one line. A line that starts with / calls a tool.
+    # The tools are told once each, so a wheel that comes while the agent works is told too.
     def converse(self, system, messages, tools, onText=None):
         self.usage["calls"] += 1
-        last = max((number for number, message in enumerate(messages) if message["role"] == "assistant"), default=-1)
-        new = [message for message in messages[last + 1:]]
-        shown = [system] if last < 0 and system else []
-        shown += [message["content"] if message["role"] == "user" else f"[Result of {message['name']}]\n{message['content']}" for message in new]
-        if tools and last < 0:
-            shown.append("Your tools, as commands (write /name key=value, or /name {JSON}):\n" + describeCommands(tools))
+        shown = describeNews(system, messages)
+        fresh = [tool for tool in tools or [] if tool["name"] not in self.listed]
+        if fresh:
+            self.listed |= {tool["name"] for tool in fresh}
+            shown.append("Your tools, as commands (write /name key=value, or /name {JSON}):\n" + describeCommands(fresh))
         self.console.say("\n=== You lead the swarm. SwarmUP asks you what it would ask the model of the leader: ===\n" + "\n\n".join(shown) +
                          "\n=== Answer in one line (write \\n for a new line), or call a tool. ===", window=self.name)
-        reply = self.console.ask("Your answer, as the leader:", window=self.name).replace("\\n", "\n")
+        reply = self.console.ask("Your answer, as the leader:", window=self.name)
         calls = readCommand(reply) if tools else None
-        return {"text": "" if calls else reply, "calls": calls or [], "raw": None, "cut": False}
+        for call in calls or []:
+            call["arguments"] = typedArguments(call["name"], call["arguments"], tools)
+        return {"text": "" if calls else reply.replace("\\n", "\n"), "calls": calls or [], "raw": None, "cut": False}

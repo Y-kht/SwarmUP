@@ -7,7 +7,7 @@ from pathlib import Path
 
 import agent_prompts as prompts
 from base_loop import Loop
-from harness_utils import isYes, stripFences
+from harness_utils import NO_WINDOW, isYes, stripFences
 
 
 RUN_TIMEOUT = 60
@@ -141,7 +141,7 @@ class CoderLoop(Loop):
             self.remember("touched", True)
         self.path.write_text(stripFences(draft), encoding="utf-8")
         try:
-            result = subprocess.run(self.testCommand, capture_output=True, text=True, timeout=RUN_TIMEOUT, cwd=self.folder)
+            result = subprocess.run(self.testCommand, capture_output=True, text=True, timeout=RUN_TIMEOUT, cwd=self.folder, creationflags=NO_WINDOW)
         except subprocess.TimeoutExpired:
             return f"The code ran for more than {RUN_TIMEOUT} seconds. Fix any endless loop or make it faster."
         if result.returncode == 0:

@@ -90,8 +90,23 @@ def findWheels(project, query, limit=FOUND_WHEELS):
     return "\n".join(found) or (f"No wheel of this project is about {query!r}." if catalog else "This project has no wheel yet.")
 
 
+# An agent alone in its swarm has no leader to give it wheels: it gets the wheels of its project by itself, the most relevant first, at the start of
+# a run and as soon as the architect writes a new one. A list the user chose stays (the answer wheels, even an empty one).
+def giveLoneWheels(swarm):
+    if len(swarm.members) != 1:
+        return []
+    name, member = next(iter(swarm.members.items()))
+    if "wheels" in ((member.get("recipe") or {}).get("answers") or {}):
+        return member["agent"].wheels
+    catalog = catalogFor(swarm.project or projectOfFolder(member["agent"].folder))
+    ranked = sorted(catalog.items(), key=lambda item: (len(wordsOf(swarm.currentRequest()) & wordsOf(f"{item[0]} {item[1].get('summary')}")), item[1].get("updated") or ""), reverse=True)
+    names = [wheel for wheel, entry in ranked][:max(currentSetting("maxTools") - BASE_TOOLS, 0)]
+    return names if set(names) == set(member["agent"].wheels) else giveWheels(swarm, name, names, "it works alone, so it gets the wheels of its project", chosen=False)
+
+
 # Gives an agent of a running swarm its wheels (they replace the ones it had): it lists its tools again at its next step, and is told.
-def giveWheels(swarm, name, wheels, why=""):
+# chosen: the leader or the user chose them, so a saved swarm keeps this list.
+def giveWheels(swarm, name, wheels, why="", chosen=True):
     member = swarm.members.get(name)
     if member is None or name == ARCHITECT_NAME:
         raise ValueError(f"There is no agent {name} in the swarm. Its agents: {', '.join(swarm.getAgents())}.")
@@ -101,14 +116,14 @@ def giveWheels(swarm, name, wheels, why=""):
     agent = member["agent"]
     agent.wheels = list(names)
     recipe = member.get("recipe")
-    if recipe is not None:
+    if recipe is not None and chosen:
         recipe.setdefault("answers", {})["wheels"] = list(names)
     link = swarm.gateway.find(name) if swarm.gateway is not None else None
     if link is not None:
         link.stale = True
     if names:
         catalog = catalogFor(swarm.project)
-        agent.receive(swarm.getLeader(), "Your leader gave you wheels for your task: " + "; ".join(f"wheels__{wheel}: {catalog[wheel].get('summary') or ''}" for wheel in names) +
+        agent.receive(swarm.getLeader(), ("Your leader gave you wheels for your task: " if chosen else "You have the wheels of your project: ") + "; ".join(f"wheels__{wheel}: {catalog[wheel].get('summary') or ''}" for wheel in names) +
                       " Use a wheel instead of doing its steps by hand.")
     if swarm.journal is not None:
         swarm.journal.add("wheel", swarm.getLeader(), action="given", to=name, wheels=list(names), why=str(why or "")[:500])

@@ -289,6 +289,7 @@ def buildLoop(key, model, answers):
     loop = getTask(key)["build"](model, answers)
     loop.setFolder(answers.get("folder"))
     loop.wheels = [str(name) for name in answers.get("wheels") or []]
+    loop.approvals = str(answers.get("approvals") or "")
     return loop
 
 

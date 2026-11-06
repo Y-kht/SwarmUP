@@ -12,7 +12,7 @@ FAMILIES = {
     "leader_utils": ["leader_utils", "leader_manager", "leader_parser", "leader_catalog", "leader_checks", "leader_wheels"],
     "user_interface": ["user_interface", "web_server", "session_core", "interface_views", "session_models", "session_saved", "session_steps", "session_runs", "session_mcp", "session_architect"],
     "mcp_gateway": ["mcp_gateway", "mcp_kit", "mcp_policy", "mcp_records", "mcp_runtime", "mcp_external", "mcp_bridge", "skill_servers", "server_files", "server_transfer", "server_processes", "server_web", "server_memory", "server_team", "server_user", "server_leader", "path_guard", "server_wheels", "server_architect"],
-    "swarmup_cli": ["swarmup_cli", "cli_console", "cli_view", "cli_steps", "cli_models", "cli_program", "cli_resume", "cli_hub", "cli_screen", "cli_sessions", "cli_mcp", "swarmup_mcp_server", "cli_patterns"],
+    "swarmup_cli": ["swarmup_cli", "cli_console", "cli_view", "cli_steps", "cli_models", "cli_program", "cli_resume", "cli_hub", "cli_screen", "cli_sessions", "cli_mcp", "swarmup_mcp_server", "cli_patterns", "cli_solo", "solo_mcp_server"],
     "architect_manager": ["architect_manager", "architect_loop", "agent_journal", "project_identity", "miner_service"],
     "pattern_miner": ["pattern_miner", "pattern_store", "pattern_detectors", "pattern_sequences", "pattern_shapes", "pattern_errors", "pattern_text", "pattern_tail",
                       "pattern_legacy", "pattern_registry", "pattern_digest"],

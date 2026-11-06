@@ -16,9 +16,12 @@ from project_identity import listProjects, projectFor, resolveProject
 from wheel_store import describeWheel
 
 
+PATTERN_ACTIONS = ("list", "brief", "show", "search", "mine", "projects")
+
+
 def addPatternArguments(commands):
     patterns = commands.add_parser("patterns", help="the patterns the agents of a project repeat: steps, errors, reasoning (list, brief, show, search, mine, projects)")
-    patterns.add_argument("action", nargs="?", default="list", choices=("list", "brief", "show", "search", "mine", "projects"))
+    patterns.add_argument("action", nargs="?", default="list", help="list (the default, and it can be left out before a project), brief, show, search, mine or projects")
     patterns.add_argument("target", nargs="?", default="", help="the project (id, name or folder), the id of a pattern for show, or the text for search")
     patterns.add_argument("--project", default="", help="the project, when the first argument is a pattern or a text")
     patterns.add_argument("--kind", action="append", default=[], help="only patterns of this kind (several times for several)")
@@ -50,6 +53,10 @@ def projectOf(text):
 
 
 def runPatterns(options):
+    if options.action not in PATTERN_ACTIONS:
+        if options.target:
+            raise ValueError(f"There is no command patterns {options.action}. The commands: {', '.join(PATTERN_ACTIONS)}.")
+        options.action, options.target = "list", options.action
     if options.action == "projects":
         projects = listProjects()
         return "\n".join(f"- {project['id']}: {project.get('folder') or 'no folder'}, {len(project.get('missions') or {})} missions" for project in projects) or \

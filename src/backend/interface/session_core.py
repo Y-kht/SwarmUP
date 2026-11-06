@@ -14,6 +14,7 @@ from internet_cache import describeCached
 from mission_costs import MissionCosts
 from model_clients import createModel
 from model_support import getApiKey
+from package_installer import canInstall
 from models_library import API_KEYS
 from session_mcp import SessionMcp
 from session_models import SessionModels
@@ -31,7 +32,7 @@ CONTEXT_LIMIT = 6
 
 # The actions that change what the user built run one at a time. The others only read, ask the internet, wait for a dialog of the system,
 # or answer the swarm, so they never wait behind a slow one.
-FREE_ACTIONS = ("checkEmail", "checkMessenger", "findChats", "searchPublishers", "browse", "pickPath", "lookupModel", "price", "testModel", "modelCatalog", "answer",
+FREE_ACTIONS = ("checkEmail", "checkMessenger", "findChats", "searchPublishers", "browse", "pickPath", "lookupModel", "price", "testModel", "installModelPackages", "modelCatalog", "answer",
                 "approve", "reject", "correct", "message", "startNow", "openLink", "openFolder", "refreshUnfinished", "quit", "taskForm",
                 "codexAccount", "calls", "mcpServers", "mcpInspect", "wheels", "setWheels", "learning", "patterns", "patternBrief", "patternDetail", "searchPatterns", "minePatterns", "wheelDetail",
                 "approveWheel", "revokeWheel", "retireWheel", "architectNotes", "skipLastPass")
@@ -74,7 +75,7 @@ class Session(SessionSteps, SessionModels, SessionRuns, SessionSaved, SessionMcp
         self.refreshUnfinished()
         self.actions = {name: getattr(self, name) for name in (
             "setMission", "taskForm", "saveAgent", "removeAgent", "undoRemove", "moveAgent", "checkEmail", "checkMessenger", "findChats", "searchPublishers",
-            "browse", "pickPath", "setFolder", "openFolder", "modelCatalog", "lookupModel", "price", "chooseModel", "testModel", "checkPackages", "setOrder", "planOrder",
+            "browse", "pickPath", "setFolder", "openFolder", "modelCatalog", "lookupModel", "price", "chooseModel", "testModel", "installModelPackages", "checkPackages", "setOrder", "planOrder",
             "setMode", "start", "execute", "answer", "approve", "reject", "correct", "message", "startNow", "prepareStop", "stop", "clearJob", "newSwarm",
             "resumeForm", "resume", "prepareCancel", "abandon", "refreshUnfinished", "openLink", "codexAccount", "codexSignIn", "codexCancel", "joinLive",
             "removeLive", "setBuildMode", "buildWithLeader", "setBudget", "saveSettings", "quit", "addAgents", "setSwarmFolder", "followUp", "calls", "mcpServers",
@@ -365,7 +366,7 @@ class Session(SessionSteps, SessionModels, SessionRuns, SessionSaved, SessionMcp
                 "prices": describeCached("model-prices"),
                 "maxAgentsLimit": MAX_AGENTS_LIMIT, "maxToolsLimit": MAX_TOOLS_LIMIT, "maxStepsLimit": MAX_STEPS_LIMIT, "agents": agents, "mode": self.mode, "order": self.order, "keys": self.describeKeys(),
                 "gpu": self.describeGpus(), "run": self.describeRun(), "questions": questions, "jobs": jobs, "unfinished": self.unfinished, "busy": self.isBusy(),
-                "nativeDialogs": self.dialog is not None, "trash": self.trash["spec"]["name"] if self.trash else None, "cancelling": cancelling,
+                "nativeDialogs": self.dialog is not None, "canInstall": canInstall(), "trash": self.trash["spec"]["name"] if self.trash else None, "cancelling": cancelling,
                 "codexLogin": codexLogin, "swarmFolder": next(iter(folders)) if len(folders) == 1 else None, "mixedFolders": len(folders) > 1,
                 "architect": self.describeArchitect()}
 

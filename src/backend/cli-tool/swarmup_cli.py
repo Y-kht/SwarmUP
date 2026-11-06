@@ -60,6 +60,7 @@ from cli_program import (addLive, buildAgent, buildWithLeader, chooseArchitect, 
 from leader_wheels import projectOfFolder
 from wheel_store import catalogFor
 from cli_resume import followUps, offerUnfinished, openMission
+from cli_solo import SoloDesk, addSoloArguments, runSolo, runSoloCommand
 from cli_steps import askAgentCount, askBudget, askFolder, askMission, chooseAgent, chooseFolders, chooseTask, chooseWheels, describeAgent, fillTask
 from cli_view import TreeView, formatEvent, openAgent, renderTree, runCommand
 from mission_history import deleteMission, describeMission, listMissions
@@ -107,7 +108,7 @@ def runProgram(console, missionId=None):
             status = swarm.getVramStatus()
             if status["needed"]:
                 console.say(f"\nVRAM the swarm is expected to need so far: {status['needed']} GB of {status['total']} GB ({status['free']} GB free now)." + (f"\n{status['message']}" if status["message"] else ""))
-        if catalogFor(projectOfFolder(swarmFolder(specs))):
+        if count > 1 and catalogFor(projectOfFolder(swarmFolder(specs))):
             heading(console, "Step 4: the wheels of each agent")
             chooseWheels(console, swarm, specs)
         manageBuilt(console, swarm, specs, keys, tokens, models)
@@ -144,8 +145,9 @@ def runProgram(console, missionId=None):
 # ==============
 # The daemon of a session. It runs the program with the console of the hub, and stays after the program ended, until the user closes it.
 # ==============
-def serve(sessionId, missionId=None):
+def serve(sessionId, missionId=None, solo=None):
     hub = Hub(sessionId, secrets.token_urlsafe(24))
+    hub.solo = SoloDesk() if solo else None
     server = startServer(hub)
     info = {"id": sessionId, "pid": os.getpid(), "port": server.server_address[1], "token": hub.token, "started": f"{datetime.now():%Y-%m-%d %H:%M:%S}",
             "folder": os.getcwd(), "log": str(logPath(sessionId)), "opened": missionId}
@@ -157,10 +159,15 @@ def serve(sessionId, missionId=None):
         signal.signal(signal.SIGHUP, signal.SIG_IGN)
     keepFresh()
     try:
-        runProgram(HubConsole(hub), missionId)
+        if solo:
+            runSolo(HubConsole(hub), hub.solo, json.loads(solo))
+        else:
+            runProgram(HubConsole(hub), missionId)
     except Exception as error:
         import traceback
         traceback.print_exc()
+        if solo:
+            hub.solo.setState("ended", f"The program stopped because of an error: {error}. The details are in {logPath(sessionId)}.")
         hub.write(SWARM_WINDOW, f"The program stopped because of an error: {error}. The details are in {logPath(sessionId)}.")
     hub.finish()
     while True:
@@ -292,9 +299,12 @@ def makeParser():
     addMcpArguments(commands)
     addPatternArguments(commands)
     commands.add_parser("mcp-serve", help="run SwarmUP as an MCP server on stdio, so another AI agent can start, lead and follow its swarms")
+    addSoloArguments(commands)
+    commands.add_parser("solo-mcp", help="solo as an MCP server on stdio: a model works as the only agent of a swarm, with the tools of SwarmUP as its own tools")
     serving = commands.add_parser("serve")
     serving.add_argument("--session", required=True)
     serving.add_argument("--mission")
+    serving.add_argument("--solo")
     return parser
 
 
@@ -305,7 +315,7 @@ def main(arguments=None):
     command = options.command or "new"
     try:
         if command == "serve":
-            serve(options.session, options.mission)
+            serve(options.session, options.mission, options.solo)
         elif command == "run":
             runInTerminal()
         elif command == "new":
@@ -329,6 +339,11 @@ def main(arguments=None):
             runArchitectCommand(options)
         elif command == "calls":
             showCalls(findMission(options.mission, listMissions()), options.agent, options.server, options.lines)
+        elif command == "solo":
+            runSoloCommand(options)
+        elif command == "solo-mcp":
+            from solo_mcp_server import serveSoloMcp
+            serveSoloMcp()
         elif command == "mcp-serve":
             from swarmup_mcp_server import serveMcp
             serveMcp()

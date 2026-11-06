@@ -7,6 +7,7 @@ import threading
 from architect_prompts import ARCHITECT_RULES_HEADING, ARCHITECT_SYSTEM_PROMPT
 from base_loop import Loop
 from harness_utils import ARCHITECT_NAME, loadRules
+from model_adapters import USER_LEADER
 from models_library import DEFAULT_CLI_MODEL, MODELS_API, getModelInfo
 
 
@@ -95,10 +96,13 @@ def sharedMember(swarm, choice):
 
 # The model the architect runs on, from what the user chose at the setup of the swarm. choice is {"same": name of an agent} or the info
 # of a model (models_library.py). It gives (info, how): how is "share" for the instance of a local model of an agent, or "own" for a client
-# of its own (an API model, a model the user picked), or (None, "") when no model can run it (a swarm of the user and of Codex only).
+# of its own (an API model, a model the user picked), "driver" for the model that drives the command line alone and is its own architect
+# (cli_solo.py), or (None, "") when no model can run it (a swarm of the user and of Codex only).
 def pickArchitect(swarm, choice):
     if not choice:
         return None, ""
+    if choice.get("driver"):
+        return (dict(USER_LEADER, driver=True), "driver") if getattr(swarm, "driver", None) is not None else (None, "")
     if "same" in choice:
         info = sharedMember(swarm, choice).get("model") or {}
         if not info or info.get("user"):

@@ -11,6 +11,7 @@ from internet_cache import getModelCost
 from mission_costs import formatDollars
 from model_adapters import USER_LEADER, UserLeader
 from model_support import ModelError, findMissingPackages, getApiKey, isDownloaded, lookupHuggingFace
+from package_installer import canInstall, installPackages
 from models_library import API_KEYS, BITS, DEFAULT_CLI_MODEL, MODELS_API, MODELS_CLI, MODELS_LOCAL, RECOMMENDED_API, RECOMMENDED_LOCAL, getModelInfo, isGated
 from swarm_harness import Swarm
 from tasks_library import TASKS, buildLoop, describeLoop, getTask, publicAnswers
@@ -265,6 +266,17 @@ class SessionModels:
             state, self.codexLogin = self.codexLogin, None
         if state and state["state"] == "waiting":
             state["login"].cancel()
+
+    # The application has no terminal for pip: it installs what a model needs itself, in the folder of its data (package_installer.py).
+    def installModelPackages(self, payload):
+        if not canInstall():
+            raise ValueError("Install them in a terminal, with the pip of your Python.")
+        names = list(payload.get("packages") or [])
+        def work():
+            installPackages(names, lambda line: self.notify("SwarmUP", line))
+            self.checkPackages({})
+            return {"packages": names}
+        self.runJob("install", f"Installing {', '.join(names)}", work)
 
     def checkPackages(self, payload):
         for spec in self.specs:

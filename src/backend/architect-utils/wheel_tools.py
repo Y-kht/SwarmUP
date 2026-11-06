@@ -96,7 +96,8 @@ def askToRun(box, work, wheel, arguments):
     answer = work.permit(request) if work is not None and work.session is not None else decidePermission(box.loop, request)
     if answer.get("decision") not in ("once", "run"):
         why = f" They said: {answer['message']}" if answer.get("message") else ""
-        raise ToolProblem(f"The user refused to let you run the wheel {wheel['name']}.{why} Do the step by hand, or ask your leader with team__send_message.")
+        ask = ", or ask your leader with team__send_message" if len(getattr(getattr(box.loop, "team", None), "members", ())) != 1 else ""
+        raise ToolProblem(f"The user refused to let you run the wheel {wheel['name']}.{why} Do the step by hand{ask}.")
 
 
 def scratchFolder(loop):
