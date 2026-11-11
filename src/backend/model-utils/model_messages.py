@@ -162,8 +162,11 @@ def oneCallEach(messages):
     return ordered
 
 
+# A request without tools gets none in its prompt: told how to call tools from an empty list, a small model wrote a call instead of its answer
+# (in a real run, the review of a draft came back empty).
 def localMessages(system, messages, tools, native):
-    chat = [{"role": "system", "content": system if native else f"{system}\n\n" + prompts.TEXT_TOOLS_PROMPT.format(tools=json.dumps(tools, ensure_ascii=False))}]
+    described = system if native or not tools else f"{system}\n\n" + prompts.TEXT_TOOLS_PROMPT.format(tools=json.dumps(tools, ensure_ascii=False))
+    chat = [{"role": "system", "content": described}] if described else []
     for message in oneCallEach(messages) if native else messages:
         calls = message.get("calls") or []
         if message["role"] == "user":
@@ -178,7 +181,7 @@ def localMessages(system, messages, tools, native):
         else:
             written = [f"<tool_call>{json.dumps({'name': call['name'], 'arguments': call.get('arguments') or {}}, ensure_ascii=False)}</tool_call>" for call in calls]
             entry = {"role": "assistant", "content": "\n".join([message["content"] or "", *written]).strip()}
-        if not native and chat[-1]["role"] == entry["role"] == "user":
+        if not native and chat and chat[-1]["role"] == entry["role"] == "user":
             chat[-1]["content"] += f"\n\n{entry['content']}"
         else:
             chat.append(entry)

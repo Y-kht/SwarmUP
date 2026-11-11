@@ -36,7 +36,7 @@ from models_library import getModelInfo
 from sources_library import MESSAGING_APPS
 from swarm_harness import Swarm
 from writing_loops import AuthorLoop, DocumentFormatLoop, LiteratureSurveyLoop
-from general_loop import GeneralLoop
+from general_loop import GeneralLoop, describeWork, isGood, repeats
 
 RSS = """<?xml version="1.0"?><rss version="2.0"><channel><title>T</title>
 <item><title>First &amp; best</title><link>http://x.test/1</link><description><![CDATA[<p>Hello <b>world</b> &amp; all</p>]]></description></item>
@@ -3129,6 +3129,59 @@ class GeneralAgentTests(LoopTestCase):
         self.assertIn("The result of the agent:\nA draft", agent.prompts[1])
         self.assertIn("Write your answer again, with this change: 1) It misses the file names.", agent.prompts[2])
         self.assertEqual(list((self.folder / "results").glob("*/GeneralLoop_result.md"))[0].read_text(encoding="utf-8"), "A better draft")
+
+    # What a small model did in a real run: lost in the files, its review gave the result back instead of a verdict, and the agent was told to change
+    # its result into itself. The review is asked once more, without tools; a result given back twice is no verdict, and the user reads the draft.
+    def testAReviewThatOnlyRepeatsTheResultIsAskedAgainAndIsNeverSentBackAsAChange(self):
+        draft = "The functions divide and power of calc.py were wrong. " * 4
+        agent = FakeAgent([draft, draft, "1) Nothing was changed in calc.py.", "A better draft", "GOOD"])
+        loop = self.script(GeneralLoop(agent, "Fix calc.py"), ["yes"])
+        self.assertEqual(loop.run(), "A better draft")
+        self.assertIn("you are the reviewer", agent.prompts[1])
+        self.assertEqual(agent.prompts[1].split("You check the work")[1], agent.prompts[2].split("You check the work")[1])
+        self.assertIn("with this change: 1) Nothing was changed in calc.py.", agent.prompts[3])
+        echoing = FakeAgent([draft, f"My verdict: {draft}", draft])
+        loop = self.script(GeneralLoop(echoing, "Fix calc.py"), ["yes"])
+        self.assertEqual(loop.run(), draft)
+        self.assertEqual(len(echoing.prompts), 3)
+        self.assertFalse(repeats("GOOD", draft))
+        self.assertFalse(repeats("1) The result names no file.", "A short result."))
+
+    # The review reads what the agent really did, from the records of SwarmUP: a result that says "fixed" when no file changed can be told.
+    def testTheReviewReadsWhatTheAgentReallyDidWithItsTools(self):
+        loop = GeneralLoop(FakeAgent(), "Fix calc.py")
+        self.assertIn("- The files it changed: none.", describeWork(loop))
+        self.assertIn("It only looked", describeWork(loop))
+        loop.progress["changes"] = [{"path": str(self.folder / "calc.py")}]
+        loop.conversation = types.SimpleNamespace(messages=[
+            {"role": "user", "content": "Fix it"}, {"role": "tool", "name": "files__read_file", "content": "calc.py (3 lines)"},
+            {"role": "tool", "name": "files__edit_file", "content": "Not done: old_text is 2 times in calc.py.", "error": True},
+            {"role": "tool", "name": "files__edit_file", "content": "Done: change calc.py (3 lines)."},
+            {"role": "tool", "name": "wheels__run_unit_tests", "content": "<data from=\"wheel run_unit_tests\">\n1 of 5 tests fail:\nFAIL testDivide: AssertionError: 18 != 2\n</data>"}])
+        work = describeWork(loop)
+        self.assertEqual(work.splitlines()[0], "- The files it changed: calc.py.")
+        self.assertNotIn("files__read_file", work)
+        self.assertIn("- files__edit_file: it failed. Not done: old_text is 2 times in calc.py.", work)
+        self.assertTrue(work.splitlines()[-1].startswith("- wheels__run_unit_tests: <data from=\"wheel run_unit_tests\"> 1 of 5 tests fail: FAIL testDivide"))
+        agent = FakeAgent(["All the tests pass.", "GOOD"])
+        checked = self.script(GeneralLoop(agent, "Fix calc.py"), ["yes"])
+        checked.run()
+        self.assertIn("What the agent really did with its tools, from the records of SwarmUP", agent.prompts[1])
+        self.assertIn("- The files it changed: none.", agent.prompts[1])
+
+    # A small local model judges from the records, in one answer that stands alone: no tools to lose its way in, and no message of the swarm before it.
+    def testALocalModelReviewsFromTheRecordsInOneAnswer(self):
+        agent = FakeAgent(["All the tests pass.", "The records show a last run that failed.\n\nGOOD."])
+        agent.local = True
+        loop = self.script(GeneralLoop(agent, "Fix calc.py"), ["yes"])
+        loop.receive("Leader", "Mission of the swarm: fix it. You are Coder.")
+        self.assertEqual(loop.run(), "All the tests pass.")
+        self.assertEqual(len(agent.prompts), 2)
+        self.assertTrue(agent.prompts[1].startswith("[SwarmUP]\nYou check the work of an agent"))
+        self.assertNotIn("Mission of the swarm", agent.prompts[1])
+        self.assertNotIn("YOUR TOOLS", agent.prompts[1])
+        self.assertTrue(isGood("good"))
+        self.assertFalse(isGood("It is not GOOD: nothing changed."))
 
     def testTheReviewStopsAfterItsRoundsAndTheUserDecides(self):
         agent = FakeAgent(["Draft 1", "Not good", "Draft 2", "Still not good", "Draft 3"])

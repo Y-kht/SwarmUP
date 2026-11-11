@@ -341,7 +341,7 @@ class LeaderChecks:
         errors += problems
         return {"name": name, "task": task, "model": info, "waitsFor": waits, "values": values, "answers": answers, "needs": missing, "key": needs.get("key"),
                 "token": needs.get("token"), "why": str(keys.get("why") or "").strip(), "description": description, "errors": errors,
-                "price": self.describePrice(info) if info else "", "wheels": wheels}
+                "price": self.describePrice(info) if info else "", "wheels": wheels if keys.get("wheels") is not None else None}
 
     # The answers of the task from the values. The settings the leader did not give, and that are needed (a password, the address of the user),
     # are what the user must give: the fields of missing. A value the leader gave that is wrong is an error for the leader. A file that does not

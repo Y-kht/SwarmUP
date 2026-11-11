@@ -988,7 +988,7 @@
   }
  },
  "architect": {
-  "version": "1.1.0",
+  "version": "1.2.0",
   "tools": {
    "read_patterns": {
     "description": "Read the patterns the agents of this project repeat, the best first: without filters, the brief of your pass (what repeats and is not automated, the emerging patterns, the wheels and how they do, the notes that may match). It changes nothing.",
@@ -1154,7 +1154,7 @@
        "items": {
         "type": "string"
        },
-       "description": "The ids of the patterns it covers, like #12, as the brief shows them. Without it: the pattern to decide about first."
+       "description": "The ids of the patterns it covers, like #12, as the brief shows them. Without it: the pattern to decide about first. A new version of a wheel keeps what it covered."
       },
       "scope": {
        "type": "string",
@@ -1162,7 +1162,7 @@
         "project",
         "global"
        ],
-       "description": "project (the default), or global for a pattern that repeats across projects."
+       "description": "project (the default for a new wheel), or global for a pattern that repeats across projects."
       },
       "replaces": {
        "type": "array",
@@ -1214,7 +1214,7 @@
        "items": {
         "type": "string"
        },
-       "description": "The ids of the patterns it covers, like #12, as the brief shows them. Without it: the pattern to decide about first."
+       "description": "The ids of the patterns it covers, like #12, as the brief shows them. Without it: the pattern to decide about first. A new version of a wheel keeps what it covered."
       },
       "scope": {
        "type": "string",
@@ -1222,7 +1222,7 @@
         "project",
         "global"
        ],
-       "description": "project (the default), or global for a pattern that repeats across projects."
+       "description": "project (the default for a new wheel), or global for a pattern that repeats across projects."
       },
       "replaces": {
        "type": "array",

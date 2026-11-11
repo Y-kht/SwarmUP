@@ -8,7 +8,7 @@ from agent_journal import Journal, clip
 from agent_storehouse import makeRunName
 from background_processes import stopProcesses
 from harness_utils import STATE_LOCK, STOPPED_MESSAGE, SwarmStopped
-from leader_wheels import giveLoneWheels
+from leader_wheels import giveLoneWheels, giveStartingWheels
 from mcp_gateway import Gateway
 from mission_memory import WorkSession
 from project_identity import projectOf, registerMission
@@ -270,10 +270,10 @@ class SwarmRun:
                 if self.mode == "plan":
                     agent.approvedPlan = ""
             self.connectAgent(name, member, resume)
-        giveLoneWheels(self)
         if following:
             self.startRound(previous)
         self.active = True
+        giveStartingWheels(self)
         self.startHeartbeat()
         self.journal.add("run", mode=self.mode, resume=resume, following=following, agents=[self.describeForJournal(name) for name in self.members])
         self.emit("run", mode=self.mode)

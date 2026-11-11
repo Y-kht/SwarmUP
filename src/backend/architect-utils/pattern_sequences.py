@@ -86,7 +86,7 @@ class AgentTrail:
         if step is None:
             self.calls += 1
             step = f"c{self.calls}"
-        self.shapes = [*self.shapes, [l1, ok, step]][-WINDOW:]
+        self.shapes = [*self.shapes, [l1, ok, step, l0]][-WINDOW:]
         # A streak is of one family of calls (the tool, its arguments, the kind of file): an edit of 12 words and one of 9 are the same work.
         found["streak"] = self.follow(l2, step, l0) if ok else self.endStreak()
         steps = [item[0] for item in self.shapes]
@@ -98,14 +98,17 @@ class AgentTrail:
         found["loop"] = self.loopOf()
         return found
 
-    # A stuck agent: the same failing step LOOP_REPEATS times, or two steps that alternate twice. Each loop is told once.
+    # A stuck agent: the same failing step LOOP_REPEATS times, or the same two calls that alternate twice. Each loop is told once.
+    # Two steps of the same kind with other inputs each time are work, not a loop: an agent that edits a file, runs the tests, edits another
+    # passage and runs them again goes forward (in a real run, every fix of a bug was counted as a stuck agent).
     def loopOf(self):
         steps = [item[0] for item in self.shapes]
         failed = [not item[1] for item in self.shapes]
+        exact = [item[3] if len(item) > 3 and item[3] else item[0] for item in self.shapes]
         loop = None
         if len(steps) >= LOOP_REPEATS and len(set(steps[-LOOP_REPEATS:])) == 1 and any(failed[-LOOP_REPEATS:]):
             loop = (f"{steps[-1]} again and again, failing", fingerprint("loop", steps[-1]))
-        elif len(steps) >= 4 and steps[-1] == steps[-3] and steps[-2] == steps[-4] and steps[-1] != steps[-2]:
+        elif len(steps) >= 4 and steps[-1] == steps[-3] and steps[-2] == steps[-4] and steps[-1] != steps[-2] and exact[-1] == exact[-3] and exact[-2] == exact[-4]:
             loop = (f"{steps[-2]} then {steps[-1]}, back and forth", fingerprint("loop", *sorted(steps[-2:])))
         if loop is None:
             self.inLoop = ""

@@ -11,15 +11,15 @@ from wheel_checks import checkWheel, cleanSteps
 from wheel_store import catalogFor, describeWheel, loadWheel, realName, retireWheel, saveWheel
 
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 MOST_LISTS = 2
 TEXT = {"type": "string"}
 PATTERN_IDS = {"type": "array", "items": {"type": "string"}, "description": "The ids of the patterns it covers, like #12, as the brief shows them. Without it: the pattern to decide about first."}
 WHEEL_FIELDS = {"name": {"type": "string", "description": "The name of the wheel, like run_unit_tests, as in its WHEEL."},
                 "kind": {"type": "string", "enum": ["script", "steps"], "description": "script: Python with WHEEL and run(args, folder). steps: JSON with steps."},
                 "code": {"type": "string", "description": "The whole text of the wheel."},
-                "covers": PATTERN_IDS,
-                "scope": {"type": "string", "enum": ["project", "global"], "description": "project (the default), or global for a pattern that repeats across projects."},
+                "covers": {**PATTERN_IDS, "description": PATTERN_IDS["description"] + " A new version of a wheel keeps what it covered."},
+                "scope": {"type": "string", "enum": ["project", "global"], "description": "project (the default for a new wheel), or global for a pattern that repeats across projects."},
                 "replaces": {"type": "array", "items": TEXT, "description": "The wheels this one merges: they are retired, and their names lead to it."}}
 
 
@@ -105,11 +105,17 @@ def checkStepTools(manifest):
 
 
 # A small model often leaves out which patterns its wheel covers: it is then the pattern it was asked to decide about first.
+# A new version of a wheel still covers what it covered (in a real pass, a repair would have lost them): what went wrong with a wheel, its failures
+# and its work done by hand, is what the new version repairs, never a pattern to cover.
 def checkProblems(work, name, kind, code, covers, scope, replaces):
     desk, store = deskOf(work), storeOf(work)
+    catalog = catalogFor(desk.project)
     rows, missing = coveredRows(store, covers or ([desk.focus] if getattr(desk, "focus", "") else ()))
-    live = {fp: wheel for wheel, entry in catalogFor(desk.project).items() for fp in entry.get("covers") or []}
-    manifest, problems = checkWheel(code, kind, name, rows, scope, live, tuple(replaces or ()))
+    rows = [row for row in rows if row["kind"] not in ("wheelfail", "redo")]
+    kept = coveredRows(store, (catalog.get(name) or {}).get("covers") or [])[0]
+    rows += [row for row in kept if row["fp"] not in {known["fp"] for known in rows}]
+    live = {fp: wheel for wheel, entry in catalog.items() for fp in entry.get("covers") or []}
+    manifest, problems = checkWheel(code, kind, name, rows, scope or scopeOf(desk, name), live, tuple(replaces or ()), current=catalog.get(name))
     if kind == "steps" and manifest:
         problems += checkStepTools(manifest)
     if missing:
@@ -117,29 +123,37 @@ def checkProblems(work, name, kind, code, covers, scope, replaces):
     return manifest, rows, problems
 
 
-def checkTheWheel(work, name, kind, code, covers=(), scope="project", replaces=()):
+# The scope of a wheel when the architect does not say it: the one it has, or this project for a new wheel.
+def scopeOf(desk, name):
+    return (catalogFor(desk.project).get(name) or {}).get("scope") or "project"
+
+
+def checkTheWheel(work, name, kind, code, covers=(), scope="", replaces=()):
     code = cleanSteps(code) if kind == "steps" else code
     manifest, rows, problems = checkProblems(work, name, kind, code, covers, scope, replaces)
     return "It passes the checks: save it with architect__save_wheel." if not problems else "Not ready yet:\n- " + "\n- ".join(problems)
 
 
-def saveTheWheel(work, name, kind, code, covers=(), scope="project", replaces=(), why=""):
+def saveTheWheel(work, name, kind, code, covers=(), scope="", replaces=(), why=""):
     desk = deskOf(work)
+    scope = scope or scopeOf(desk, name)
     code = cleanSteps(code) if kind == "steps" else code
     manifest, rows, problems = checkProblems(work, name, kind, code, covers, scope, replaces)
     if problems:
         raise ToolProblem("the wheel is not saved:\n- " + "\n- ".join(problems))
     manager = desk.manager
-    entry, changed = saveWheel(name, kind, code, manifest["summary"], [row["fp"] for row in rows], scope, desk.project,
+    before = catalogFor(desk.project).get(name) or {}
+    entry, changed = saveWheel(name, kind, code, manifest["summary"], [*(row["fp"] for row in rows), *(before.get("covers") or [])], scope, desk.project,
                                {"mission": manager.missionId, "model": manager.modelName}, [str(old) for old in replaces or ()])
     if not changed:
-        return f"{name} is already saved as it is: nothing changed."
+        return f"{name} is already saved as it is: nothing changed. To repair it, change its code."
     store = desk.store()
     for row in rows:
         store.setStatus(row["id"], "covered", wheel=name)
     manager.onWheel("saved" if entry["version"] == 1 else "updated", entry, why)
-    return (f"Saved {name} v{entry['version']} ({entry['kind']}, {'every project' if scope == 'global' else 'this project'}). It covers "
-            f"{', '.join('#' + str(row['id']) for row in rows)}. Leaders can give it to agents from now on.")
+    covered = f" It covers {', '.join('#' + str(row['id']) for row in rows)}." if rows else ""
+    return (f"Saved {name} v{entry['version']} ({entry['kind']}, {'every project' if scope == 'global' else 'this project'}).{covered} "
+            + ("Leaders can give it to agents from now on." if entry["version"] == 1 else "The agents that have it get this version from their next request."))
 
 
 def retireTheWheel(work, name, why):

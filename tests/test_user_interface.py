@@ -883,7 +883,10 @@ class LearningTests(SessionTestCase):
         name = run["agents"][1]["name"]
         self.assertEqual(run["agents"][1]["wheels"], [])
         spec = next(spec for spec in self.session.describe()["agents"] if spec["name"] == name)
+        # Nobody chose its wheels yet: the window says that the leader will. A click is the choice of the user.
+        self.assertFalse(spec["wheelsChosen"])
         self.act("setWheels", agentId=spec["id"], wheels=["check_links"])
+        self.assertTrue(next(spec for spec in self.session.describe()["agents"] if spec["name"] == name)["wheelsChosen"])
         self.assertEqual(next(agent for agent in self.session.describe()["run"]["agents"] if agent["name"] == name)["wheels"], ["check_links"])
         self.assertEqual(self.session.swarm.getMember(name)["agent"].wheels, ["check_links"])
         self.assertTrue(any("got the wheels check_links" in item["text"] for item in self.session.feed))

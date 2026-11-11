@@ -49,8 +49,11 @@ THE RULES OF A WHEEL
    "inputs": {{"paths": {{"type": "array", "items": {{"type": "string"}}, "description": "The files to read."}}}}, "required": ["paths"],
    "steps": [{{"tool": "files__read_file", "each": "paths", "arguments": {{"path": "{{item}}", "line_count": 60}}}}]}}
 - A wheel for every project ("scope": "global") only when its pattern repeats across projects; otherwise it stays in this project.
-- Keep the wheels few and general: merge two wheels that do nearly the same (replaces), expand a wheel with an input rather than writing a
-  second one, and fix a wheel that fails (its failures are in the brief).
+- Keep the wheels few and general: merge two wheels that do nearly the same (replaces), and expand a wheel with an input rather than writing a
+  second one.
+- Repair a wheel before you write new ones. The brief lists the wheels that failed, and those an agent had and still did by hand (the wheel
+  left out what the agent needed, or said something wrong): read what happened, then save a corrected version under the same name (it keeps the
+  patterns it covers), or retire a wheel that cannot work. Agents meet a broken wheel at every run until you do.
 
 {rules}"""
 
@@ -81,6 +84,20 @@ Do exactly one of these, with a call of a tool:
 1. If a wheel would save model steps or a mistake here: save it with architect__save_wheel (name, kind, code). A wheel of steps (kind steps) is the simplest: code is its JSON.
 2. If it does not repeat enough, but could be useful in other projects: keep a note with architect__save_note.
 3. If a wheel cannot help (it differs every time, or it is the real work of the task): dismiss it with architect__dismiss_pattern, and say why.
+If a tool says what is wrong, change exactly that and call it again. When a tool has accepted your decision, answer in one sentence."""
+
+
+# A wheel that failed, or that an agent who had it worked around: a small model repairs it in a conversation of its own, with its code before it.
+ARCHITECT_FIX_PROMPT = """Repair this one wheel now. Your only task is this repair: you have {steps} steps for it, and all you need to read is below.
+Agents of this project ran the wheel, and it went wrong: it failed, or it gave an agent less than it needed, so the agent did its work by hand.
+
+{fix}
+
+Do exactly one of these, with a call of a tool:
+1. If the wheel is wrong: save a corrected version with architect__save_wheel (the same name and kind; code is the whole corrected wheel). Change only what
+   went wrong. A wheel that failed on what an agent gave it says in its error what to give instead.
+2. If it cannot work, or agents are better off without it: retire it with architect__retire_wheel, and say why.
+3. If the wheel is right and the agent only used it wrongly: dismiss {id} with architect__dismiss_pattern, and say why.
 If a tool says what is wrong, change exactly that and call it again. When a tool has accepted your decision, answer in one sentence."""
 
 

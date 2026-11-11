@@ -160,7 +160,12 @@ class ToolboxTests(ConversationTestCase):
         box = Box(self.chatLoop([]))
         (self.work / "twice.txt").write_text("a a")
         self.assertIn("is not in twice.txt", box.run("edit_file", {"path": "twice.txt", "old_text": "b", "new_text": "c"})[0])
-        self.assertIn("is 2 times in twice.txt", box.run("edit_file", {"path": "twice.txt", "old_text": "a", "new_text": "c"})[0])
+        self.assertIn("is 2 times in twice.txt, at lines 1, 1.", box.run("edit_file", {"path": "twice.txt", "old_text": "a", "new_text": "c"})[0])
+        # What a small model met in a real run: the same line in two functions. It is told where they are and how to change only one.
+        (self.work / "calc.py").write_text("def multiply(a, b):\n    return a * b\n\n\ndef divide(a, b):\n    return a * b\n")
+        refusal = box.run("edit_file", {"path": "calc.py", "old_text": "    return a * b\n", "new_text": "    return a / b\n"})[0]
+        self.assertIn("is 2 times in calc.py, at lines 2, 6. To change one of them, give old_text again with the line before it", refusal)
+        self.assertIn("only if every one of them must change", refusal)
         box.run("edit_file", {"path": "twice.txt", "old_text": "a", "new_text": "c", "replace_all": True})
         self.assertEqual((self.work / "twice.txt").read_text(), "c c")
         self.assertIn("is not a path inside your folder", box.run("write_file", {"path": "../out.txt", "content": "x"})[0])
@@ -546,6 +551,10 @@ class ClientTests(unittest.TestCase):
         self.assertIn("YOUR TOOLS", written[0]["content"])
         self.assertEqual(written[2]["content"], '<tool_call>{"name": "read_file", "arguments": {"path": "a.md"}}</tool_call>')
         self.assertEqual(written[3], {"role": "user", "content": "[Result of read_file]\ntext\n\nNews"})
+        # A request without tools tells nothing about tools: told how to call tools of an empty list, a small model wrote a call and gave no answer.
+        plain = localMessages("S", [{"role": "user", "content": "Check this."}], [], False)
+        self.assertEqual(plain, [{"role": "system", "content": "S"}, {"role": "user", "content": "Check this."}])
+        self.assertEqual(localMessages("", [{"role": "user", "content": "Check this."}, {"role": "user", "content": "Now."}], [], False), [{"role": "user", "content": "Check this.\n\nNow."}])
 
     def testTheCallsALocalModelWritesAreRead(self):
         calls, text = readToolCalls('I look.\n<tool_call>\n{"name": "list_files", "arguments": {}}\n</tool_call>')

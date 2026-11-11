@@ -16,7 +16,7 @@ from pattern_tail import POLL_BYTES, readNew
 from agent_journal import JOURNAL_FILE
 from mission_memory import STATE_FOLDER, missionFolder
 from project_identity import listProjects, projectDir, projectJournals, readProject, registerMission, unregisterMission
-from wheel_store import catalogFor
+from wheel_store import catalogFor, epochOf
 
 
 BATCH_LINES = 2000
@@ -27,13 +27,6 @@ SIGNALLING = ("decision", "reasoning", "fix", "sequence", "streak", "loop", "err
 # A wheel that fails, or that an agent who had it worked around, is a wheel to fix: the architect hears of it the first time. A wheel the leader
 # did not give (a redo missed) waits for a second time.
 SIGNAL_COUNTS = {"wheelfail": 1, "ignored": 1, "missed": 2}
-
-
-def epochOf(stamp):
-    try:
-        return time.mktime(time.strptime(str(stamp), "%Y-%m-%d %H:%M:%S"))
-    except (TypeError, ValueError, OverflowError):
-        return 0.0
 
 
 def signalCount(row):

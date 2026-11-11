@@ -209,11 +209,22 @@ def checkSteps(manifest):
             except re.error:
                 problems.append(f"Step {number} saves {name} with a regular expression that does not compile.")
             known.add(name)
+    if not problems and isAlias(manifest):
+        problems.append(f"This wheel only passes its inputs to {steps[0]['tool']}: it is that tool under another name, and saves no step. A wheel of one step is worth it "
+                        "when it repeats for each item of a list (each), or when it holds what the agents had to work out (the right command, the right arguments).")
     if not problems and onlyReads(manifest):
         problems.append("This wheel only reads (files, the team), and no step needs what a step before found: an agent makes such calls together in one step, "
                         "so the wheel saves no step and no reasoning, and fills its context. Automate what the agents work out or run (a check, a search that "
                         "answers, a command), or dismiss the pattern.")
     return problems
+
+
+# A wheel of one step, once, whose arguments are only its own inputs: the agent could call the tool itself, in one call too.
+def isAlias(manifest):
+    steps = manifest.get("steps") if isinstance(manifest, dict) else None
+    if not isinstance(steps, list) or len(steps) != 1 or not isinstance(steps[0], dict) or steps[0].get("each"):
+        return False
+    return all(isinstance(value, str) and re.fullmatch(r"\{\w+\}", value) for value in (steps[0].get("arguments") or {}).values())
 
 
 # A wheel of steps that only reads what the agent could read itself in one step: no step writes or runs, and none uses a value saved before.
@@ -242,8 +253,9 @@ def cleanSteps(code):
 
 
 # The problems of a wheel before it is saved: [] when it can be saved. covers are the patterns (rows of the store) it automates, and liveCovers
-# {fingerprint: wheel} what the live wheels already cover.
-def checkWheel(text, kind, name, covers, scope, liveCovers, replaces=()):
+# {fingerprint: wheel} what the live wheels already cover. current: the entry of the live wheel it is a new version of, which covered its
+# patterns when it was first saved (their rows may be gone since, with the missions the user deleted).
+def checkWheel(text, kind, name, covers, scope, liveCovers, replaces=(), current=None):
     if kind == "steps":
         try:
             manifest = json.loads(text)
@@ -261,14 +273,14 @@ def checkWheel(text, kind, name, covers, scope, liveCovers, replaces=()):
     if manifest and any(row.get("kind") == "streak" for row in covers) and not any(isinstance(spec, dict) and spec.get("type") == "array" for spec in (manifest.get("inputs") or {}).values()):
         problems.append("It covers a streak: one call for each input, in many model steps. A wheel saves those steps only if it takes the whole list at once: give it an input of type array, "
                         "and answer for every item in one call.")
-    if not covers:
+    if not covers and current is None:
         problems.append("A wheel automates patterns: give the ids of the patterns it covers (from architect__read_patterns).")
-    elif not any(row["status"] in REPEATING or row["status"] == "covered" and liveCovers.get(row["fp"]) in (name, *replaces) for row in covers):
+    elif covers and not any(row["status"] in REPEATING or row["status"] == "covered" and liveCovers.get(row["fp"]) in (name, *replaces) for row in covers):
         problems.append("None of these patterns repeats yet (in this project or across projects). Write a note about it instead (architect__save_note).")
     taken = {liveCovers[row["fp"]] for row in covers if liveCovers.get(row["fp"]) not in (None, name, *replaces)}
     if taken:
         problems.append(f"The wheel {', '.join(sorted(taken))} already covers these patterns: update or merge it (give it in replaces) instead of writing another one.")
-    if scope == "global" and not any(row["status"] == "cross" or (row.get("data") or {}).get("cross") or (row.get("data") or {}).get("note") for row in covers):
+    if scope == "global" and (current or {}).get("scope") != "global" and not any(row["status"] == "cross" or (row.get("data") or {}).get("cross") or (row.get("data") or {}).get("note") for row in covers):
         problems.append("A wheel is for every project only when its pattern repeats across projects: keep this one for this project.")
     return manifest, problems
 

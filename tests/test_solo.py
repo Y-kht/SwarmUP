@@ -12,15 +12,16 @@ from types import SimpleNamespace
 
 # The modules of SwarmUP are in the folders of src/backend. Their names have hyphens, so they are not packages: each folder goes on the path.
 sys.path[:0] = [str(folder) for folder in sorted((Path(__file__).resolve().parent.parent / "src" / "backend").iterdir()) if folder.is_dir() and not folder.name.startswith(("_", "."))]
+import architect_manager
 import harness_utils
 from architect_loop import pickArchitect
 from architect_manager import ArchitectManager
-from cli_solo import SoloDesk
+from cli_solo import SoloDesk, renderView
 from general_loop import GeneralLoop
 from mcp import ClientSession, StdioServerParameters, types
 from mcp.client.stdio import stdio_client
 from mcp_policy import decidePermission
-from model_adapters import USER_LEADER, Driver, UserLeader, readCommand, typedArguments
+from model_adapters import USER_LEADER, Driver, UserLeader, describeCommands, readCommand, typedArguments
 from project_identity import projectFor
 from swarm_harness import Swarm
 from test_saved_swarms import waitUntil
@@ -100,6 +101,18 @@ class CommandTests(unittest.TestCase):
         self.assertNotIn("Your tools", said[1])
         self.assertIn("wheels__run_tests", said[2])
         self.assertNotIn("files__read_file", said[2])
+
+    def testTheListOfTheToolsEndsEachLineWithOneFullStop(self):
+        tools = [{"name": "transfer__list_clips", "description": "List your clipboards.", "parameters": {"properties": {}}},
+                 {"name": "files__read_file", "description": "Read a file. It changes nothing.", "parameters": {"properties": {"path": {}}}}]
+        self.assertEqual(describeCommands(tools), "/transfer__list_clips   List your clipboards.\n/files__read_file path=...  Read a file.")
+
+    # The card of a wheel can be allowed for good (forever): the model is told so, only for a wheel.
+    def testTheCardOfAWheelTellsThatItsVersionCanBeAllowedForGood(self):
+        card = {"type": "solo", "state": "working", "notes": [], "person": "", "turn": {"id": 3, "kind": "card", "agent": "Agent", "text": "Agent wants to run the wheel x", "opens": False, "pin": True}}
+        self.assertIn("solo forever s1 (this version of the wheel, in every swarm)", renderView(card, "s1"))
+        self.assertIn("forever allows this version", renderView(card, "s1", hints="tools"))
+        self.assertNotIn("forever", renderView({**card, "turn": {**card["turn"], "pin": False}}, "s1"))
 
     # Who types id=12 cannot say that it is a text; only the tool can. The gateway still refuses a wrong type from a model.
     def testANumberForATextBecomesTheTextTheToolAsksFor(self):
@@ -210,6 +223,15 @@ class LoneAgentTests(unittest.TestCase):
         self.assertNotIn("wheels__run_unit_tests", model.tools[0])
         self.assertIn("wheels__run_unit_tests", model.tools[1])
 
+    # The leader, and an agent alone, work on the whole follow-up: only an agent whose leader gave it a part reads "your part".
+    def testAnAgentAloneWorksOnTheWholeFollowUp(self):
+        loop = GeneralLoop(None, "Fix the tests")
+        loop.team, loop.roundRequest = SimpleNamespace(currentRequest=lambda: "Add a test"), "Add a test"
+        self.assertNotIn("from your leader", loop.followUpTask())
+        self.assertIn("new request:\nAdd a test\n\nYour standing instructions", loop.followUpTask())
+        loop.roundRequest = "Write the test of add"
+        self.assertIn("Add a test\n\nYour part in it, from your leader:\nWrite the test of add\n\nYour standing instructions", loop.followUpTask())
+
     def testTwoAgentsAreNotGivenWheelsByThemselves(self):
         self.saveWheel()
         swarm, loop = self.swarm(ScriptedModel([]))
@@ -239,21 +261,31 @@ class LoneAgentTests(unittest.TestCase):
 
 # Many short missions repeat too: in a real run of 27 entries the last pass never came, however much repeated.
 class ShortRunTests(unittest.TestCase):
-    def manager(self, signals, written, repeating=()):
-        store = SimpleNamespace(pendingSignals=lambda: signals, patterns=lambda statuses=None, limit=1: list(repeating))
+    # repeating: what the architect can decide about (the focus of a pass); looked: when its last pass ended.
+    def manager(self, signals, written, repeating=(), looked=0):
+        store = SimpleNamespace(pendingSignals=lambda: signals, lastPass=lambda: {"ended": looked} if looked else None)
+        patcher = everywhere(architect_manager, "focusPatterns", lambda store, limit, project=None: list(repeating))
+        patcher.start()
+        self.addCleanup(patcher.stop)
         manager = ArchitectManager.__new__(ArchitectManager)
-        manager.swarm, manager.store = SimpleNamespace(journal=SimpleNamespace(written=written)), lambda: store
+        manager.swarm, manager.store = SimpleNamespace(journal=SimpleNamespace(written=written), project="p1"), lambda: store
         return manager
 
     def testAPatternThatJustRepeatsGetsItsPassAfterAShortRun(self):
         self.assertTrue(self.manager([{"id": 1}], 5).worthEnd())
 
     def testAShortRunWithNothingNewGetsNoPass(self):
-        self.assertFalse(self.manager([], 5, repeating=[{"id": 1}]).worthEnd())
+        self.assertFalse(self.manager([], 5, repeating=[{"id": 1, "kind": "command"}]).worthEnd())
 
     def testALongRunStillLearnsFromWhatRepeats(self):
-        self.assertTrue(self.manager([], 40, repeating=[{"id": 1}]).worthEnd())
+        self.assertTrue(self.manager([], 40, repeating=[{"id": 1, "kind": "command"}]).worthEnd())
         self.assertFalse(self.manager([], 40).worthEnd())
+
+    # A wheel that went wrong again since the architect last looked gets its pass, however short the run; one it already looked at waits for the next failure.
+    def testAWheelThatFailedAgainGetsItsPass(self):
+        failed = {"id": 2, "kind": "wheelfail", "lastSeen": 200.0, "data": {"wheel": "run_tests"}}
+        self.assertTrue(self.manager([], 5, repeating=[failed], looked=100.0).worthEnd())
+        self.assertFalse(self.manager([], 40, repeating=[failed], looked=300.0).worthEnd())
 
 
 class DeskTests(unittest.TestCase):
