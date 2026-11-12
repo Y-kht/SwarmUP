@@ -112,6 +112,21 @@ class WritingTests(JournalTestCase):
         shaped = shapeArguments({"path": "a.py", "content": "z" * 5000, "count": 3})
         self.assertEqual((shaped["path"], shaped["count"], shaped["content"]["len"], len(shaped["content"]["head"])), ("a.py", 3, 5000, 300))
 
+    # A model that writes eighty calls in one answer, or one argument that is a long list: the entry is long because of what it holds, not of a text.
+    def testAnEntryThatIsLongBecauseOfAListIsShortenedToo(self):
+        journal = self.journal()
+        calls = [{"id": f"call_{number}", "name": "files__read_file", "args": {"path": "a" * 250}} for number in range(80)]
+        journal.add("step", "Writer", text="x" * 3000, calls=calls)
+        journal.add("call", "Writer", args={"paths": ["p" * 50] * 400}, result="ok")
+        journal.add("call", "Writer", **{f"field{number}": "x" * 150 for number in range(300)})
+        lines = journal.path.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 3)
+        self.assertTrue(all(len(line) <= ENTRY_CHARS for line in lines))
+        step, call, wide = (json.loads(line) for line in lines)
+        self.assertEqual((step["calls"], step["shortened"], len(step["text"])), (calls[:40], True, 3000))
+        self.assertTrue(call["shortened"])
+        self.assertEqual((wide["kind"], wide["agent"], wide["shortened"]), ("call", "Writer", True))
+
     # Several agents write at the same time: every line stays whole.
     def testWritersAtTheSameTimeNeverTearALine(self):
         journal = self.journal()

@@ -6,6 +6,7 @@ import re
 import time
 from pathlib import Path
 
+from pattern_entry import readEntry
 from pattern_registry import describeNote, findNotes
 from pattern_store import ACTIONABLE
 from project_identity import projectJournals, readProject
@@ -230,12 +231,13 @@ def renderBrief(store, project, since=None, chars=BRIEF_CHARS, claimedBy=None):
     return text if len(text) <= chars else text[:chars - len(cut)] + cut
 
 
+# The entry of a journal that starts at offset, read as the miner reads it (pattern_entry.py), or None when there is no entry there.
 def readLine(path, offset):
     try:
         with open(path, "rb") as handle:
             handle.seek(offset)
-            return json.loads(handle.readline().decode("utf-8", "replace"))
-    except (OSError, ValueError):
+            return readEntry(handle.readline().decode("utf-8", "replace"))
+    except (OSError, ValueError, TypeError):
         return None
 
 
@@ -250,11 +252,8 @@ def contextOf(path, offset, agent, count=3):
         return []
     entries = []
     for raw in data.split(b"\n")[1 if start else 0:]:
-        try:
-            entry = json.loads(raw.decode("utf-8", "replace"))
-        except ValueError:
-            continue
-        if entry.get("agent") == agent and entry.get("kind") in ("request", "step", "call", "bad", "user", "draft", "review", "proposal"):
+        entry = readEntry(raw.decode("utf-8", "replace"))
+        if entry and entry.get("agent") == agent and entry.get("kind") in ("request", "step", "call", "bad", "user", "draft", "review", "proposal"):
             entries.append(entry)
     return entries[-count:]
 
@@ -312,11 +311,8 @@ def searchJournal(project, text, agent=None, kind=None, limit=10):
                 break
             if needle and needle not in line.lower():
                 continue
-            try:
-                entry = json.loads(line)
-            except ValueError:
-                continue
-            if (agent and entry.get("agent") != agent) or (kind and entry.get("kind") != kind):
+            entry = readEntry(line)
+            if entry is None or (agent and entry.get("agent") != agent) or (kind and entry.get("kind") != kind):
                 continue
             found.append(f"mission {mission}: {describeEntry(entry)}")
     if not found:

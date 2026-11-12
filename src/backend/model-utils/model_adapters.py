@@ -9,10 +9,10 @@
 # approvesItself (True: what it writes needs no approval, it is the user's own).
 import json
 import shlex
-import uuid
 
 import agent_prompts as prompts
-from model_messages import readToolCalls
+from call_reader import newCallId, readToolCalls
+from loose_json import parseJson, readLoose
 
 
 class PromptAdapter:
@@ -60,17 +60,20 @@ def renderPrompt(system, messages, tools):
 # A person (or an AI agent) who leads at the command line calls a tool with a command: /files__read_file path=notes.md, or
 # /files__read_file {"path": "notes.md"}. Anything else is the answer. It gives the calls, or None for an answer.
 # \n starts a new line in key=value. In JSON, \n is already a new line of its string: writing it as one first made the JSON invalid.
+# JSON that is almost right is read (loose_json.py); JSON that is not an object, or that cannot be read, is told, and nothing is called.
 def readCommand(text):
-    text = text.strip()
+    text = str(text or "").strip()
     if not text.startswith("/") or len(text) < 2:
         return None
     name, _, rest = text[1:].partition(" ")
     rest = rest.strip()
     if rest.startswith("{"):
         try:
-            arguments = json.loads(rest, strict=False)
+            arguments = readLoose(rest)
         except ValueError:
-            return [{"id": f"call_{uuid.uuid4().hex[:12]}", "name": name, "arguments": {}, "problem": "the arguments are not valid JSON. Write them again."}]
+            arguments = None
+        if not isinstance(arguments, dict):
+            return [{"id": newCallId(), "name": name, "arguments": {}, "problem": "the arguments are not valid JSON. Write them again."}]
     else:
         rest = rest.replace("\\n", "\n")
         try:
@@ -81,14 +84,16 @@ def readCommand(text):
         for word in words:
             key, _, value = word.partition("=")
             try:
-                arguments[key] = json.loads(value)
+                arguments[key] = parseJson(value)
             except ValueError:
                 arguments[key] = value
-    return [{"id": f"call_{uuid.uuid4().hex[:12]}", "name": name, "arguments": arguments if isinstance(arguments, dict) else {}}]
+    return [{"id": newCallId(), "name": name, "arguments": arguments}]
 
 
 # Who types a command cannot say that id=12 is a text: the tool says it. The rest is checked by the gateway, as for every call.
 def typedArguments(name, arguments, tools):
+    if not isinstance(arguments, dict):
+        return arguments
     properties = next(((tool.get("parameters") or {}).get("properties") or {} for tool in tools or [] if tool["name"] == name), {})
     return {key: str(value) if (properties.get(key) or {}).get("type") == "string" and isinstance(value, (int, float)) and not isinstance(value, bool) else value
             for key, value in arguments.items()}
@@ -131,8 +136,8 @@ class Driver:
     def converse(self, system, messages, tools, onText=None):
         self.usage["calls"] += 1
         reply = self.desk.take({"kind": "work", "agent": self.name, "text": "\n\n".join(describeNews(system, messages)), "tools": tools or []})
-        call = reply.get("call")
-        calls = [{"id": f"call_{uuid.uuid4().hex[:12]}", "name": call["name"], "arguments": typedArguments(call["name"], call.get("arguments") or {}, tools)}] if call else []
+        call = reply.get("call") if isinstance(reply.get("call"), dict) else None
+        calls = [{"id": newCallId(), "name": call.get("name"), "arguments": typedArguments(call.get("name"), call.get("arguments") or {}, tools)}] if call else []
         return {"text": "" if call else str(reply.get("answer") or ""), "calls": calls, "raw": None, "cut": False}
 
     def cancel(self):

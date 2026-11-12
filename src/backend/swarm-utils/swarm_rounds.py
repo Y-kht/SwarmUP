@@ -1,9 +1,8 @@
-import json
 from datetime import datetime
 
 import agent_prompts as prompts
 from agent_conversation import Conversation
-from harness_utils import stripFences
+from loose_json import readReply
 
 
 # The rounds of a mission (Swarm in swarm_harness.py), as in a chat: when a round is over, the user follows up with a new request, and the same
@@ -41,7 +40,7 @@ class SwarmRounds:
             route = self.getMember(self.leader)["agent"].reviewLoop(prompt, lambda draft: self.checkRoute(draft, names), ask=False, own=False)
         except Exception:
             route = None
-        return json.loads(stripFences(route)) if route is not None else {name: request for name in names}
+        return readReply(route) if route is not None else {name: request for name in names}
 
     # A run of a round after the first, before its agents start (prepareRun): the leader routes the request once, the agents concerned get
     # their part (and the leader the whole request), and the others keep their last result. previous holds the results before this run.

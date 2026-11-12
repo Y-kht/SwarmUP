@@ -11,7 +11,8 @@ from email.message import EmailMessage
 import agent_prompts as prompts
 from base_loop import Loop
 from harness_utils import (AGENT_FILES, FETCH_ERRORS, FETCH_TIMEOUT, addToContext, checkLength, describeError, formatItems, getFromContext, loadContext, readFeed,
-                           retrieveContext, stripFences)
+                           retrieveContext)
+from loose_json import readReply
 from messengers import sendMessage
 from sources_library import ALL_NEWS_OUTLETS
 
@@ -123,7 +124,7 @@ class CalendarLoop(Loop):
         return f"Book this event in the calendar: {self.request}"
 
     def parseEvent(self, draft):
-        event = json.loads(stripFences(draft))
+        event = readReply(draft)
         start = datetime.strptime(f"{event['date']} {event['time']}", "%Y-%m-%d %H:%M")
         return start, int(event["duration"]), str(event["subject"])
 

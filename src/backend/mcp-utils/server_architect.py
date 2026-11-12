@@ -3,16 +3,20 @@
 # (wheel_store.py, after the checks of wheel_checks.py), and keeps the notes the architects of all projects share (pattern_registry.py).
 # Its tools change nothing outside SwarmUP: the wheels and the notes are in the hidden folders of the long-term memory, and the user is told
 # of each wheel the architect saves or retires.
+import re
+
 from mcp_kit import ServerSpec, ToolProblem, ToolSpec
 from pattern_digest import describeRow, describeWheels, maximal, renderBrief, renderPattern, searchJournal
 from pattern_registry import describeNote, findNotes, saveNote
 from pattern_store import ACTIONABLE
-from wheel_checks import checkWheel, cleanSteps
+from wheel_checks import checkWheel, cleanCode, cleanSteps
 from wheel_store import catalogFor, describeWheel, loadWheel, realName, retireWheel, saveWheel
 
 
 VERSION = "1.2.0"
 MOST_LISTS = 2
+PATTERN_ID = re.compile(r"\W*(?:pattern|id)?\s*#?\s*(\d+)\b.*", re.IGNORECASE | re.DOTALL)
+FINGERPRINT = re.compile(r"[0-9a-f]{20}")
 TEXT = {"type": "string"}
 PATTERN_IDS = {"type": "array", "items": {"type": "string"}, "description": "The ids of the patterns it covers, like #12, as the brief shows them. Without it: the pattern to decide about first."}
 WHEEL_FIELDS = {"name": {"type": "string", "description": "The name of the wheel, like run_unit_tests, as in its WHEEL."},
@@ -56,7 +60,7 @@ def readPatterns(work, status="", kind="", limit=20):
 
 
 def readPattern(work, id, examples=3):
-    return renderPattern(storeOf(work), str(id).strip().lstrip("#"), max(1, min(int(examples), 6)))
+    return renderPattern(storeOf(work), patternKey(id), max(1, min(int(examples), 6)))
 
 
 def searchTheJournal(work, text, agent="", kind="", limit=10):
@@ -77,11 +81,20 @@ def readWheel(work, name):
     return f"{describeWheel(wheel)}\nIt covers the patterns: {', '.join(wheel.get('covers') or []) or 'none recorded'}\n\n{wheel['text']}"
 
 
+# The id of a pattern as a model writes it: 12, "#12", "pattern 12", "#12 (the sequence)", or its fingerprint.
+def patternKey(value):
+    text = str(value).strip()
+    found = PATTERN_ID.fullmatch(text)
+    return found.group(1) if found and not FINGERPRINT.fullmatch(text) else text.lstrip("#")
+
+
+# The patterns a model names, as a list or in one text ("#12, #13"): (their rows, the ones that do not exist).
 def coveredRows(store, covers):
     rows, missing = [], []
-    for ident in covers or []:
-        row = store.pattern(str(ident).strip().lstrip("#"))
-        (rows.append(row) if row else missing.append(str(ident)))
+    named = [covers] if isinstance(covers, (str, int)) else covers or []
+    for ident in [part for item in named for part in (item.split(",") if isinstance(item, str) else [item]) if str(part).strip()]:
+        row = store.pattern(patternKey(ident))
+        (rows.append(row) if row else missing.append(str(ident).strip()))
     return rows, missing
 
 
@@ -129,7 +142,7 @@ def scopeOf(desk, name):
 
 
 def checkTheWheel(work, name, kind, code, covers=(), scope="", replaces=()):
-    code = cleanSteps(code) if kind == "steps" else code
+    code = cleanSteps(code) if kind == "steps" else cleanCode(code)
     manifest, rows, problems = checkProblems(work, name, kind, code, covers, scope, replaces)
     return "It passes the checks: save it with architect__save_wheel." if not problems else "Not ready yet:\n- " + "\n- ".join(problems)
 
@@ -137,7 +150,7 @@ def checkTheWheel(work, name, kind, code, covers=(), scope="", replaces=()):
 def saveTheWheel(work, name, kind, code, covers=(), scope="", replaces=(), why=""):
     desk = deskOf(work)
     scope = scope or scopeOf(desk, name)
-    code = cleanSteps(code) if kind == "steps" else code
+    code = cleanSteps(code) if kind == "steps" else cleanCode(code)
     manifest, rows, problems = checkProblems(work, name, kind, code, covers, scope, replaces)
     if problems:
         raise ToolProblem("the wheel is not saved:\n- " + "\n- ".join(problems))
@@ -185,7 +198,7 @@ def readTheNotes(work, query="", limit=10):
 
 
 def dismissPattern(work, id, why):
-    row = storeOf(work).setStatus(str(id).strip().lstrip("#"), "dismissed", note=f"dismissed: {str(why).strip()[:300]}")
+    row = storeOf(work).setStatus(patternKey(id), "dismissed", note=f"dismissed: {str(why).strip()[:300]}")
     if row is None:
         raise ToolProblem(f"there is no pattern {id}.")
     return f"#{row['id']} is dismissed: it comes back only if it repeats twice as much."

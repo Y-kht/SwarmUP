@@ -5,6 +5,7 @@ import tempfile
 import time
 import unittest
 from patching import everywhere
+from unittest import mock
 from pathlib import Path
 
 # The modules of SwarmUP are in the folders of src/backend. Their names have hyphens, so they are not packages: each folder goes on the path.
@@ -15,7 +16,8 @@ import pattern_store
 from agent_journal import Journal
 from cli_patterns import addPatternArguments, runPatterns, runWheels
 from miner_service import LOCK_FILE, MINERS, MinerService, ProjectLock
-from pattern_digest import draftForStreak, focusPatterns, renderBrief, renderFocus, renderPattern, renderTable, searchJournal, wheelsToFix
+from pattern_digest import contextOf, draftForStreak, focusPatterns, readLine, renderBrief, renderFocus, renderPattern, renderTable, searchJournal, wheelsToFix
+from pattern_entry import cleanEntry, readEntry
 from wheel_checks import checkWheel
 from pattern_errors import classifyError
 from pattern_miner import Miner, forgetMission
@@ -299,6 +301,73 @@ class MinerTests(MinerTestCase):
         self.assertEqual(lines := len(journal.path.read_text().splitlines()), 1, lines)
         lines, offset, inode, size, restarted = readNew(journal.path, 10 ** 6)
         self.assertTrue(restarted)
+
+    # What an entry holds comes from the models and from programs outside SwarmUP: a field of another kind is read as its kind, or left out.
+    def testAnEntryIsReadWithEveryFieldInItsKind(self):
+        entry = cleanEntry({"kind": "step", "agent": 7, "t": "1794457791747", "text": ["not a text"], "length": "120", "seconds": -3, "tokens": {"in": "5", "out": None},
+                            "calls": [{"id": 3, "name": None, "args": "x"}, "junk", None], "result": None, "size": float("nan"), "other": {"kept": True}})
+        self.assertEqual(entry, {"kind": "step", "agent": "7", "t": 1794457791747.0, "length": 120.0, "tokens": {"in": 5.0, "out": 0}, "calls": [{"id": "3", "name": "", "args": "x"}],
+                                 "other": {"kept": True}})
+        self.assertEqual(cleanEntry({"t": 1e308, "calls": "none", "agents": [{"name": 5, "wheels": "all"}, 3], "wheels": {"a": 1}, "tokens": 12}),
+                         {"calls": [], "agents": [{"name": "5", "wheels": []}], "wheels": []})
+        self.assertEqual(cleanEntry({"kind": "wheel", "error": "it broke"})["error"], {"type": "?", "message": "it broke"})
+        self.assertEqual(cleanEntry({"kind": "status", "error": {"type": "ValueError"}})["error"], '{"type": "ValueError"}')
+        self.assertEqual([readEntry(line) for line in ("[1, 2]", '"text"', "12", "null", "{not json}", "", "[" * 100000)], [None] * 7)
+
+    # One odd field never costs the rest of its entry: what the entry still says is counted.
+    def testEntriesWithOddFieldsAreStillCounted(self):
+        miner = self.miner()
+        journal = self.journalOf("m1")
+        odd = [{"kind": "call", "agent": "A", "server": "files", "tool": "read_file", "args": {"path": "a.py"}, "outcome": "success", "seconds": "fast", "size": {"big": 1}, "result": ["x"], "t": "soon"},
+               {"kind": "call", "agent": "A", "server": "files", "tool": "read_file", "args": "b.py", "outcome": "error", "seconds": None, "result": {"error": 1}},
+               {"kind": "call", "agent": "A", "server": "files", "tool": "read_file", "args": {"path": "c.py", "start_line": float("inf")}, "outcome": "success"},
+               {"kind": "step", "agent": "A", "text": 12, "tokens": "many", "length": [], "calls": [{"id": None, "name": 5, "args": [1]}, "junk"]},
+               {"kind": "step", "agent": "A", "calls": {"name": "x"}}, {"kind": "run", "agents": {"A": 1}}, {"kind": "run", "agents": [None, {"name": ["A"], "wheels": "w"}]},
+               {"kind": "wheel", "agent": "A", "action": "run", "name": "w", "ok": False, "error": "boom", "trace": 5, "size": "big"},
+               {"kind": "wheel", "agent": "A", "action": "given", "to": "A", "wheels": "w"}, {"kind": "cmd", "agent": "A", "command": ["ls"], "exit": "one", "output": {"a": 1}},
+               {"kind": "status", "agent": "A", "status": "failed", "error": {"type": "X"}}, {"kind": "message", "direct": True, "text": 5, "from": [], "to": {}},
+               {"kind": "permission", "how": "asked", "key": 5, "decision": [], "detail": {}}, {"kind": "limit", "agent": "A", "steps": "all"}, {"kind": ["call"]}, {"agent": {"x": 1}, "mission": []}]
+        journal.path.parent.mkdir(parents=True, exist_ok=True)
+        journal.path.write_text("".join(json.dumps({"mission": "m1", **entry}) + "\n" for entry in odd) + "[1, 2]\n", encoding="utf-8")
+        self.assertEqual(miner.poll(), len(odd) + 1)
+        self.assertEqual((miner.problems, miner.store.sources()[str(journal.path)]["bad"]), (0, 1))
+        self.assertEqual(sum(row["count"] for row in miner.store.patterns(("action",), limit=100) if "read_file" in row["label"]), 3)
+        self.assertEqual(self.rowOf(miner, "wheelfail")["label"], "the wheel w failed: ?: boom")
+        for row in miner.store.patterns(limit=100):
+            self.assertTrue(renderPattern(miner.store, row["id"]))
+        self.assertIn("read_file", searchJournal(self.project, "read_file"))
+        self.assertIsNone(readLine(journal.path, journal.path.stat().st_size - 7))
+        self.assertEqual(contextOf(journal.path, journal.path.stat().st_size, {"x": 1}), [])
+
+    # Whatever a line of a journal does to the store, the miner goes on: the line is skipped and counted, and the lines around it are kept.
+    def testALineTheStoreCannotTakeIsSkippedAndTheOthersAreCounted(self):
+        miner = self.miner()
+        journal = self.journalOf("m1")
+        for name in ("a.py", "poison.py", "c.py", "d.py", "e.py"):
+            self.call("m1", "A", "read_file", {"path": name})
+        addExample = miner.store.addExample
+        def refuse(db, pattern, mission, agent, t, source, offset, text):
+            if "poison" in text:
+                raise TypeError("the store cannot take this")
+            return addExample(db, pattern, mission, agent, t, source, offset, text)
+        miner.store.addExample = refuse
+        with mock.patch("traceback.print_exc"):
+            self.assertEqual(miner.poll(), 5)
+        source = miner.store.sources()[str(journal.path)]
+        self.assertEqual((source["lines"], source["bad"], source["offset"]), (5, 1, journal.path.stat().st_size))
+        self.assertEqual(self.rowOf(miner, "action", "read_file")["count"], 4)
+        self.assertEqual(miner.poll(), 0)
+        self.call("m1", "A", "read_file", {"path": "f.py"})
+        self.assertEqual(miner.poll(), 1)
+        self.assertEqual(self.rowOf(miner, "action", "read_file")["count"], 5)
+
+    def testATrailTheStoreKeptInAnotherFormStartsAgain(self):
+        for saved in (None, "text", [1], {"shapes": "x", "pending": [5, {"recipe": 1}], "streak": {"shape": 5}, "request": "two", "stepCalls": 7},
+                      {"shapes": [["a"], [5, True], "x", ["files__read_file(path=<name>.py)", True, "s1", "exact"]], "pending": [{"error": "e", "family": "f", "recipe": [], "age": 0}]}):
+            trail = AgentTrail(saved)
+            trail.newStep(["c1"])
+            self.assertEqual(trail.add("step one", "family", True, step=trail.stepOf("c1"))["loop"], None)
+            self.assertEqual(AgentTrail(trail.toData()).toData(), trail.toData())
 
     # The login page again and again: the same reasoning, then a click at nearly the same place. A steps wheel would do it.
     def testTheSameReasoningThenTheSameActionIsADecisionWithStableNumbers(self):

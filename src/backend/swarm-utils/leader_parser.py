@@ -1,13 +1,16 @@
 # Reading the blocks a leader writes for a change of its swarm, even when they are not written as asked: the adapter of a model that writes
-# its calls as text (model_messages.py) reads them as calls of the leader tools (server_leader.py).
-import ast
-import json
+# its calls as text (call_reader.py) reads them as calls of the leader tools (server_leader.py).
+import itertools
 import re
 
 from harness_utils import stripFences
+from loose_json import JSON_LIMIT, SMART_QUOTES, findBalanced, readLoose, removeComments
 
 
-JSON_LIMIT = 60000
+# A text is read for blocks up to these limits: a leader writes a few blocks, and a text with thousands of brackets or tags is not a change of a swarm.
+MOST_TAGS = 200
+MOST_PROBLEMS = 8
+SCAN_CHARS = 40 * JSON_LIMIT
 
 
 def squash(text):
@@ -56,7 +59,6 @@ TAG_PATTERN = re.compile(r"(?:<<|\[\[|<|\[)[ \t]*(/)?[ \t]*([A-Za-z][A-Za-z0-9 _
 FENCE_PATTERN = re.compile(r"```[ \t]*([A-Za-z][\w :.-]*)?[ \t]*\r?\n(.*?)(?:\r?\n[ \t]*```|\Z)", re.S)
 PAIR_PATTERN = re.compile(r"[ \t]*(?:[-*•][ \t]*)?[\"']?([A-Za-z_][\w \t-]{0,30}?)[\"']?[ \t]*[:=][ \t]*(.*)")
 NO_CHANGE_PATTERN = re.compile(r"^\W*no[\s_-]*changes?\b", re.I)
-SMART_QUOTES = str.maketrans({"“": '"', "”": '"', "„": '"', "″": '"', "‘": "'", "’": "'", "′": "'"})
 
 
 def actionOf(word):
@@ -75,83 +77,19 @@ def normalizeKeys(data):
     return found, extra
 
 
-# Where the bracket that starts at start closes, or None. Brackets inside strings do not count.
-def findBalanced(text, start):
-    stack, quote, escaped = [], None, False
-    for index in range(start, min(len(text), start + JSON_LIMIT)):
-        char = text[index]
-        if quote:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == quote:
-                quote = None
-        elif char in "\"'" and not (char == "'" and index > start and text[index - 1].isalnum()):
-            quote = char
-        elif char in "{[":
-            stack.append("}" if char == "{" else "]")
-        elif char in "}]":
-            if not stack or stack.pop() != char:
-                return None
-            if not stack:
-                return index + 1
-    return None
-
-
-# Comments (// and /* */) out of JSON, except inside strings, where // is often part of an address.
-def removeComments(text):
-    result, index, quote = [], 0, None
-    while index < len(text):
-        char = text[index]
-        if quote:
-            result.append(char)
-            if char == "\\" and index + 1 < len(text):
-                result.append(text[index + 1])
-                index += 1
-            elif char == quote:
-                quote = None
-        elif char == '"' or (char == "'" and not (index and text[index - 1].isalnum())):
-            quote = char
-            result.append(char)
-        elif text.startswith("//", index) or text.startswith("#", index):
-            index = text.find("\n", index)
-            index = len(text) if index < 0 else index
-            continue
-        elif text.startswith("/*", index):
-            index = text.find("*/", index + 2)
-            index = len(text) if index < 0 else index + 2
-            continue
-        else:
-            result.append(char)
-        index += 1
-    return "".join(result)
-
-
-# JSON as a model writes it: with comments, curly quotes, trailing commas, keys without quotes, single quotes, True and None, or without
-# its outer braces. It returns the value, or None if nothing can be read.
+# JSON as a model writes it (loose_json.py): with comments, curly quotes, trailing commas, keys without quotes, single quotes, True and None,
+# or without its outer braces. It returns the value, or None if nothing can be read.
 def loadJson(text):
     text = stripFences(str(text))[:JSON_LIMIT].strip()
     if not text:
         return None
-    fixed = removeComments(text.translate(SMART_QUOTES)).strip()
-    noCommas = re.sub(r",\s*([}\]])", r"\1", fixed)
-    attempts = [text, fixed, noCommas, re.sub(r"([{,]\s*)([A-Za-z_][\w-]*)(\s*:)", r'\1"\2"\3', noCommas)]
-    if noCommas[:1] not in ("{", "[") and re.match(r"[\"']?[A-Za-z_][\w -]*[\"']?\s*:", noCommas):
-        attempts.append("{" + noCommas + "}")
+    plain = removeComments(text.translate(SMART_QUOTES)).strip()
+    attempts = [text] + (["{" + plain + "}"] if plain[:1] not in ("{", "[") and re.match(r"[\"']?[A-Za-z_][\w -]*[\"']?\s*:", plain) else [])
     for attempt in attempts:
         try:
-            return json.loads(attempt)
+            return readLoose(attempt)
         except ValueError:
             pass
-    for attempt in attempts:
-        python = re.sub(r"\btrue\b", "True", re.sub(r"\bfalse\b", "False", re.sub(r"\bnull\b", "None", attempt)))
-        try:
-            value = ast.literal_eval(python)
-        except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
-            continue
-        if isinstance(value, (dict, list)):
-            return value
     return None
 
 
@@ -274,7 +212,7 @@ def overlaps(spans, start, end):
 def parseOutput(text):
     text = str(text or "")
     blocks, problems, spans = [], [], []
-    tags = findTags(text)
+    tags = findTags(text)[:MOST_TAGS]
     for index, tag in enumerate(tags):
         if tag["closing"] or overlaps(spans, tag["start"], tag["end"]):
             continue
@@ -298,7 +236,7 @@ def parseOutput(text):
             error = f"This <swarmup_{action}> block does not hold {SHAPES[action]}." if value is not None else \
                 f"What is inside this <swarmup_{action}> block cannot be read as JSON. Write {SHAPES[action]}, in strict JSON."
             problems.append({"action": action, "raw": raw, "error": error})
-    for found in FENCE_PATTERN.finditer(text):
+    for found in itertools.islice(FENCE_PATTERN.finditer(text), MOST_TAGS):
         if overlaps(spans, found.start(), found.end()):
             continue
         language = letters(found.group(1) or "")
@@ -313,13 +251,14 @@ def parseOutput(text):
         elif hint and language.startswith("swarmup"):
             problems.append({"action": hint, "raw": found.group(0), "error": f"This <swarmup_{hint}> block does not hold {SHAPES[hint]}."})
             spans.append((found.start(), found.end()))
-    index = 0
-    while True:
+    index, scanned = 0, 0
+    while scanned < SCAN_CHARS:
         starts = [position for position in (text.find("{", index), text.find("[", index)) if position >= 0]
         if not starts:
             break
         start = min(starts)
         end = None if overlaps(spans, start, start + 1) else findBalanced(text, start)
+        scanned += (end or min(len(text), start + JSON_LIMIT)) - start
         value = loadJson(text[start:end]) if end else None
         action, items = interpret(value) if value is not None else (None, None)
         if items:
@@ -370,5 +309,5 @@ def readBlockCalls(text, newId):
         if block["action"] == "build" and found["text"].strip():
             arguments["why"] = found["text"].strip()
         calls.append({"id": newId(), "name": BLOCK_TOOLS[block["action"]], "arguments": arguments})
-    calls += [{"id": newId(), "name": BLOCK_TOOLS[problem["action"]], "arguments": {}, "problem": problem["error"]} for problem in found["problems"]]
+    calls += [{"id": newId(), "name": BLOCK_TOOLS[problem["action"]], "arguments": {}, "problem": problem["error"]} for problem in found["problems"][:MOST_PROBLEMS]]
     return calls, found["text"]

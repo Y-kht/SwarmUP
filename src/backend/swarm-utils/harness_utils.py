@@ -136,16 +136,18 @@ def rulesFileOf(name):
 
 
 def isYes(reply):
-    return reply.strip().lower() in YES_WORDS
+    return str(reply or "").strip().lower() in YES_WORDS
 
 
 def isNo(reply):
-    answer = reply.strip().lower()
+    answer = str(reply or "").strip().lower()
     return answer in NO_WORDS or answer == ""
 
 
+# What is inside the first code fence of a text. A fence that is never closed (an answer that was cut) ends with the text.
 def stripFences(text):
-    match = re.search(r"```[\w+-]*\n(.*?)```", text, re.DOTALL)
+    text = str(text or "")
+    match = re.search(r"```[\w+-]*[ \t]*\r?\n(.*?)(?:```|\Z)", text, re.DOTALL)
     return match.group(1).strip() if match else text.strip()
 
 

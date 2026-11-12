@@ -6,10 +6,21 @@ import json
 
 import agent_prompts as prompts
 from agent_journal import clip
-from harness_utils import isYes, stripFences
+from harness_utils import isYes
+from loose_json import readReply
 
 
 KEEP, REMOVE = "keep", "remove"
+
+
+# What the leader decided about an agent that lost what it waited for: (keep or remove, why), or None when its reply does not say.
+def readDecision(reply):
+    try:
+        decision = readReply(reply)
+    except ValueError:
+        return None
+    word = str(decision.get("decision") or "").strip().strip(".").lower()
+    return (word, str(decision.get("why") or "").strip()) if word in (KEEP, REMOVE) else None
 
 
 class SwarmLosses:
@@ -28,12 +39,7 @@ class SwarmLosses:
             self.removeAgent(name, f"It failed: {member['error']}")
 
     def checkDecision(self, draft):
-        try:
-            decision = json.loads(stripFences(draft))
-            valid = isinstance(decision, dict) and decision.get("decision") in (KEEP, REMOVE)
-        except (ValueError, TypeError):
-            valid = False
-        return "" if valid else f"Reply only with JSON like {prompts.LOST_AGENT_EXAMPLE}: the decision is one word, {KEEP} or {REMOVE}."
+        return "" if readDecision(draft) else f"Reply only with JSON like {prompts.LOST_AGENT_EXAMPLE}: the decision is one word, {KEEP} or {REMOVE}."
 
     # The answer of the leader: (keep or remove, why). A user who leads the swarm is asked. A leader that cannot answer lets the agent try, since nothing
     # it does happens without the approval of the user.
@@ -52,8 +58,8 @@ class SwarmLosses:
             reply = None
         if reply is None:
             return KEEP, "the leader could not decide, so it tries"
-        decision = json.loads(stripFences(reply))
-        return decision["decision"], str(decision.get("why") or "").strip() or "the leader gave no reason"
+        decision, why = readDecision(reply)
+        return decision, why or "the leader gave no reason"
 
     # An agent waited for agents that will never give it their result (lost: [{"name", "why"}]). It says if the agent goes on without them.
     def keepsWorking(self, name, member, lost):

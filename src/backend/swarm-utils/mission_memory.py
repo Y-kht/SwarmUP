@@ -49,7 +49,7 @@ LOCK_TRIES = 600
 KNOWN_FILES = {USER_PROMPTS: "every prompt of the user: the mission, the follow-ups, the corrections, the messages to the agents and the answers",
                PROGRESS: "where the mission stands: the summaries of the leader, the agents that did not finish, the final reports",
                PLANS: "the plans the user approved in plan mode, by round and agent"}
-# A block of what to keep in the long-term memory, as a model that writes its calls as text writes it (model_messages.py reads it as a call of
+# A block of what to keep in the long-term memory, as a model that writes its calls as text writes it (call_reader.py reads it as a call of
 # leader__keep_long_term): <swarmup_memory file="USER_PREFERENCES.md" mode="append">...</swarmup_memory>. It is read even when it is not
 # written exactly as asked: a closing tag with a typo, or none (then the next block or the end of the answer ends it).
 MEMORY_BLOCK = re.compile(r"<\s*swarmup_memory\s+file\s*=\s*[\"']?([^\"'>\s]+)[\"']?(?:\s+mode\s*=\s*[\"']?(\w+)[\"']?)?\s*>(.*?)"

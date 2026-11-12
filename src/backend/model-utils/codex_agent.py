@@ -99,17 +99,24 @@ class CodexConnection:
         except (OSError, ValueError):
             raise ModelError("Codex stopped unexpectedly.") from None
 
+    # What Codex writes is read line by line for as long as it runs: a line that is not a message, or a notice that cannot be read, is left
+    # out, and the reading goes on. If it stopped there, every request to Codex would wait for an answer that nobody reads.
     def read(self):
         for line in self.process.stdout:
             try:
                 message = json.loads(line)
-            except ValueError:
+            except (ValueError, RecursionError):
+                continue
+            if not isinstance(message, dict):
                 continue
             if "method" in message and "id" in message:
                 threading.Thread(target=self.answer, args=(message,), daemon=True).start()
             elif "method" in message:
-                self.onNotify(message["method"], message.get("params") or {})
-            elif message.get("id") in self.pending:
+                try:
+                    self.onNotify(message["method"], message["params"] if isinstance(message.get("params"), dict) else {})
+                except Exception:
+                    continue
+            elif isinstance(message.get("id"), (int, str)) and message["id"] in self.pending:
                 holder = self.pending.pop(message["id"])
                 holder[1] = message
                 holder[0].set()

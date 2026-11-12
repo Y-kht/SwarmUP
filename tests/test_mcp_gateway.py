@@ -217,6 +217,45 @@ class ArgumentTests(GatewayTestCase):
         text, error = self.link(self.loop()).call("files__read_file", {"path": "a.txt", "start_line": "1", "line_count": "5"})
         self.assertFalse(error, text)
 
+    # What the schema of a tool asks for says which form an argument was meant to have. What could mean two things goes back to the model.
+    def testAnArgumentIsGivenTheFormItsSchemaAsksFor(self):
+        from call_arguments import coerceArguments
+        schema = {"type": "object", "properties": {"path": {"type": "string"}, "line": {"type": "integer"}, "all": {"type": "boolean"}, "paths": {"type": "array", "items": {"type": "string"}},
+                  "ids": {"type": "array", "items": {"type": "integer"}}, "options": {"type": "object", "properties": {"deep": {"type": "boolean"}}}, "mode": {"type": "string", "enum": ["append", "replace"]},
+                  "maybe": {"anyOf": [{"type": "integer"}, {"type": "null"}]}, "new_text": {"type": "string"}}, "required": ["path"], "additionalProperties": False}
+        cases = [({"path": 12}, {"path": "12"}), ({"path": "a", "line": 12.0}, {"path": "a", "line": 12}), ({"path": "a", "line": "12.0"}, {"path": "a", "line": 12}),
+                 ({"path": "a", "line": None, "all": ""}, {"path": "a"}), ({"path": "a", "all": "Yes"}, {"path": "a", "all": True}), ({"path": "a", "paths": "b.md"}, {"path": "a", "paths": ["b.md"]}),
+                 ({"path": "a", "paths": "['b', 'c',]"}, {"path": "a", "paths": ["b", "c"]}), ({"path": "a", "ids": ["3", 4]}, {"path": "a", "ids": [3, 4]}), ({"path": "a", "ids": 3}, {"path": "a", "ids": [3]}),
+                 ({"path": "a", "options": '{"deep": "true"}'}, {"path": "a", "options": {"deep": True}}), ({"path": "a", "mode": "Append "}, {"path": "a", "mode": "append"}),
+                 ({"path": "a", "maybe": None}, {"path": "a", "maybe": None}), ({"path": "a", "maybe": "3"}, {"path": "a", "maybe": 3}), ({"Path": "a", "newText": "x"}, {"path": "a", "new_text": "x"})]
+        for written, read in cases:
+            self.assertEqual(coerceArguments(schema, written), read, written)
+            self.assertEqual(checkArguments("tool", schema, read), "", written)
+        for written in ({"path": "a", "line": "twelve"}, {"path": "a", "all": 1}, {"path": "a", "paths": "[broken"}, {"path": "a", "mode": "delete"}, {"path": None}, {"path": ["a"]},
+                        {"path": "a", "line": True}, {"path": "a", "new-text": "x", "new_text": "y"}):
+            self.assertEqual(coerceArguments(schema, written), written)
+            self.assertNotEqual(checkArguments("tool", schema, written), "", written)
+
+    def testTheToolAModelMeantIsFoundOnlyWhenOneToolCanBeMeant(self):
+        from call_arguments import nearName
+        names = ["files__read_file", "files__write_file", "transfer__read_file", "processes__run_command", "wheels__run_tests"]
+        for written in ("files__read_file", "files.read_file", "Files__Read_File", "files-read-file", "filesReadFile", "functions.files__read_file", " files__read_file ", "mcp__files__read_file"):
+            self.assertEqual(nearName(written, names), "files__read_file", written)
+        self.assertEqual((nearName("run_command", names), nearName("`run_tests`", names), nearName("run_tests()", names)), ("processes__run_command", "wheels__run_tests", "wheels__run_tests"))
+        for written in ("read_file", "file__read_file", "files", "", None, 12, ["files__read_file"], {"name": "x"}):
+            self.assertIsNone(nearName(written, names), written)
+
+    # A server outside SwarmUP can give any schema: one that cannot be used checks nothing and changes nothing, and its server checks the call.
+    def testASchemaThatCannotBeUsedNeverStopsACall(self):
+        from call_arguments import coerceArguments
+        schemas = [None, [], "x", {"properties": []}, {"properties": {"a": "string"}}, {"properties": {"a": {"type": 5}}}, {"properties": {"a": {"type": ["string", 3]}}},
+                   {"properties": {"a": {"anyOf": "x"}}}, {"required": "a"}, {"$ref": "#/nowhere"}, {"type": "nonsense"}, {"properties": {"a": {"enum": "abc"}}},
+                   {"properties": {"a": {"type": "array", "items": "x"}}}]
+        for schema in schemas:
+            for arguments in ({"a": "1"}, {"a": None}, {"a": [1]}, {"A": {"b": 1}}, {1: 2}):
+                self.assertIsInstance(coerceArguments(schema, arguments), dict, schema)
+                self.assertIsInstance(checkArguments("tool", schema, arguments), str, schema)
+
     def testAToolThatFailsGivesAResultTheModelCanUseAndNoTraceback(self):
         text, error = self.link(self.loop()).call("probe__crash", {})
         self.assertTrue(error)

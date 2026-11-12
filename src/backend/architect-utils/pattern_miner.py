@@ -4,11 +4,12 @@
 # across projects, through the registry and the notes of the architects, pattern_registry.py), it leaves a signal for the architect.
 # Each poll reads what the journals got since the last one and writes it in one transaction, with where it stopped in each journal, so an
 # entry is counted once, even if the program stops in the middle. miner_service.py runs it in the background while a swarm of the project works.
-import json
+import sqlite3
 import time
 import traceback
 
 from pattern_detectors import Batch, Detectors
+from pattern_entry import readEntry
 from pattern_legacy import legacyEntries, legacyMissions
 from pattern_registry import Registry, matchNotes
 from pattern_store import DB_FILE, EMERGING_COUNT, PatternStore, foldData, hintsOf, scoreOf, statusOf
@@ -77,32 +78,49 @@ class Miner:
             read += self.apply(str(path), mission, lines, {"inode": inode, "size": size, "offset": offset, "restarted": restarted, "kind": "journal"}, source)
         return read
 
-    # Writes what a part of a journal holds, and where the journal was read up to, in one transaction.
+    def tellProblem(self):
+        self.problems += 1
+        if self.problems <= 3:
+            traceback.print_exc()
+
+    # What a part of a journal holds goes in the store, whatever its lines hold. A part the store cannot take is read again in two halves, down to
+    # the one line that cannot be written: that line is skipped and counted as bad, and the miner goes on, instead of reading the same part again at
+    # every poll. A store that is busy or full is another matter (OperationalError): nothing is skipped, and the next poll tries again.
     def apply(self, path, mission, lines, cursor, source):
-        batch, bad = Batch(), 0
+        try:
+            return self.applyOnce(path, mission, lines, cursor, source)
+        except sqlite3.OperationalError:
+            raise
+        except Exception:
+            self.tellProblem()
+        self.detectors.trails = {}
+        if len(lines) <= 1:
+            return self.applyOnce(path, mission, [], cursor, source, skipped=len(lines))
+        half = len(lines) // 2
+        self.apply(path, mission, lines[:half], {**cursor, "offset": lines[half][0]}, source)
+        self.apply(path, mission, lines[half:], {**cursor, "restarted": False}, self.store.sources().get(path) or {})
+        return len(lines)
+
+    # Writes what a part of a journal holds, and where the journal was read up to, in one transaction.
+    def applyOnce(self, path, mission, lines, cursor, source, skipped=0):
+        batch, bad = Batch(), skipped
         with self.store.transaction() as db:
             for offset, line in lines:
-                try:
-                    entry = json.loads(line)
-                except ValueError:
-                    bad += 1
-                    continue
-                if not isinstance(entry, dict):
+                entry = readEntry(line)
+                if entry is None:
                     bad += 1
                     continue
                 try:
                     self.detectors.process(db, entry, (path, offset), batch)
                 except Exception:
                     bad += 1
-                    self.problems += 1
-                    if self.problems <= 3:
-                        traceback.print_exc()
+                    self.tellProblem()
             touched = self.write(db, batch)
             self.detectors.saveTrails(db)
             self.store.setSource(db, path, mission=mission, kind=cursor["kind"], inode=cursor["inode"], size=cursor["size"], offset=cursor["offset"],
-                                 lines=(0 if cursor.get("restarted") else source.get("lines") or 0) + len(lines), bad=(source.get("bad") or 0) + bad)
+                                 lines=(0 if cursor.get("restarted") else source.get("lines") or 0) + len(lines) + skipped, bad=(source.get("bad") or 0) + bad)
         self.share(touched)
-        return len(lines)
+        return len(lines) + skipped
 
     # The hits of a batch in the store: the counts, where they were seen, the examples, the links, then the status and the score of each pattern.
     def write(self, db, batch):
@@ -197,17 +215,26 @@ class Miner:
             if not read:
                 return total
 
+    # The entries of an old mission. Entries the store cannot take are left out, and the mission still counts as read: it is read once.
     def applyEntries(self, source, mission, items):
-        batch = Batch()
-        with self.store.transaction() as db:
-            for ref, entry in items:
-                try:
-                    self.detectors.process(db, entry, ref, batch)
-                except Exception:
-                    self.problems += 1
-            touched = self.write(db, batch)
-            self.detectors.saveTrails(db)
-            self.store.setSource(db, source, mission=mission, kind="legacy", offset=len(items), lines=len(items))
+        batch, touched = Batch(), []
+        try:
+            with self.store.transaction() as db:
+                for ref, entry in items:
+                    try:
+                        self.detectors.process(db, entry, ref, batch)
+                    except Exception:
+                        self.problems += 1
+                touched = self.write(db, batch)
+                self.detectors.saveTrails(db)
+                self.store.setSource(db, source, mission=mission, kind="legacy", offset=len(items), lines=len(items))
+        except sqlite3.OperationalError:
+            raise
+        except Exception:
+            self.tellProblem()
+            self.detectors.trails = {}
+            with self.store.transaction() as db:
+                self.store.setSource(db, source, mission=mission, kind="legacy", offset=len(items), lines=len(items), bad=len(items))
         self.share(touched)
         return len(items)
 

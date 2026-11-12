@@ -14,7 +14,6 @@ import time
 
 import anyio
 import anyio.to_thread
-import jsonschema
 from mcp import types
 from mcp.client.session import ClientSession
 from mcp.server.lowlevel import NotificationOptions
@@ -23,6 +22,7 @@ from mcp.shared.memory import create_client_server_memory_streams
 
 import mcp_external
 import mcp_policy
+from call_arguments import checkArguments, coerceArguments, nearName
 from mcp_kit import DEFAULT_TIMEOUT, AgentContext, ToolProblem, buildServer, fullName, splitName
 from mcp_records import CallRecords
 from mcp_runtime import CURRENT_CALL, RUNTIME
@@ -109,47 +109,6 @@ class SkillCache:
 
 
 SKILLS = SkillCache()
-
-
-def describeSchemaError(name, error):
-    where = ".".join(str(part) for part in error.absolute_path)
-    if error.validator == "required":
-        return f"{name} needs {error.message.split(' is a required')[0].strip(chr(39))}."
-    if error.validator == "additionalProperties":
-        return f"{name} has no such argument: {', '.join(re.findall(r"'([^']*)'", error.message))}. Its arguments: {', '.join(error.schema.get('properties') or {})}."
-    if error.validator == "type":
-        return f"{where or 'the arguments'} must be {'an' if str(error.validator_value)[0] in 'aeiou' else 'a'} {error.validator_value}."
-    if error.validator == "enum":
-        return f"{where} must be one of {', '.join(str(value) for value in error.validator_value)}."
-    return f"{where + ': ' if where else ''}{error.message}."
-
-
-# A small model often writes a number or a yes/no as text ("1", "true"). When the text is exactly a number or a boolean that the schema asks
-# for, it is read as such: nothing is guessed, and anything else still goes back to the model.
-def coerceArguments(schema, arguments):
-    if not isinstance(arguments, dict):
-        return arguments
-    fixed = dict(arguments)
-    for key, value in arguments.items():
-        kind = ((schema.get("properties") or {}).get(key) or {}).get("type")
-        if not isinstance(value, str):
-            continue
-        text = value.strip()
-        if kind == "integer" and re.fullmatch(r"-?\d+", text):
-            fixed[key] = int(text)
-        elif kind == "number" and re.fullmatch(r"-?\d+(\.\d+)?", text):
-            fixed[key] = float(text)
-        elif kind == "boolean" and text.lower() in ("true", "false"):
-            fixed[key] = text.lower() == "true"
-    return fixed
-
-
-# GTW-03: the arguments must match the schema of the tool, or the model is told what to change, and the server never sees the call.
-def checkArguments(name, schema, arguments):
-    if not isinstance(arguments, dict):
-        return f"The arguments of {name} must be a JSON object."
-    errors = sorted(jsonschema.Draft202012Validator(schema).iter_errors(arguments), key=lambda error: list(error.absolute_path))
-    return " ".join(describeSchemaError(name, error) for error in errors[:3])
 
 
 def textOf(result):
@@ -281,6 +240,10 @@ class AgentLink:
                         "servers or its wheels to fewer agents, or raise the most tools of an agent in the settings.")
         return shown[:most]
 
+    # The name of the tool the model meant (call_arguments.nearName), or the name it wrote when none of its tools is near it.
+    def nameOf(self, name, readOnly=False):
+        return nearName(name, [item["name"] for item in self.tools(readOnly)]) or str(name)
+
     def timeoutOf(self, server, name):
         tool = next((tool for owner, tool in self.listAll() if owner == server and tool.name == name), None)
         meta = (tool.meta or {}).get("swarmup", {}) if tool is not None else {}
@@ -291,8 +254,9 @@ class AgentLink:
     def call(self, name, arguments, readOnly=False, callId=None, origin="conversation"):
         mark = {"callId": callId, "origin": origin}
         started = time.time()
-        server, tool = splitName(name)
         shown = {item["name"]: item for item in self.tools(readOnly)}
+        name, arguments = nearName(name, shown) or str(name), {} if arguments is None else arguments
+        server, tool = splitName(name)
         if name not in shown:
             return self.finish(server, tool, arguments, "refused", started, f"Not done: there is no tool {name} for you now. Your tools: {', '.join(shown) or 'none'}.", **mark)
         arguments = coerceArguments(shown[name]["parameters"], arguments)

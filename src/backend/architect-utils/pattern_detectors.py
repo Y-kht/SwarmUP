@@ -13,6 +13,7 @@
 # Detectors only take note (Batch): the miner writes the batch in the store, in one transaction.
 import time
 
+from pattern_entry import cleanEntry
 from pattern_errors import classifyError
 from pattern_sequences import AgentTrail
 from pattern_shapes import collapse, fingerprint, maskText, numbersOf, shapeCall, shapeCommand, targetOf
@@ -58,10 +59,15 @@ class Detectors:
         self.store, self.project, self.root = store, project, root
         self.trails, self.agents, self.covers, self.since = {}, {}, {}, {}
 
+    # A trail that the store cannot give back (what it kept cannot be read) starts again: the sequence that was going on is lost, nothing else.
     def trailOf(self, entry):
         key = f"{entry.get('mission')}:{entry.get('agent')}"
         if key not in self.trails:
-            self.trails[key] = AgentTrail(self.store.getState(f"trail:{key}"))
+            try:
+                saved = self.store.getState(f"trail:{key}")
+            except ValueError:
+                saved = None
+            self.trails[key] = AgentTrail(saved)
         return self.trails[key]
 
     def requestKey(self, entry, trail):
@@ -84,8 +90,10 @@ class Detectors:
             self.store.addSketch(db, kind, cluster, sketch, anchors)
         return cluster, maskText(text)[:200]
 
+    # Every entry is read through pattern_entry.cleanEntry first: the handlers below get each field in its kind, or not at all.
     def process(self, db, entry, ref, batch):
-        handler = getattr(self, f"on_{entry.get('kind')}", None)
+        entry = cleanEntry(entry)
+        handler = getattr(self, f"on_{entry.get('kind')}", None) if entry else None
         if handler is not None:
             handler(db, entry, ref, batch)
 

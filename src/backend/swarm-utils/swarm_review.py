@@ -1,8 +1,8 @@
-import json
 from datetime import datetime
 
 import agent_prompts as prompts
-from harness_utils import STOPPED_MESSAGE, SUMMARY_LENGTH, SwarmStopped, USER_NAME, isNo, isOnline, isYes, stripFences
+from harness_utils import STOPPED_MESSAGE, SUMMARY_LENGTH, SwarmStopped, USER_NAME, isNo, isOnline, isYes
+from loose_json import readReply
 from memory_cache import describeLongTerm
 from model_adapters import adapterOf
 from mission_memory import USER_PROMPTS, splitRecord
@@ -184,8 +184,8 @@ class SwarmReview:
 
     def checkRoute(self, draft, names):
         try:
-            route = json.loads(stripFences(draft))
-            valid = isinstance(route, dict) and all(isinstance(text, str) and text.strip() for text in route.values())
+            route = readReply(draft)
+            valid = all(isinstance(text, str) and text.strip() for text in route.values())
         except ValueError:
             valid = False
         if not valid:
@@ -203,7 +203,7 @@ class SwarmReview:
             route = self.getMember(self.leader)["agent"].reviewLoop(prompt, lambda draft: self.checkRoute(draft, names), ask=False, own=False)
         except Exception:
             route = None
-        return json.loads(stripFences(route)) if route is not None else {name: comment for name in names}
+        return readReply(route) if route is not None else {name: comment for name in names}
 
     # The leader messages the agents the correction concerns, and they write their drafts again.
     # If no agent is concerned the correction is about the summary itself, and it is returned to write the summary again.

@@ -24,8 +24,8 @@ import leader_utils
 import mission_costs
 from leader_catalog import EXAMPLE_MODEL, LeaderCatalog
 from leader_manager import LeaderManager
-from leader_parser import isNoChange, parseOutput
-from model_messages import readToolCalls
+from leader_parser import isNoChange, loadJson, parseOutput
+from call_reader import readToolCalls
 from agent_journal import BuildLog
 from leader_utils import designSwarm
 from models_library import API_KEYS, getModelInfo
@@ -199,6 +199,17 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(self.read('<swarmup_remove>{"name": ["A", "B"], "why": "done"}</swarmup_remove>')[0],
                          [("remove", {"name": "A", "why": "done"}), ("remove", {"name": "B", "why": "done"})])
         self.assertEqual([action for action, data in self.read('<swarmup_add>{"agents": [{"name": "A", "task": "author"}, {"name": "B", "task": "math"}]}</swarmup_add>')[0]], ["add", "add"])
+
+    # A leader writes a few blocks: a text with thousands of brackets or of broken blocks is read in a time that grows with its length, and told once.
+    def testATextOfAnySizeIsReadWithoutHanging(self):
+        started = time.monotonic()
+        for text in ("[[" * 20000, "{" * 60000, "<swarmup_add>{" * 5000, "```swarmup add\n" * 5000, "<" * 100000, '<swarmup_build>' + '{"agents": [' * 3000):
+            calls, rest = readToolCalls(text, [{"name": "leader__add_agent"}, {"name": "leader__propose_swarm"}])
+            self.assertLessEqual(len(calls), 8, text[:30])
+        self.assertLess(time.monotonic() - started, 20)
+        self.assertEqual(loadJson('{"name": "it is true, null and false", "ok": true,}'), {"name": "it is true, null and false", "ok": True})
+        self.assertEqual(loadJson("{'name': 'it is true', 'ok': True}"), {"name": "it is true", "ok": True})
+        self.assertIsNone(loadJson("[" * 50000))
 
     def testABrokenBlockOfSwarmUpGoesBackToTheLeader(self):
         blocks, found = self.read('Here: <swarmup_add>{"name": "Tr", "task": "author", </swarmup_add> done.')
