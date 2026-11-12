@@ -156,7 +156,8 @@ def copyProgram(target):
     ignore = shutil.ignore_patterns("__pycache__", "*.pyc")
     shutil.copytree(REPOSITORY / "src", target / "src", ignore=ignore)
     shutil.copytree(REPOSITORY / "agent-rules", target / "agent-rules", ignore=ignore)
-    shutil.copy2(REPOSITORY / "LICENSE", target / "LICENSE")
+    for name in ("LICENSE", "NOTICE"):
+        shutil.copy2(REPOSITORY / name, target / name)
 
 
 # Compiled files that are never compared with their sources: the program starts fast, and nothing is written in an application that must not change.
