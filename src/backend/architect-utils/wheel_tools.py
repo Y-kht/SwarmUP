@@ -26,6 +26,10 @@ DEFAULT_SECONDS = 120
 MAX_SECONDS = 600
 CODE_LINES = 80
 STEP_CHARS = 4000
+# What a script wheel gives back is read at every later step of the agent: a wheel gives what the agent needs next, never a whole log. A longer
+# result keeps its beginning and its end, and the architect is told to make the wheel say less.
+OUTPUT_CHARS = 12000
+HAND = "Do the step by hand: SwarmUP tells the architect, who repairs the wheel."
 MOST_ITEMS = 20
 RUNNER = Path(__file__).resolve().with_name("wheel_runner.py")
 TEMPLATE = re.compile(r"\{(\w+)\}")
@@ -88,7 +92,7 @@ def describeCode(wheel):
 
 def askToRun(box, work, wheel, arguments):
     manifest = wheel["manifest"]
-    flags = [text for flag, text in (("changes", "It changes files."), ("network", "It reaches the internet.")) if manifest.get(flag)]
+    flags = [text for flag, text in (("changes", "It changes files, and SwarmUP cannot put back what a script changes."), ("network", "It reaches the internet.")) if manifest.get(flag)]
     detail = (f"{manifest.get('summary') or ''}\nArguments: {json.dumps(arguments, ensure_ascii=False)[:1500]}\n{' '.join(flags)}\n"
               f"The code of version {wheel['version']}:\n{describeCode(wheel)}").strip()
     request = {"action": f"run the wheel {wheel['name']}", "detail": detail, "folder": str(box.root), "reason": "", "key": f"wheel:{wheel['pin']}", "place": "",
@@ -136,21 +140,28 @@ def runScript(work, wheel, arguments, seconds):
     spent = round(time.time() - started, 3)
     if code is None:
         loop.note("wheel", name=wheel["name"], pin=wheel["pin"], action="run", ok=False, error={"type": "TimeLimit", "message": f"more than {seconds} s"}, seconds=spent)
-        raise ToolFailure(f"The wheel {wheel['name']} ran for more than {seconds} seconds and was stopped. Do the step by hand, and say so in your answer.")
+        raise ToolFailure(f"The wheel {wheel['name']} ran for more than {seconds} seconds and was stopped. {HAND}")
     if result is None:
         loop.note("wheel", name=wheel["name"], pin=wheel["pin"], action="run", ok=False, error={"type": "NoResult", "message": f"exit code {code}"}, trace=printed[-3000:], seconds=spent)
-        raise ToolFailure(f"The wheel {wheel['name']} stopped before it finished (exit code {code}). Do the step by hand, and say so in your answer.")
+        raise ToolFailure(f"The wheel {wheel['name']} stopped before it finished (exit code {code}). {HAND}")
+    output = str(result.get("output") or "Done.")
     loop.note("wheel", name=wheel["name"], pin=wheel["pin"], action="run", ok=result["ok"], error=result.get("error"), trace=(result.get("trace") or "")[-3000:],
-              seconds=spent)
+              seconds=spent, size=len(output))
     if not result["ok"]:
         error = result.get("error") or {}
-        raise ToolFailure(f"The wheel {wheel['name']} failed: {error.get('type')}: {error.get('message')}. It may not fit this case: do the step by hand, "
-                          "and say so in your answer.")
+        raise ToolFailure(f"The wheel {wheel['name']} failed: {error.get('type')}: {clip(str(error.get('message') or ''), 1500)}\nIf what you gave it was wrong, call it again "
+                          f"with what it needs. Otherwise it does not fit this case. {HAND}")
     loop.logAction(f"Ran the wheel {wheel['name']} (v{wheel['version']}) in {box.root}.")
-    output = result.get("output") or "Done."
     printedText = (result.get("printed") or "").strip()
-    text = output + (f"\n\nIt printed:\n{printedText[-4000:]}" if printedText else "")
+    text = shorten(output) + (f"\n\nIt printed:\n{printedText[-4000:]}" if printedText else "")
     return f"<data from=\"wheel {wheel['name']}\">\n{text}\n</data>"
+
+
+def shorten(output):
+    if len(output) <= OUTPUT_CHARS:
+        return output
+    head, tail = OUTPUT_CHARS * 2 // 3, OUTPUT_CHARS // 3
+    return f"{output[:head]}\n[... {len(output) - head - tail:,} characters of the result of the wheel are left out ...]\n{output[-tail:]}"
 
 
 # A value of the arguments of a step, with the inputs of the wheel and what the steps before saved: "{name}" alone keeps the value as it is.
@@ -182,7 +193,7 @@ def runSteps(work, wheel, arguments):
             if failures and len(failures) >= len(results):
                 loop.note("wheel", name=wheel["name"], pin=wheel["pin"], action="run", ok=False, error={"type": "Step", "message": f"step {number} ({tool}) failed for every item: {failures[0][:500]}"},
                           seconds=round(time.time() - started, 3))
-                raise ToolFailure(f"The wheel {wheel['name']} failed at step {number} ({tool}) for every item: {clip(failures[0], 1500)}\nDo the step by hand, and say so in your answer.")
+                raise ToolFailure(f"The wheel {wheel['name']} failed at step {number} ({tool}) for every item: {clip(failures[0], 1500)}\n{HAND}")
             continue
         text, error = link.call(tool, fill(step.get("arguments") or {}, values), callId=f"{wheel['name']}.{number}", origin=f"wheel:{wheel['name']}")
         if error:
@@ -190,7 +201,7 @@ def runSteps(work, wheel, arguments):
                       seconds=round(time.time() - started, 3))
             done = "\n".join(shown)
             raise ToolFailure(f"The wheel {wheel['name']} stopped at step {number} ({tool}): {clip(text, 1500)}\n" + (f"What the steps before gave:\n{done}\n" if done else "") +
-                              "Do the rest by hand, and say so in your answer.")
+                              "Do the rest by hand: SwarmUP tells the architect, who repairs the wheel.")
         for name, pattern in (step.get("save") or {}).items():
             match = re.search(str(pattern), text)
             if match:

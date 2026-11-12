@@ -42,10 +42,15 @@ function wheelsCard() {
   const state = store.state;
   const wheels = state.architect?.wheels || [];
   if (!wheels.length || !state.agents.length) return null;
+  const alone = state.agents.length === 1;
+  const leaderGives = !alone && !state.agents[0].model?.user;
   return h('div', { class: 'card enter' }, h('div', { class: 'card-head' }, icon('zap'), h('h3', { class: 'grow' }, 'The wheels of the agents')),
-    h('div', { class: 'card-body stack' }, h('div', { class: 'small muted' }, 'Wheels are scripts the architect wrote from what agents of this project repeated. Give each agent only the wheels its task needs: it gets them as tools.'),
+    h('div', { class: 'card-body stack' }, h('div', { class: 'small muted' }, 'Wheels are scripts the architect wrote from what agents of this project repeated. An agent gets a wheel as a tool. '
+      + (alone ? 'An agent that works alone gets the wheels of its project by itself. Click a wheel only to choose them yourself.'
+        : leaderGives ? 'You have nothing to do: when the swarm starts, the leader gives each agent the wheels its task needs. Click a wheel only to choose them yourself.'
+          : 'Give each agent only the wheels its task needs.')),
       state.agents.map(agent => h('div', { class: 'row top wrap' }, h('div', { class: 'row', style: { width: '210px' } }, taskIcon(agent.task, 'sm'), h('b', {}, agent.name)),
-        wheelPills(agent.id, agent.wheels, wheels)))));
+        wheelPills(agent.id, agent.wheels, wheels), (alone || leaderGives) && !agent.wheelsChosen ? h('span', { class: 'small faint' }, alone ? 'All of them' : 'The leader chooses') : null))));
 }
 
 // The settings of the tools and of the architect, in the modal of the settings.

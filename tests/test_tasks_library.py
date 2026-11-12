@@ -161,6 +161,10 @@ class BuildTests(unittest.TestCase):
         loop = buildLoop("format", None, answers)
         self.assertEqual(loop.folder, self.folder.resolve())
         self.assertIn(f"It works inside the folder {self.folder.resolve()}.", describeLoop(loop))
+        # The task of the user often ends without a full stop: its folder is still a sentence of its own.
+        general = buildLoop("agent", None, {"prompt": "Fix the failing tests", "folder": str(self.folder)})
+        self.assertEqual(describeLoop(general), f"Fix the failing tests. It works inside the folder {self.folder.resolve()}.")
+        self.assertEqual(describeLoop(buildLoop("agent", None, {"prompt": "Fix the failing tests"})), "Fix the failing tests")
         self.assertEqual(describeLoop(buildLoop("format", None, self.answers()["format"])), TASKS["format"]["build"](None, self.answers()["format"]).describeTask())
         elsewhere = tempfile.TemporaryDirectory()
         self.addCleanup(elsewhere.cleanup)

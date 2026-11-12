@@ -15,7 +15,7 @@ import pattern_store
 from agent_journal import Journal
 from cli_patterns import addPatternArguments, runPatterns, runWheels
 from miner_service import LOCK_FILE, MINERS, MinerService, ProjectLock
-from pattern_digest import draftForStreak, focusPatterns, renderBrief, renderFocus, renderPattern, renderTable, searchJournal
+from pattern_digest import draftForStreak, focusPatterns, renderBrief, renderFocus, renderPattern, renderTable, searchJournal, wheelsToFix
 from wheel_checks import checkWheel
 from pattern_errors import classifyError
 from pattern_miner import Miner, forgetMission
@@ -27,7 +27,7 @@ from pattern_text import intentsOf, locationsOf, similarity, sketchOf
 from project_identity import projectDir, projectFor, registerMission
 from saved_swarms import saveSwarmState
 from test_saved_swarms import waitUntil
-from wheel_store import readCatalog, saveWheel, writeCatalog
+from wheel_store import pinOf, readCatalog, retireWheel, saveWheel, writeCatalog
 
 
 class ShapeTests(unittest.TestCase):
@@ -166,6 +166,20 @@ class SequenceTests(unittest.TestCase):
         found = trail.add("edit a", "edit", True, step=trail.stepOf("c9"), l0="edit a")
         self.assertEqual(found["streak"], ("search", 3, ["search holdActionDuration", "search replayPrefixCount", "search SettingsLink"]))
         self.assertIsNone(trail.endStreak())
+
+    # An agent that edits, tests, edits another passage and tests again goes forward: only the same two calls back and forth are a loop.
+    def testAnAgentThatFixesAndTestsAgainIsNotStuck(self):
+        trail = AgentTrail()
+        for number in range(4):
+            self.assertIsNone(trail.add("edit <name>.py", "edit", True, l0=f"edit calc.py passage {number}")["loop"])
+            self.assertIsNone(trail.add("run tests", "run", number == 3, error="e1", l0="run tests")["loop"])
+        stuck = AgentTrail()
+        found = [stuck.add(step, step, True, l0=step)["loop"] for step in ("read a", "read b", "read a", "read b")]
+        self.assertEqual([loop is not None for loop in found], [False, False, False, True])
+        restored = AgentTrail(json.loads(json.dumps(stuck.toData())))
+        self.assertEqual(restored.shapes, stuck.shapes)
+        old = AgentTrail({"shapes": [["read a", True, "c1"], ["read b", True, "c2"], ["read a", True, "c3"]]})
+        self.assertIsNotNone(old.add("read b", "read", True)["loop"])
 
     def testTheFixOfAnErrorIsWhatLedToTheSameStepWorking(self):
         trail = AgentTrail()
@@ -365,6 +379,49 @@ class MinerTests(MinerTestCase):
         signalled = {row["data"].get("how") for signal in miner.store.pendingSignals() for row in [miner.store.pattern(signal["pattern"])] if row["kind"] == "redo"}
         self.assertEqual(signalled, {"ignored"})
         self.assertEqual(self.rowOf(miner, "command", "pip install")["status"], "covered")
+
+    # Wheels the leader gives while the swarm works count from then on: their work done by hand is then a wheel the agent had.
+    def testAWheelGivenWhileTheSwarmWorksIsAWheelTheAgentHas(self):
+        miner = self.miner()
+        self.habit("m1")
+        miner.poll()
+        saveWheel("install_missing", "script", "WHEEL = {}\n", "Installs the module that is missing.", [self.rowOf(miner, "command", "pip install")["fp"]], "project", self.project, {})
+        journal = self.journalOf("m2")
+        journal.add("run", agents=[{"name": "Coder", "wheels": []}])
+        journal.add("wheel", "Leader", action="given", to="Coder", wheels=["install_missing"], why="it installs modules")
+        self.call("m2", "Coder", "run_command", {"command": "pip install requests"})
+        miner.poll()
+        self.assertEqual({row["data"]["how"] for row in miner.store.patterns(("redo",), limit=10)}, {"ignored"})
+
+    # What went wrong with a wheel is told until the architect repairs it (a new version), retires it or dismisses it: never about a version that is gone.
+    def testAWheelRepairedRetiredOrDismissedLeavesTheWheelsToFix(self):
+        miner = self.miner()
+        first = saveWheel("run_tests", "script", "WHEEL = {}\n", "Runs the tests of the project and gives the failing ones.", ["f1"], "project", self.project, {})[0]
+        journal = self.journalOf("m1")
+        fail = lambda pin: journal.add("wheel", "W", name="run_tests", pin=pin, action="run", ok=False, error={"type": "KeyError", "message": "'path'"}, trace="Traceback...", seconds=1)
+        fail(pinOf("run_tests", first["hash"]))
+        journal.add("wheel", "W", name="run_tests", pin=pinOf("run_tests", first["hash"]), action="run", ok=True, seconds=1, size=40000)
+        miner.poll()
+        self.assertEqual(sorted(row["shape"] for row in wheelsToFix(miner.store, self.project)), ["run_tests: KeyError", "run_tests: LongResult"])
+        self.assertIn("gave back 40,000 characters", renderBrief(miner.store, self.project))
+        self.assertIn("WHEELS THAT FAIL OR ARE NOT USED", renderBrief(miner.store, self.project))
+        self.assertEqual(wheelsToFix(miner.store, "another-project"), [])
+        second = saveWheel("run_tests", "script", "WHEEL = {}\n# repaired\n", "Runs the tests of the project and gives the failing ones.", ["f1"], "project", self.project, {})[0]
+        self.assertEqual(wheelsToFix(miner.store, self.project), [])
+        self.assertNotIn("WHEELS THAT FAIL", renderBrief(miner.store, self.project))
+        self.assertNotIn("KeyError", renderBrief(miner.store, self.project))
+        fail(pinOf("run_tests", second["hash"]))
+        miner.poll()
+        failing = wheelsToFix(miner.store, self.project)
+        self.assertEqual([row["shape"] for row in failing], ["run_tests: KeyError"])
+        miner.store.setStatus(failing[0]["id"], "dismissed", note="dismissed: the agent gave no path")
+        self.assertEqual(wheelsToFix(miner.store, self.project), [])
+        fail(pinOf("run_tests", second["hash"]))
+        fail(pinOf("run_tests", second["hash"]))
+        miner.poll()
+        self.assertEqual(len(wheelsToFix(miner.store, self.project)), 1)
+        retireWheel("run_tests", "it cannot work")
+        self.assertEqual(wheelsToFix(miner.store, self.project), [])
 
     # Reading a file that a wheel also reads is one step of its work at most, and what agents did before the wheel was made is no redo.
     def testReadingAFileOrWorkDoneBeforeTheWheelIsNoRedo(self):
@@ -576,6 +633,36 @@ class DigestTests(MinerTestCase):
         self.assertTrue(focus.startswith("DECIDE ABOUT THIS PATTERN FIRST:"))
         self.assertIn(f"#{rows[0]['id']}", focus)
         self.assertIn("<data from=\"journal\">", focus)
+
+    # A wheel to repair is the first thing to decide about, with its code; one call of a tool, which no wheel can save, is never asked one by one.
+    def testAWheelToRepairComesFirstAndOneCallIsNoFocus(self):
+        miner = self.miner()
+        for mission in ("m1", "m2", "m3"):
+            self.habit(mission)
+        miner.poll()
+        self.assertTrue(any(row["kind"] == "action" and row["status"] == "repeating" for row in miner.store.patterns(limit=100)))
+        self.assertFalse(any(row["kind"] in ("action", "permission", "intent", "message") for row in focusPatterns(miner.store, 50, project=self.project)))
+        code = "WHEEL = {}\n\n\ndef run(args, folder):\n    return args['path']\n"
+        pip = next(row for row in miner.store.patterns(("command",), limit=100) if "pip install" in row["label"])
+        entry = saveWheel("install_missing", "script", code, "Installs the module that is missing.", [pip["fp"]], "project", self.project, {})[0]
+        journal = self.journalOf("m4")
+        journal.add("run", agents=[{"name": "Coder", "wheels": ["install_missing"]}])
+        journal.add("wheel", "Coder", name="install_missing", pin=pinOf("install_missing", entry["hash"]), action="run", ok=False, error={"type": "KeyError", "message": "'path'"},
+                    trace="Traceback (most recent call last):\nKeyError: 'path'", seconds=1)
+        self.call("m4", "Coder", "run_command", {"command": "pip install requests"})
+        miner.poll()
+        rows = focusPatterns(miner.store, 3, project=self.project)
+        self.assertEqual((rows[0]["kind"], rows[0]["data"]["wheel"]), ("wheelfail", "install_missing"))
+        self.assertEqual(len([row for row in rows if row["kind"] in ("wheelfail", "redo")]), 1)
+        focus = renderFocus(miner.store, project=self.project)
+        self.assertTrue(focus.startswith("REPAIR THIS WHEEL FIRST"))
+        self.assertIn("THE WHEEL install_missing (v1, script) AS IT IS NOW:", focus)
+        self.assertIn("return args['path']", focus)
+        self.assertIn("KeyError: 'path'", focus)
+        self.assertIn("done by hand (the agent had it)", focus)
+        self.assertNotIn("REPAIR THIS WHEEL", renderFocus(miner.store))
+        brief = renderBrief(miner.store, self.project)
+        self.assertEqual(brief.count("the wheel install_missing failed: KeyError"), 2)
 
     def testADraftForAStreakIsAWheelThatPassesTheChecks(self):
         row = {"kind": "streak", "shape": "files__read_file(line_count, path, start_line, document.pdf)"}

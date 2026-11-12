@@ -29,6 +29,8 @@ READING_TOOLS = ("read_file", "fetch_page", "search_files")
 # A sequence of these steps only reads: it is how agents find their way, worth less than a sequence that does something.
 LOOKING = ("files__read_file", "files__list_files", "files__find_files", "files__search_files", "team__read_team", "team__read_result")
 EXAMPLE_CHARS = 600
+# A result of a wheel longer than this is cut for the agent (OUTPUT_CHARS in wheel_tools.py), and the architect is told to make the wheel say less.
+LONG_RESULT = 12000
 
 
 class Batch:
@@ -271,10 +273,18 @@ class Detectors:
                   entry, ref, error=True, data={"family": found["family"]}, example=entry["error"])
 
     def on_wheel(self, db, entry, ref, batch):
+        # Wheels given while the swarm works: from then on, their work done by hand is a wheel the agent had and did not use.
+        if entry.get("action") == "given":
+            key = f"{entry.get('mission')}:{entry.get('to')}"
+            self.agents[key] = {**(self.agents.get(key) or {}), "wheels": list(entry.get("wheels") or [])}
         if entry.get("action") != "run":
             return
         name, ok = entry.get("name") or "?", bool(entry.get("ok"))
         batch.hit("wheel", name, name, f"runs of the wheel {name}", entry, ref, seconds=entry.get("seconds") or 0, error=not ok, data={"pin": entry.get("pin")})
+        # A wheel gives what the agent needs next, never a whole log: the agent reads its result again at every later step.
+        if ok and (entry.get("size") or 0) > LONG_RESULT:
+            batch.hit("wheelfail", (name, "LongResult"), f"{name}: LongResult", f"the wheel {name} gave back {int(entry['size']):,} characters: too much to read at every step, "
+                      "it must give only what the agent needs next", entry, ref, data={"wheel": name, "pin": entry.get("pin")})
         if not ok:
             error = entry.get("error") or {}
             batch.hit("wheelfail", (name, error.get("type") or "?"), f"{name}: {error.get('type')}", f"the wheel {name} failed: {error.get('type')}: {error.get('message') or ''}",

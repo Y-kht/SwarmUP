@@ -273,6 +273,9 @@ def askFolder(console, spec, number, total):
     return askUntilValid(console, f"Folder of {spec['name']}{shown} (a path, Enter = {'the one in brackets' if suggestion else 'no folder'}, none = no folder):", parse)
 
 
+LEADER_CHOOSES = object()
+
+
 # The wheels of each agent of a swarm the user builds, when the project has some: scripts the architect wrote from what agents repeated.
 def chooseWheels(console, swarm, specs):
     folders = [spec["answers"].get("folder") for spec in specs if spec["answers"].get("folder")]
@@ -280,10 +283,16 @@ def chooseWheels(console, swarm, specs):
     if not catalog:
         return False
     names = list(catalog)
-    console.say("Your project has wheels: scripts the architect wrote from what agents of this project did again and again. An agent gets only the wheels "
-                "you give it, as tools.\n" + "\n".join(f"  {name}: {entry.get('summary') or ''}" for name, entry in catalog.items()))
+    # A leader that is a model gives the wheels when the user does not choose them (leader_wheels.py); the user who leads chooses here.
+    byLeader = not swarm.leaderIsUser()
+    console.say("Your project has wheels: scripts the architect wrote from what agents of this project did again and again. An agent gets a wheel as a tool, "
+                "only when it is given to it" + (": by you here, or by the leader when the swarm starts.\n" if byLeader else ".\n") +
+                "\n".join(f"  {name}: {entry.get('summary') or ''}" for name, entry in catalog.items()))
+    hint = "Your choices (numbers like 1,3; none = none; Enter = the leader chooses):" if byLeader else "Your choices (numbers like 1,3; Enter or none = none):"
     for spec in specs:
-        chosen = chooseFrom(console, f"\nWhich wheels must {spec['name']} use?", names, one=False, none=True, default=[], hint="Your choices (numbers like 1,3; Enter or none = none):")
+        chosen = chooseFrom(console, f"\nWhich wheels must {spec['name']} use?", names, one=False, none=True, default=LEADER_CHOOSES if byLeader else [], hint=hint)
+        if chosen is LEADER_CHOOSES:
+            continue
         member = swarm.getMember(spec["name"])
         member["agent"].wheels = spec["answers"]["wheels"] = list(chosen)
         if member.get("recipe") is not None:

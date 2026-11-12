@@ -100,7 +100,7 @@ class SoloDesk:
     def view(self):
         turn = self.turn
         notes, self.notes = self.notes, []
-        shown = {key: turn[key] for key in ("id", "kind", "agent", "text", "opens")} if turn else None
+        shown = {key: turn.get(key) for key in ("id", "kind", "agent", "text", "opens", "pin")} if turn else None
         if turn:
             shown["fresh"] = [{"name": tool["name"], "description": tool.get("description", ""), "parameters": tool.get("parameters")} for tool in turn["fresh"]]
             shown["tools"] = [tool["name"] for tool in turn.get("tools") or []]
@@ -203,7 +203,7 @@ def describeCard(name, card):
 
 
 def askCard(desk, loop, card):
-    reply = desk.take({"kind": "card", "agent": loop.name, "text": describeCard(loop.name, card), "tools": []})
+    reply = desk.take({"kind": "card", "agent": loop.name, "text": describeCard(loop.name, card), "tools": [], "pin": bool(card.get("pin"))})
     return {"decision": reply.get("decision") or "deny", "message": reply.get("message") or ""}
 
 
@@ -332,9 +332,10 @@ def describeTools(tools):
 
 
 # What to do next, as commands, or as tools for a model that works through MCP (solo_mcp_server.py).
-HINTS = {"commands": {"card": "Decide with: solo approve {session}, solo always {session}, or solo deny {session} why", "work": "Next: solo call {session} TOOL key=value, or solo answer {session} \"your answer\"",
+HINTS = {"commands": {"card": "Decide with: solo approve {session}, solo always {session}, or solo deny {session} why",
+                      "wheel": "Decide with: solo approve {session}, solo always {session} (until the next run), solo forever {session} (this version of the wheel, in every swarm), or solo deny {session} why", "work": "Next: solo call {session} TOOL key=value, or solo answer {session} \"your answer\"",
                       "person": "Then: solo wait {session}", "over": "Go on with: solo next {session} \"request\", or end with: solo close {session}", "busy": "See the next turn with: solo wait {session}"},
-         "tools": {"card": "Decide with solo_decide.", "work": "Next: call one of your tools, or give your answer with solo_answer.", "person": "Then: solo_status.",
+         "tools": {"card": "Decide with solo_decide.", "wheel": "Decide with solo_decide (forever allows this version of the wheel in every swarm).", "work": "Next: call one of your tools, or give your answer with solo_answer.", "person": "Then: solo_status.",
                    "over": "Go on with solo_next, or end with solo_close.", "busy": "See the next turn with solo_status."}}
 
 
@@ -351,7 +352,7 @@ def renderView(view, session="", hints="commands"):
         parts.append(turn["text"])
         if turn.get("fresh"):
             parts.append(describeTools(turn["fresh"]))
-        parts.append(f"(Turn {turn['id']}. {hint('card' if turn['kind'] == 'card' else 'work')})")
+        parts.append(f"(Turn {turn['id']}. {hint(('wheel' if turn.get('pin') else 'card') if turn['kind'] == 'card' else 'work')})")
     elif view.get("person"):
         parts.append(f"A person must answer in another terminal (swarmup_cli.py attach {session}): {view['person']}. {hint('person')}")
     elif view.get("state") == "over":

@@ -1,11 +1,15 @@
 # The wheels as the leader sees them: the leader gives each agent only the wheels its task needs, when it proposes the agent (the field wheels)
 # or while the swarm works (leader__give_wheels). An agent then gets those wheels as its tools, and nothing else of the long-term memory.
 # The leader reads the wheels of the project in its prompt (the most relevant first, in a few lines each), and finds the others with
-# leader__find_wheels.
+# leader__find_wheels. The agents nobody chose wheels for get them when a run starts: an agent alone gets the wheels of its project, and in a
+# swarm the leader is asked once which wheels each of them needs (giveStartingWheels).
 import difflib
+import json
 import re
+import threading
 
-from harness_utils import ARCHITECT_NAME
+import agent_prompts as prompts
+from harness_utils import ARCHITECT_NAME, stripFences
 from project_identity import projectFor
 from user_settings import currentSetting
 from wheel_store import catalogFor, readCatalog, realName
@@ -22,8 +26,9 @@ def projectOfFolder(folder):
     return projectFor(folder)[0]
 
 
+# The words of a text, without the s of a plural, so that "the tests" finds run_unit_test and "a test" finds run_unit_tests.
 def wordsOf(text):
-    return set(WORD.findall(str(text or "").lower().replace("_", " ")))
+    return {word[:-1] if word.endswith("s") and len(word) > 3 else word for word in WORD.findall(str(text or "").lower().replace("_", " "))}
 
 
 def readWheelNames(value):
@@ -104,6 +109,67 @@ def giveLoneWheels(swarm):
     return names if set(names) == set(member["agent"].wheels) else giveWheels(swarm, name, names, "it works alone, so it gets the wheels of its project", chosen=False)
 
 
+# The agents that work in this run and that nobody chose wheels for: neither the user (the step of the wheels) nor the leader (the swarm it proposed).
+def withoutChoice(swarm):
+    return [name for name, member in list(swarm.members.items()) if member["status"] not in ("done", "failed") and member.get("recipe") is not None
+            and "wheels" not in (member["recipe"].get("answers") or {})]
+
+
+# What the leader answered: {agent: [wheels]}, with agents it was asked about and wheels of the project.
+def checkGiven(draft, names, project):
+    try:
+        given = json.loads(stripFences(draft))
+    except ValueError:
+        given = None
+    if not isinstance(given, dict):
+        return f"Reply only with JSON like {prompts.LEADER_WHEELS_EXAMPLE}"
+    unknown = [name for name in given if name not in names]
+    if unknown:
+        return f"These are not agents you can give wheels to: {', '.join(unknown)}. Choose from: {', '.join(names)}."
+    return " ".join(error for wheels in given.values() for error in checkWheels(wheels, project)[1])
+
+
+# The leader gives the wheels, also in a swarm the user built: it is asked once which wheels the agents without a choice need for their tasks, and
+# its answer is their choice from then on (an empty one too, so it is not asked again). If it cannot answer, nothing changes.
+def askLeaderForWheels(swarm, names):
+    project = swarm.project
+    leader = swarm.getMember(swarm.getLeader())["agent"]
+    agents = "\n".join(f"- {name} ({swarm.members[name]['role']}): {swarm.members[name]['task']}" for name in names if name in swarm.members)
+    prompt = prompts.LEADER_WHEELS_PROMPT.format(mission=swarm.mission, wheels=describeWheelsFor(project, swarm.currentRequest()), agents=agents,
+                                                 example=prompts.LEADER_WHEELS_EXAMPLE)
+    try:
+        draft = leader.reviewLoop(prompt, lambda draft: checkGiven(draft, names, project), ask=False, own=False)
+    except Exception:
+        draft = None
+    if draft is None or not swarm.active or swarm.stopped:
+        return {}
+    given = json.loads(stripFences(draft))
+    for name in names:
+        member = swarm.members.get(name)
+        if member is None:
+            continue
+        if given.get(name):
+            giveWheels(swarm, name, given[name], "the leader chose them for its own task" if name == swarm.getLeader() else "its leader chose them for its task")
+        else:
+            member["recipe"].setdefault("answers", {})["wheels"] = []
+    return given
+
+
+# The wheels of the agents nobody chose wheels for, when a run starts. An agent alone gets the wheels of its project by itself. In a swarm that
+# executes, a leader that is a model is asked in the background, so no agent waits for it: the agents get their wheels at their next step.
+# A leader that is the user gives the wheels itself (the step of the wheels, the command wheels).
+def giveStartingWheels(swarm):
+    if len(swarm.members) == 1:
+        giveLoneWheels(swarm)
+        return None
+    names = withoutChoice(swarm)
+    if not names or swarm.mode != "execute" or swarm.leaderIsUser() or not catalogFor(swarm.project):
+        return None
+    thread = threading.Thread(target=askLeaderForWheels, args=(swarm, names), name=f"swarmup-wheels-{swarm.id}", daemon=True)
+    thread.start()
+    return thread
+
+
 # Gives an agent of a running swarm its wheels (they replace the ones it had): it lists its tools again at its next step, and is told.
 # chosen: the leader or the user chose them, so a saved swarm keeps this list.
 def giveWheels(swarm, name, wheels, why="", chosen=True):
@@ -123,8 +189,11 @@ def giveWheels(swarm, name, wheels, why="", chosen=True):
         link.stale = True
     if names:
         catalog = catalogFor(swarm.project)
-        agent.receive(swarm.getLeader(), ("Your leader gave you wheels for your task: " if chosen else "You have the wheels of your project: ") + "; ".join(f"wheels__{wheel}: {catalog[wheel].get('summary') or ''}" for wheel in names) +
-                      " Use a wheel instead of doing its steps by hand.")
+        listed = "; ".join(f"wheels__{wheel}: {catalog[wheel].get('summary') or ''}" for wheel in names)
+        if chosen and name != swarm.getLeader():
+            agent.receive(swarm.getLeader(), f"Your leader gave you wheels for your task: {listed} Use a wheel instead of doing its steps by hand.")
+        else:
+            agent.receive("SwarmUP", f"You have {'these wheels for your task' if chosen else 'the wheels of your project'}: {listed} Use a wheel instead of doing its steps by hand.")
     if swarm.journal is not None:
         swarm.journal.add("wheel", swarm.getLeader(), action="given", to=name, wheels=list(names), why=str(why or "")[:500])
     swarm.emit("wheel", name, action="given", wheels=list(names), why=str(why or ""))

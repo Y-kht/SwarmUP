@@ -302,7 +302,7 @@ class Session(SessionSteps, SessionModels, SessionRuns, SessionSaved, SessionMcp
                 "folder": answers.get("folder"), "folderNote": task["folder"], "suggestion": suggestFolder(answers), "model": describeModel(spec["model"]),
                 "missing": spec["missing"], "isLeader": index == 0, "waitsFor": spec["waitsFor"], "loops": answers.get("numberOfLoops", DEFAULT_LOOPS),
                 "tested": spec.get("tested", ""), "pending": bool(spec.get("pending")), "builder": spec["task"] == "leader", "why": spec.get("why", ""),
-                "prompt": answers.get("prompt", ""), "rules": answers.get("rules") or [], "wheels": answers.get("wheels") or []}
+                "prompt": answers.get("prompt", ""), "rules": answers.get("rules") or [], "wheels": answers.get("wheels") or [], "wheelsChosen": "wheels" in answers}
 
     def describeKeys(self):
         return {provider: {"company": details["company"], "variable": details["variable"], "page": details["page"],

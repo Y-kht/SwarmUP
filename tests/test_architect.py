@@ -23,6 +23,8 @@ from leader_manager import LeaderManager
 from mcp_gateway import Gateway
 from miner_service import MINERS
 from models_library import getModelInfo
+from pattern_digest import wheelsToFix
+from pattern_miner import Miner
 from pattern_registry import readNotes
 from pattern_store import DB_FILE, PatternStore
 from project_identity import projectDir, projectFor, registerMission
@@ -32,7 +34,7 @@ from test_agent_conversation import ChatLoop, say
 from test_leader_utils import usePrices
 from test_saved_swarms import waitUntil
 from test_user_interface import SessionTestCase
-from wheel_store import catalogFor, readCatalog
+from wheel_store import catalogFor, pinOf, readCatalog, saveWheel
 
 
 WHEEL = '''WHEEL = {"name": "install_and_test", "summary": "Installs the module the tests miss, then runs the unit tests of the project and gives the failing ones.",
@@ -191,6 +193,48 @@ class LifecycleTests(ArchitectTestCase):
         self.assertLessEqual(len(chat.prompts), architect_manager.GUIDED_PATTERNS)
         self.assertEqual(sorted(chat.tools[0]), sorted(f"architect__{tool}" for tool in architect_manager.GUIDED_TOOLS))
         self.assertIn("#", architect.reports[-1]["text"])
+
+    # A wheel that failed since its last version is what the architect decides about first. A small model gets its code and what went wrong, and
+    # the version it saves keeps the patterns the wheel covered, though it names none.
+    def brokenWheel(self):
+        self.earlierMission()
+        miner = Miner(self.project)
+        miner.poll()
+        fix = next(row for row in miner.store.patterns(("fix",), limit=10))
+        miner.close()
+        entry = saveWheel("install_and_test", "script", WHEEL, "Installs the module the tests miss, then runs the unit tests.", [fix["fp"]], "project", self.project, {})[0]
+        journal = Journal(self.files / "agent-files" / "mission-specific-memory" / "old" / ".swarmup", "old", self.project, "run")
+        journal.add("wheel", "Coder", name="install_and_test", pin=pinOf("install_and_test", entry["hash"]), action="run", ok=False,
+                    error={"type": "KeyError", "message": "'module'"}, trace="Traceback (most recent call last):\nKeyError: 'module'", seconds=1)
+        return fix
+
+    def testALocalModelRepairsAWheelThatFailedAndItKeepsWhatItCovered(self):
+        fix = self.brokenWheel()
+        repaired = WHEEL.replace('return "ok"', 'return "repaired"')
+        chat = ArchitectChat([call("architect__save_wheel", 1, name="install_and_test", kind="script", code=repaired), say("Repaired.")])
+        swarm, architect = self.swarm(chat, choice=getModelInfo("Qwen/Qwen3-8B"))
+        self.runSwarm(swarm)
+        waitUntil(lambda: architect.reports, "the pass")
+        self.assertIn("Repair this one wheel now", chat.prompts[0])
+        self.assertIn("THE WHEEL install_and_test (v1, script) AS IT IS NOW:", chat.prompts[0])
+        self.assertIn("KeyError: 'module'", chat.prompts[0])
+        self.assertIn("architect__retire_wheel", chat.tools[0])
+        entry = catalogFor(self.project)["install_and_test"]
+        self.assertEqual((entry["version"], entry["covers"]), (2, [fix["fp"]]))
+        self.assertIn("get this version from their next request", chat.prompts[1])
+        self.assertNotIn("Repair this one wheel now", " ".join(chat.prompts[1:]))
+        store = PatternStore(projectDir(self.project) / DB_FILE, readOnly=True)
+        self.addCleanup(store.close)
+        self.assertEqual(wheelsToFix(store, self.project), [])
+
+    def testAModelOfAnApiIsToldToRepairTheWheelFirst(self):
+        self.brokenWheel()
+        chat = ArchitectChat()
+        swarm, architect = self.swarm(chat)
+        self.runSwarm(swarm)
+        waitUntil(lambda: architect.reports, "the pass")
+        self.assertIn("REPAIR THIS WHEEL FIRST", chat.prompts[0])
+        self.assertIn("WHEELS THAT FAIL OR ARE NOT USED", chat.prompts[0])
 
     def testAModelOfAnApiKeepsTheWholeBriefAndAllItsTools(self):
         self.earlierMission()

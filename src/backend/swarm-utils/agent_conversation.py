@@ -389,12 +389,16 @@ def describeCall(name, arguments):
 
 
 # A request that needs no tool (a check, a summary, a route): one message, with what the agent must know written before it.
-def answerOnce(loop, prompt, own):
+# alone: the prompt says all there is to know (the review of a draft), so nothing is written before it: in a real run, the messages of the swarm
+# before a review told a small model that it was the agent again, and it gave no verdict.
+def answerOnce(loop, prompt, own, alone=False):
+    if alone:
+        own = False
     if own and loop.approvedPlan:
         prompt = prompts.APPROVED_PLAN_PROMPT.format(plan=loop.approvedPlan) + f"\n\n{prompt}"
-    if loop.userMessages:
+    if loop.userMessages and not alone:
         prompt = prompts.USER_MESSAGES_PROMPT.format(messages="\n".join(f"- {message}" for message in loop.userMessages)) + f"\n\n{prompt}"
-    if loop.inbox:
+    if loop.inbox and not alone:
         prompt = "Messages from the other agents of your swarm:\n" + "\n".join(loop.inbox) + f"\n\n{prompt}"
     if own and loop.rules:
         prompt = f"Follow these rules strictly:\n{loop.rules}\n\n{prompt}"
@@ -414,9 +418,9 @@ def answerOnce(loop, prompt, own):
 
 # Asks the model of the loop. With tools it works in its conversation (own: its own work, kept for the whole run; otherwise a request of a
 # leader that is not part of its own work, in a conversation of its own that only looks). Without tools it answers one message.
-def talk(loop, prompt, own, tools=True):
+def talk(loop, prompt, own, tools=True, alone=False):
     if not tools:
-        return answerOnce(loop, prompt, own)
+        return answerOnce(loop, prompt, own, alone)
     if not own:
         return Conversation(loop, own=False).ask(prompt)
     if loop.conversation is None:

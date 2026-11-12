@@ -12,11 +12,11 @@ import time
 import traceback
 
 from architect_loop import MAX_STEPS, ArchitectDesk, ArchitectLoop, pickArchitect, sharedMember
-from architect_prompts import ARCHITECT_FOCUS_PROMPT, ARCHITECT_PASS_PROMPT, ARCHITECT_PASS_REASONS
+from architect_prompts import ARCHITECT_FIX_PROMPT, ARCHITECT_FOCUS_PROMPT, ARCHITECT_PASS_PROMPT, ARCHITECT_PASS_REASONS
 from harness_utils import ARCHITECT_NAME, SwarmStopped
 from mcp_gateway import Gateway
 from miner_service import MINERS
-from pattern_digest import FOCUS_CHARS, describeWheels, draftForStreak, focusPatterns, renderBrief, renderFocus, renderPattern
+from pattern_digest import FOCUS_CHARS, describeWheels, draftForStreak, focusPatterns, isFix, renderBrief, renderFix, renderFocus, renderPattern
 from project_identity import projectFor, readProject
 from user_settings import currentSetting
 
@@ -32,7 +32,7 @@ CLAIM_SECONDS = 1200
 LAST_PASS_SECONDS = 3600
 GUIDED_PATTERNS = 3
 GUIDED_STEPS = 6
-GUIDED_TOOLS = {"check_wheel", "save_wheel", "save_note", "dismiss_pattern", "read_wheel"}
+GUIDED_TOOLS = {"check_wheel", "save_wheel", "save_note", "dismiss_pattern", "read_wheel", "retire_wheel"}
 
 
 class ArchitectManager:
@@ -151,14 +151,19 @@ class ArchitectManager:
             self.runPass("end")
 
     # The last pass of a run when a pattern just came to repeat, however short the run was (many short missions repeat too: in a real run of 27
-    # entries the pass never came), or when a run that did something can still learn from what repeats.
+    # entries the pass never came), when a wheel went wrong again since the architect last looked, or when a run that did something can still
+    # learn from what repeats. Only what the architect can decide about counts: a pass with nothing to decide costs a model for nothing.
     def worthEnd(self):
         store = self.store()
         if store is None or self.swarm.journal is None:
             return False
         if store.pendingSignals():
             return True
-        return self.swarm.journal.written >= MIN_ACTIVITY and bool(store.patterns(statuses=("repeating", "cross"), limit=1))
+        focus = focusPatterns(store, GUIDED_PATTERNS, project=self.project)
+        looked = (store.lastPass() or {}).get("ended") or 0
+        if any(isFix(row) and row["lastSeen"] > looked for row in focus):
+            return True
+        return self.swarm.journal.written >= MIN_ACTIVITY and any(not isFix(row) for row in focus)
 
     def mayRunNow(self, reason):
         if self.cancelled.is_set() or self.overBudget():
@@ -219,9 +224,10 @@ class ArchitectManager:
         loop.gateway, loop.conversation = self.gateway, None
         self.setState("working", f"pass {self.passCount}: {ARCHITECT_PASS_REASONS.get(reason, '')}")
         brief = renderBrief(store, self.project, self.desk.since, claimedBy=self.desk.passId)
-        prompt = ARCHITECT_PASS_PROMPT.format(why=ARCHITECT_PASS_REASONS.get(reason, ""), brief=brief, steps=MAX_STEPS, focus=renderFocus(store, claimedBy=self.desk.passId))
+        prompt = ARCHITECT_PASS_PROMPT.format(why=ARCHITECT_PASS_REASONS.get(reason, ""), brief=brief, steps=MAX_STEPS,
+                                              focus=renderFocus(store, claimedBy=self.desk.passId, project=self.project))
         self.desk.listings = 0
-        focus = focusPatterns(store, 1, self.desk.passId)
+        focus = focusPatterns(store, 1, self.desk.passId, self.project)
         self.desk.focus = f"#{focus[0]['id']}" if focus else ""
         outcome, report = "done", ""
         try:
@@ -255,19 +261,23 @@ class ArchitectManager:
             self.client.unload()
 
     # A small local model gets lost in an open task: it decides about the best patterns one at a time, each in a short conversation of its own, with
-    # only the tools of a decision. A capable model of an API works freely on the whole brief.
+    # only the tools of a decision. A wheel to repair comes first, with its code and what went wrong. A capable model of an API works freely on the whole brief.
     def guidedPass(self, loop, store):
         scope, steps, reports = loop.toolScope, loop.maxSteps, []
         loop.toolScope, loop.maxSteps = {"architect": GUIDED_TOOLS}, GUIDED_STEPS
         try:
-            for row in focusPatterns(store, GUIDED_PATTERNS, self.desk.passId):
+            for row in focusPatterns(store, GUIDED_PATTERNS, self.desk.passId, self.project):
                 self.desk.focus, loop.conversation = f"#{row['id']}", None
-                wheels = "\n".join(describeWheels(store, self.project)) or "- none yet"
-                prompt = ARCHITECT_FOCUS_PROMPT.format(steps=GUIDED_STEPS, pattern=renderPattern(store, str(row["id"]), examples=2)[:FOCUS_CHARS], wheels=wheels, draft=draftForStreak(row))
-                reports.append(f"#{row['id']}: {loop.askAgent(prompt, own=True)}")
+                reports.append(f"#{row['id']}: {loop.askAgent(self.guidedPrompt(store, row), own=True)}")
         finally:
             loop.toolScope, loop.maxSteps, loop.conversation = scope, steps, None
         return "\n".join(reports)
+
+    def guidedPrompt(self, store, row):
+        if isFix(row):
+            return ARCHITECT_FIX_PROMPT.format(steps=GUIDED_STEPS, id=f"#{row['id']}", fix=renderFix(store, row, self.project))
+        wheels = "\n".join(describeWheels(store, self.project)) or "- none yet"
+        return ARCHITECT_FOCUS_PROMPT.format(steps=GUIDED_STEPS, pattern=renderPattern(store, str(row["id"]), examples=2)[:FOCUS_CHARS], wheels=wheels, draft=draftForStreak(row))
 
     def callsFolder(self):
         session = self.swarm.session

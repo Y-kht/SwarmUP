@@ -33,6 +33,14 @@ def now():
     return f"{datetime.now():%Y-%m-%d %H:%M:%S}"
 
 
+# A time of the catalog (now) as seconds, to compare it with the times of the journals. 0 when it cannot be read.
+def epochOf(stamp):
+    try:
+        return datetime.strptime(str(stamp), "%Y-%m-%d %H:%M:%S").timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+
+
 def hashText(text):
     return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:16]
 

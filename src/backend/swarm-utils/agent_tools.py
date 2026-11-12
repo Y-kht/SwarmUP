@@ -72,6 +72,15 @@ class Spot:
 # The work of one call of a tool, for one agent. work is the call (mcp_kit.Work): through it the tool asks the user, tells its progress and
 # sees a stop. Without it (a test, a part of SwarmUP itself), the policy is asked directly.
 # ==============
+# Where a passage is in a text, as line numbers: a model that is told only "it is there twice" changed every one of them in a real run.
+def linesOf(text, passage, most=6):
+    lines, position = [], text.find(passage)
+    while position >= 0 and len(lines) <= most:
+        lines.append(text.count("\n", 0, position) + 1)
+        position = text.find(passage, position + len(passage))
+    return ("lines " if len(lines) > 1 else "line ") + ", ".join(str(line) for line in lines[:most]) + (" and more" if len(lines) > most else "")
+
+
 class Toolbox(TransferTools, ProcessTools):
     def __init__(self, loop, work=None):
         self.loop, self.work = loop, work
@@ -292,7 +301,8 @@ class Toolbox(TransferTools, ProcessTools):
         if not found:
             raise ToolProblem(f"old_text is not in {spot.name}. Read the file again (files__read_file) and copy the passage exactly, spaces and line breaks included.")
         if found > 1 and not replace_all:
-            raise ToolProblem(f"old_text is {found} times in {spot.name}. Give more of the text around it, or set replace_all to true.")
+            raise ToolProblem(f"old_text is {found} times in {spot.name}, at {linesOf(before, old_text)}. To change one of them, give old_text again with the line before it "
+                              "too (or the line after it), so that it is found only once. Set replace_all to true only if every one of them must change.")
         return self.store(spot, before.replace(old_text, new_text), before, reason, "change")
 
     def make_folder(self, path, reason=""):

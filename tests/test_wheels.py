@@ -17,7 +17,7 @@ from cli_steps import chooseWheels
 from cli_view import runWheelsCommand
 from agent_journal import Journal
 from base_loop import Loop
-from leader_wheels import checkWheels, describeWheelsFor, findWheels, giveWheels
+from leader_wheels import checkWheels, describeWheelsFor, findWheels, giveStartingWheels, giveWheels
 from mcp_gateway import Gateway
 from mission_memory import WorkSession
 from project_identity import projectFor
@@ -169,6 +169,21 @@ class CheckTests(WheelTestCase):
             self.assertTrue(any(expected in problem for problem in problems), (expected, problems))
 
     # Only what repeats is automated, once, and for every project only what repeats across projects.
+    # A tool under another name saves no step. One step is worth a wheel when it holds what the agents worked out, or repeats for each item.
+    def testAWheelOfOneStepThatOnlyPassesItsInputsIsRefused(self):
+        alias = {**STEPS, "inputs": {"path": {"type": "string", "description": "The file."}, "old": {"type": "string", "description": "The passage."}, "new": {"type": "string", "description": "The new one."}},
+                 "required": ["path"], "steps": [{"tool": "files__edit_file", "arguments": {"path": "{path}", "old_text": "{old}", "new_text": "{new}"}}]}
+        self.assertTrue(any("under another name" in problem for problem in self.problems(json.dumps(alias), "steps", "find_first_word")))
+        knowing = {**STEPS, "inputs": {}, "required": [], "steps": [{"tool": "processes__run_command", "arguments": {"command": "python -m pytest -q --tb=line"}}]}
+        self.assertEqual(self.problems(json.dumps(knowing), "steps", "find_first_word"), [])
+
+    # A new version of a wheel covered its patterns when it was first saved: their rows may be gone, and it keeps its scope.
+    def testANewVersionOfAWheelNeedsNoPatternAgain(self):
+        self.assertTrue(any("give the ids" in problem for problem in self.problems(SCRIPT, covers=[])))
+        current = {"name": "count_lines", "scope": "global"}
+        self.assertEqual(checkWheel(SCRIPT, "script", "count_lines", [], "global", {}, current=current)[1], [])
+        self.assertTrue(any("only when its pattern repeats across projects" in problem for problem in checkWheel(SCRIPT, "script", "count_lines", [], "global", {}, current={"scope": "project"})[1]))
+
     def testAWheelAutomatesOnlyWhatRepeatsAndOnlyOnce(self):
         self.assertIn("Write a note", " ".join(self.problems(SCRIPT, covers=[{"fp": "f1", "status": "emerging", "data": {}}])))
         self.assertIn("give the ids of the patterns", " ".join(self.problems(SCRIPT, covers=[])))
@@ -288,7 +303,8 @@ class GatewayTests(WheelTestCase):
         text, error = link.call("wheels__count_lines", {})
         self.assertTrue(error)
         self.assertIn("The wheel count_lines failed: ValueError: the format changed", text)
-        self.assertIn("do the step by hand", text)
+        self.assertIn("Do the step by hand: SwarmUP tells the architect", text)
+        self.assertNotIn("in your answer", text)
         self.assertNotIn("Traceback", text)
         run = [entry for entry in map(json.loads, self.journal.path.read_text().splitlines()) if entry["kind"] == "wheel"][-1]
         self.assertEqual(run["error"]["type"], "ValueError")
@@ -296,6 +312,23 @@ class GatewayTests(WheelTestCase):
         refused = self.gateway.link(self.loop(decision="deny", name="Refused"))
         text, error = refused.call("wheels__count_lines", {})
         self.assertIn("The user refused to let you run the wheel count_lines", text)
+
+    # A wheel gives what the agent needs next, never a whole log: a long result keeps its beginning and its end, and the journal keeps its size for the architect.
+    def testALongResultOfAWheelIsShortened(self):
+        self.save(script(body="    return 'start ' + 'x' * 50000 + ' end'\n"))
+        text, error = self.gateway.link(self.loop(decision="run")).call("wheels__count_lines", {})
+        self.assertFalse(error)
+        self.assertLess(len(text), 13000)
+        self.assertIn("start x", text)
+        self.assertIn("x end", text)
+        self.assertIn("characters of the result of the wheel are left out", text)
+        run = [entry for entry in map(json.loads, self.journal.path.read_text().splitlines()) if entry["kind"] == "wheel"][-1]
+        self.assertEqual(run["size"], 50010)
+
+    def testAWheelThatChangesFilesSaysThatItCannotBePutBack(self):
+        self.save(script(changes=True))
+        self.gateway.link(self.loop(decision="once")).call("wheels__count_lines", {})
+        self.assertIn("SwarmUP cannot put back what a script changes", self.cards[-1]["detail"])
 
     def testAWheelThatRunsTooLongIsStopped(self):
         self.save(script(body="    import time\n    time.sleep(20)\n", timeout=1))
@@ -401,6 +434,61 @@ class LeaderTests(WheelTestCase):
         with self.assertRaises(ValueError):
             giveWheels(swarm, "Nobody", [])
 
+    # The leader gives the wheels, also in a swarm the user built: when the run starts, it is asked once about the agents nobody chose wheels for.
+    def startingSwarm(self, replies, leaderIsUser=False):
+        self.save("run_unit_tests", "Runs the unit tests of the project and gives the failing ones.")
+        self.save("deploy_site", "Builds the site and copies it to the server of the user.")
+        asked = []
+        model = types.SimpleNamespace(input=lambda prompt: asked.append(prompt) or replies.pop(0), approvesItself=leaderIsUser)
+        swarm = Swarm("Fix the tests and write the docs")
+        for name, prompt in (("Leader", "Report."), ("Coder", "Fix the failing unit tests."), ("Writer", "Write the docs.")):
+            loop = buildLoop("agent", model, {"prompt": prompt, "folder": str(self.work)})
+            loop.notifyUser = lambda message: None
+            swarm.addAgent(name, loop, "worker", prompt, recipe={"task": "agent", "answers": {"prompt": prompt}})
+        swarm.project, swarm.active = self.project, True
+        return swarm, asked
+
+    def testTheLeaderGivesTheWheelsWhenTheRunStartsAndIsAskedOnce(self):
+        swarm, asked = self.startingSwarm(["I think Coder needs one.", '{"Coder": ["run_unit_tests"], "Ghost": []}', '```json\n{"Coder": ["run_unit_tests"]}\n```'])
+        swarm.members["Writer"]["recipe"]["answers"]["wheels"] = ["deploy_site"]
+        thread = giveStartingWheels(swarm)
+        thread.join(20)
+        self.assertEqual(len(asked), 3)
+        self.assertIn("run_unit_tests: Runs the unit tests", asked[0])
+        self.assertIn("- Coder (worker): Fix the failing unit tests.", asked[0])
+        self.assertNotIn("- Writer", asked[0])
+        self.assertIn("not agents you can give wheels to: Ghost", asked[2])
+        self.assertEqual(swarm.members["Coder"]["agent"].wheels, ["run_unit_tests"])
+        self.assertIn("Your leader gave you wheels for your task: wheels__run_unit_tests", swarm.members["Coder"]["agent"].inbox[-1])
+        self.assertEqual(swarm.members["Coder"]["recipe"]["answers"]["wheels"], ["run_unit_tests"])
+        self.assertEqual(swarm.members["Leader"]["recipe"]["answers"]["wheels"], [])
+        self.assertIsNone(giveStartingWheels(swarm))
+
+    def testTheLeaderIsNotAskedInPlanModeOrWhenItIsTheUserOrWithoutWheels(self):
+        swarm, asked = self.startingSwarm([])
+        swarm.mode = "plan"
+        self.assertIsNone(giveStartingWheels(swarm))
+        swarm, asked = self.startingSwarm([], leaderIsUser=True)
+        self.assertIsNone(giveStartingWheels(swarm))
+        swarm, asked = self.startingSwarm([])
+        swarm.project = "another-project"
+        self.assertIsNone(giveStartingWheels(swarm))
+        self.assertEqual(asked, [])
+
+    def testALeaderThatCannotAnswerChangesNothingAndIsAskedAgainAtTheNextRun(self):
+        swarm, asked = self.startingSwarm(["no json"] * 20)
+        giveStartingWheels(swarm).join(20)
+        self.assertEqual(swarm.members["Coder"]["agent"].wheels, [])
+        self.assertNotIn("wheels", swarm.members["Coder"]["recipe"]["answers"])
+        self.assertIsNotNone(giveStartingWheels(swarm))
+
+    # An agent the leader proposed without the field wheels has no choice yet; an empty list is a choice.
+    def testAProposedAgentWithoutTheFieldWheelsHasNoChoiceYet(self):
+        catalog = makeCatalog(self.work)
+        agent = {"name": "Coder", "task": "agent", "model": "claude-sonnet-5-5", "settings": {"prompt": "Fix the tests."}}
+        self.assertIsNone(catalog.checkBuild({"agents": [agent]})[0][0]["wheels"])
+        self.assertEqual(catalog.checkBuild({"agents": [{**agent, "wheels": []}]})[0][0]["wheels"], [])
+
 
 
 # The user who builds the swarm gives the wheels in the command line: a step when the project has wheels, and a command while it runs.
@@ -418,6 +506,17 @@ class CommandLineTests(WheelTestCase):
         self.assertTrue(chooseWheels(console, swarm, specs))
         self.assertEqual((swarm.members["Leader"]["agent"].wheels, swarm.members["Coder"]["agent"].wheels), ([], ["run_unit_tests"]))
         self.assertEqual(swarm.members["Coder"]["recipe"]["answers"]["wheels"], ["run_unit_tests"])
+        # Enter leaves the choice to a leader that is a model; none is a choice, and so is Enter when the user leads.
+        self.assertNotIn("wheels", swarm.members["Leader"]["recipe"]["answers"])
+        self.assertIn("by the leader when the swarm starts", said[0])
+        answers += ["none", ""]
+        chooseWheels(console, swarm, specs)
+        self.assertEqual(swarm.members["Leader"]["recipe"]["answers"]["wheels"], [])
+        swarm.members["Leader"]["agent"].agent = types.SimpleNamespace(approvesItself=True)
+        del swarm.members["Leader"]["recipe"]["answers"]["wheels"]
+        answers += ["", ""]
+        chooseWheels(console, swarm, specs)
+        self.assertEqual(swarm.members["Leader"]["recipe"]["answers"]["wheels"], [])
         self.assertIn("run_unit_tests: Runs the unit tests", runWheelsCommand(swarm, []))
         self.assertEqual(runWheelsCommand(swarm, ["leader", "run_unit_tests"]), "Leader now has the wheels run_unit_tests.")
         self.assertEqual(runWheelsCommand(swarm, ["Coder", "none"]), "Coder has no wheel now.")

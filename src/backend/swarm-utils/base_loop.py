@@ -209,14 +209,15 @@ class Loop:
     # With tools (by default for its own calls) the agent works in its conversation with the tools of the MCP servers of SwarmUP
     # (agent_conversation.py): its rules, its plan and the messages it receives are part of it. The calls that only check a draft go without them.
     # Every model is reached the same way, through its adapter (model_adapters.py).
-    def askAgent(self, prompt, own=True, tools=None):
+    # alone: a request without tools whose prompt says all there is to know, so the messages the agent received are not written before it.
+    def askAgent(self, prompt, own=True, tools=None, alone=False):
         tools = own if tools is None else tools
         # One message without tools touches no conversation, so it never waits for a long request of the agent (the leader lists what the swarm
         # did before a stop, while it works). A coding agent has one session, so it stays in turn.
         if not own and not tools and not getattr(adapterOf(self.agent), "runsTools", False):
-            return talk(self, prompt, own, tools)
+            return talk(self, prompt, own, tools, alone)
         with self.thinking:
-            return talk(self, prompt, own, tools)
+            return talk(self, prompt, own, tools, alone)
 
     # One call of the model (work). The calls of a leader that manages the swarm never wait for the user: they have a fallback of their own.
     def callModel(self, work, own):

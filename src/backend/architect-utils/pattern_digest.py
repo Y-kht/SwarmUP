@@ -10,7 +10,7 @@ from pattern_registry import describeNote, findNotes
 from pattern_store import ACTIONABLE
 from project_identity import projectJournals, readProject
 from wheel_checks import onlyReads
-from wheel_store import catalogFor, loadWheel
+from wheel_store import catalogFor, epochOf, loadWheel, pinOf
 
 
 BRIEF_CHARS = 12000
@@ -20,6 +20,10 @@ SEARCH_BYTES = 64 * 1024 * 1024
 CONTAINED = 0.8
 NOT_FOR_WHEELS = ("leader__", "user__", "wheels__", "architect__", "team__")
 FOCUS_PATTERNS = 3
+# What a wheel can never do: one call of a tool is already one call, and what the user allows, what an agent means to do and what agents write to
+# each other are no steps. They stay in the brief, but the architect is not asked to decide about them one by one, and no pass comes for them alone.
+NO_WHEEL_KINDS = ("action", "permission", "intent", "message")
+CODE_CHARS = 6000
 STREAK_SHAPE = re.compile(r"(\w+__\w+)\(([^)]*)\)")
 # The argument that changes from one call to the next: what a search looks for changes before the place it looks in.
 DRAFT_KEYS = ("text", "query", "link", "url", "path", "name")
@@ -87,11 +91,57 @@ def automatable(row):
     return not any(tool in shape for tool in NOT_FOR_WHEELS)
 
 
-# The patterns to decide about first, the best first: what repeats, can be automated, and costs model steps or a mistake. What only reads comes last.
-def focusPatterns(store, limit=FOCUS_PATTERNS, claimedBy=None):
-    rows = [row for row in maximal(store.patterns(ACTIONABLE, ("repeating", "cross"), limit=80)) if automatable(row) and (not row.get("claimedBy") or row["claimedBy"] == claimedBy)]
-    rows.sort(key=lambda row: (row["kind"] != "streak", row["kind"] in ("action", "reread", "hotspot", "intent", "message", "permission") or bool((row.get("data") or {}).get("reading")), -row["score"]))
+def wheelOf(row):
+    return str((row.get("data") or {}).get("wheel") or "")
+
+
+# What the live wheels did wrong since their current version: a wheel that failed, and the work of a wheel done by hand. A wheel the architect
+# fixed (a new version) or retired, and a pattern it dismissed, leave the list: in a real run, the failure of version 1 was still told about version 2.
+def wheelsToFix(store, project, limit=10):
+    catalog, rows = catalogFor(project), []
+    for row in store.patterns(("wheelfail", "redo"), None, limit=80):
+        entry = catalog.get(wheelOf(row))
+        if entry is not None and row["status"] != "dismissed" and not isOfOldVersion(row, entry):
+            rows.append(row)
     return rows[:limit]
+
+
+# A failure names the version that failed (its pin); the work done by hand is of the version the wheel had then.
+def isOfOldVersion(row, entry):
+    pin = (row.get("data") or {}).get("pin") if row["kind"] == "wheelfail" else None
+    if pin:
+        return pin != pinOf(entry["name"], entry["hash"])
+    return row["lastSeen"] < epochOf(entry.get("updated"))
+
+
+# A wheel to repair: it failed, or an agent that had it did its work by hand. A wheel nobody gave is not broken: its leader did not find it.
+def isFix(row):
+    return row.get("kind") == "wheelfail" or row.get("kind") == "redo" and (row.get("data") or {}).get("how") == "ignored"
+
+
+# The patterns to decide about first, the best first: a wheel to repair (agents meet it at every run), then what repeats, can be automated, and
+# costs model steps or a mistake. What only reads comes last.
+def focusPatterns(store, limit=FOCUS_PATTERNS, claimedBy=None, project=None):
+    free = lambda row: not row.get("claimedBy") or row["claimedBy"] == claimedBy
+    fixes, seen = [], set()
+    for row in wheelsToFix(store, project, limit=40) if project else []:
+        if isFix(row) and free(row) and wheelOf(row) not in seen:
+            seen.add(wheelOf(row))
+            fixes.append(row)
+    rows = [row for row in maximal(store.patterns(ACTIONABLE, ("repeating", "cross"), limit=80)) if automatable(row) and free(row) and row["kind"] not in NO_WHEEL_KINDS and not wheelOf(row)]
+    rows.sort(key=lambda row: (row["kind"] != "streak", row["kind"] in ("reread", "hotspot") or bool((row.get("data") or {}).get("reading")), -row["score"]))
+    return [*fixes, *rows][:limit]
+
+
+# What the architect needs to repair a wheel: what went wrong, with examples, and the code of the wheel as it is now.
+def renderFix(store, row, project=None):
+    wheel = loadWheel(wheelOf(row))
+    if wheel is None:
+        return renderPattern(store, str(row["id"]), examples=2)
+    others = [other for other in wheelsToFix(store, project, limit=40) if wheelOf(other) == wheel["name"] and other["id"] != row["id"]]
+    also = "\nAlso: " + "; ".join(f"#{other['id']} {other['label']} ({other['count']}x)" for other in others[:3]) if others else ""
+    code = wheel["text"] if len(wheel["text"]) <= CODE_CHARS else wheel["text"][:CODE_CHARS] + "\n[... cut: read it whole with architect__read_wheel]"
+    return f"{renderPattern(store, str(row['id']), examples=2)[:FOCUS_CHARS]}{also}\n\nTHE WHEEL {wheel['name']} (v{wheel['version']}, {wheel['kind']}) AS IT IS NOW:\n{code}"
 
 
 # A wheel that a small model can correct and save, for a streak of a tool: the tool once for each item of a list.
@@ -111,17 +161,26 @@ def draftForStreak(row):
 
 
 # The patterns to decide about, for the prompt of a pass: the first one with its examples, so a small model starts from the work itself.
-def renderFocus(store, limit=FOCUS_PATTERNS, claimedBy=None):
-    rows = focusPatterns(store, limit, claimedBy)
+def renderFocus(store, limit=FOCUS_PATTERNS, claimedBy=None, project=None):
+    rows = focusPatterns(store, limit, claimedBy, project)
     if not rows:
         return ""
     others = "\n".join(describeRow(store, row, wide=False) for row in rows[1:])
-    text = renderPattern(store, str(rows[0]["id"]), examples=2)
-    return f"DECIDE ABOUT THIS PATTERN FIRST:\n{text[:FOCUS_CHARS]}" + (f"\n\nTHEN THESE:\n{others}" if others else "")
+    if isFix(rows[0]):
+        first = (f"REPAIR THIS WHEEL FIRST (agents meet its problem at every run): save a corrected version under the same name with architect__save_wheel, "
+                 f"retire it with architect__retire_wheel if it cannot work, or dismiss #{rows[0]['id']} if the wheel is right and the agent used it wrongly.\n{renderFix(store, rows[0], project)}")
+    else:
+        first = f"DECIDE ABOUT THIS PATTERN FIRST:\n{renderPattern(store, str(rows[0]['id']), examples=2)[:FOCUS_CHARS]}"
+    return first + (f"\n\nTHEN THESE:\n{others}" if others else "")
 
 
 def contains(longer, shorter):
     return any(longer[start:start + len(shorter)] == shorter for start in range(len(longer) - len(shorter) + 1))
+
+
+def collapseLabel(label, limit=160):
+    label = str(label or "")
+    return label if len(label) <= limit else label[:limit - 3] + "..."
 
 
 def readsOnly(name, entry):
@@ -130,14 +189,15 @@ def readsOnly(name, entry):
     return onlyReads((loadWheel(name) or {}).get("manifest"))
 
 
+# The wheels of the project with how they did: their runs (of every version), and what is wrong with their current version.
 def describeWheels(store, project):
-    lines = []
+    lines, problems = [], {}
+    for row in wheelsToFix(store, project, limit=80):
+        problems.setdefault(wheelOf(row), []).append(row)
     for name, entry in catalogFor(project).items():
         runs = store.query("SELECT count, errors FROM patterns WHERE kind='wheel' AND shape=?", (name,))
-        redos = store.query("SELECT label, count FROM patterns WHERE kind='redo' AND shape LIKE ?", (f"{name} %",))
-        failures = store.query("SELECT label, count FROM patterns WHERE kind='wheelfail' AND shape LIKE ? ORDER BY count DESC LIMIT 2", (f"{name}:%",))
         used = f"{runs[0]['count']} runs, {runs[0]['errors']} failed" if runs else "never run yet"
-        extra = "; ".join([f"{row['label']} ({row['count']}x)" for row in failures + redos] + (["it only reads files: retire it, it saves no step"] if readsOnly(name, entry) else []))
+        extra = "; ".join([f"{collapseLabel(row['label'])} ({row['count']}x)" for row in problems.get(name, [])[:3]] + (["it only reads files: retire it, it saves no step"] if readsOnly(name, entry) else []))
         lines.append(f"- {name} v{entry['version']} ({entry['kind']}, {'every project' if entry.get('scope') == 'global' else 'this project'}): "
                      f"{entry.get('summary') or ''} [{used}{'; ' + extra if extra else ''}]")
     return lines
@@ -152,15 +212,15 @@ def renderBrief(store, project, since=None, chars=BRIEF_CHARS, claimedBy=None):
     sections = [("REPEATING, NOT AUTOMATED YET (the best first)", ("repeating",)), ("SEEN IN OTHER PROJECTS TOO", ("cross",)),
                 ("EMERGING (seen twice: write a note when it looks general)", ("emerging",))]
     for title, statuses in sections:
-        rows = [row for row in maximal(store.patterns(ACTIONABLE, statuses, limit=60)) if automatable(row) and (not row.get("claimedBy") or row["claimedBy"] == claimedBy)]
+        rows = [row for row in maximal(store.patterns(ACTIONABLE, statuses, limit=60)) if automatable(row) and not wheelOf(row) and (not row.get("claimedBy") or row["claimedBy"] == claimedBy)]
         if not rows:
             continue
         shown = rows[:12] if statuses == ("emerging",) else rows[:25]
         lines = [describeRow(store, row, wide=statuses != ("emerging",)) + (" [new]" if since and row["lastSeen"] >= since else "") for row in shown]
         parts.append(f"{title}:\n" + "\n".join(lines))
-    failing = store.patterns(("wheelfail", "redo"), None, limit=10)
+    failing = wheelsToFix(store, project)
     if failing:
-        parts.append("WHEELS THAT FAIL OR ARE NOT USED:\n" + "\n".join(describeRow(store, row) for row in failing))
+        parts.append("WHEELS THAT FAIL OR ARE NOT USED (repair them first: a corrected version under the same name, or retire them):\n" + "\n".join(describeRow(store, row) for row in failing))
     wheels = describeWheels(store, project)
     parts.append("THE WHEELS OF THIS PROJECT:\n" + ("\n".join(wheels) if wheels else "- none yet"))
     notes = findNotes(project=project, fps=[row["fp"] for row in store.patterns(ACTIONABLE, ("cross", "emerging", "repeating"), limit=60)], limit=5)

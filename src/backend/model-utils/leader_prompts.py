@@ -65,7 +65,8 @@ THE FIELDS
 - why: one or two sentences for the user that say how this change helps the mission.
 - wheels: the wheels its task needs, by name, from the wheels of the project (listed below), or [] for none. A wheel is a script the architect of
   SwarmUP wrote from what agents of this project did again and again: it does in one call steps that took them many, and much reasoning. An agent
-  gets only the wheels you give it, as tools: give each agent the few wheels its own task needs, never all of them.
+  gets only the wheels you give it, as tools: give each agent the few wheels its own task needs, never all of them. If you leave wheels out for an
+  agent, you are asked about it once more when the swarm starts.
 
 RULES
 - Use only the tasks, the models and the settings of the lists. Never invent one.
@@ -161,6 +162,22 @@ Decide if the swarm needs a change now. Propose one only when it clearly helps t
 - a wheel fits the work an agent still has to do (the architect may have just written it): give it to that agent.
 Most of the time no change is needed. Then reply exactly: NO CHANGE
 Otherwise call one tool for each change. The result of each call tells you what the user decided."""
+
+
+# The leader gives the wheels, also in a swarm the user built (leader_wheels.py). The example holds no values: a small model copies them. It asks
+# for a list for every agent, and offers no ready answer for "nobody": in a real run a small model took that answer, and its coder, without the wheel
+# that runs the tests, ran them the wrong way and lost itself in the error.
+LEADER_WHEELS_EXAMPLE = '{"<name of an agent>": ["<name of a wheel>"], "<name of another agent>": []}'
+LEADER_WHEELS_PROMPT = """You are the leader of a swarm of agents working on this mission: {mission}
+This project has wheels: scripts the architect of SwarmUP wrote from what agents of this project did again and again. A wheel does in one call
+steps that took agents many, and an agent has a wheel, as a tool, only when its leader gives it.
+The wheels of the project:
+{wheels}
+The agents that have no wheels yet:
+{agents}
+For each agent, decide which wheels do a part of its own task: an agent whose task has that part needs the wheel, and works faster and with fewer
+mistakes with it. An agent whose task has no such part gets none: a wheel it does not need only fills what it reads.
+Reply only with JSON that gives, for every agent above, the list of the names of its wheels (an empty list when it needs none), like {example}"""
 
 
 LEADER_REPORT_PROMPT = """You lead a swarm of agents on this mission: {mission}

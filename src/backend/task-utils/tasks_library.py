@@ -293,8 +293,10 @@ def buildLoop(key, model, answers):
     return loop
 
 
+# What the agent does and where, in sentences: the task of the user often ends without a full stop.
 def describeLoop(loop):
-    return loop.describeTask() + loop.describeFolder()
+    task, folder = loop.describeTask().rstrip(), loop.describeFolder()
+    return (task if not folder or task.endswith((".", "!", "?", ":")) else f"{task}.") + folder
 
 
 # The folder to suggest for an agent that works on a file: the folder of the file.

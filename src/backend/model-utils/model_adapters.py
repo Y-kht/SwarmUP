@@ -98,7 +98,7 @@ def describeCommands(tools):
     lines = []
     for tool in tools:
         properties = (tool.get("parameters") or {}).get("properties") or {}
-        lines.append(f"/{tool['name']} " + " ".join(f"{key}=..." for key in properties) + f"  {tool.get('description', '').split('. ')[0]}.")
+        lines.append(f"/{tool['name']} " + " ".join(f"{key}=..." for key in properties) + f"  {tool.get('description', '').split('. ')[0].rstrip('.')}.")
     return "\n".join(lines)
 
 
