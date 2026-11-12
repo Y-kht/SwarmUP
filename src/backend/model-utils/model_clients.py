@@ -2,22 +2,21 @@
 # is one step of the core loop of an agent (agent_conversation.py), with the tools of the MCP servers of SwarmUP, and input(prompt) answers one
 # prompt. ApiModel asks the API of a provider with its official library (anthropic for Claude, openai for GPT and for the OpenAI-compatible
 # APIs of Gemini and DeepSeek). LocalModel runs a model of Hugging Face on the GPUs of the user with transformers. They translate the messages
-# and the tools into those of their provider (model_messages.py), and its answer back into text and calls of tools.
+# and the tools into those of their provider (model_messages.py), and its answer back into text and calls of tools (call_reader.py).
 # The libraries are only imported when a model is used, so a user who only needs one kind of model does not install the others.
 # The Hugging Face cache is the folder of the HF_HOME environment variable, so the user chooses where the models are stored.
 # The coding agents are in coding_agents.py and codex_agent.py, and what every client needs in model_support.py.
 import gc
-import json
 import os
 import re
 import threading
 import weakref
 
+from call_reader import apiCall, readCutCalls, readToolCalls  # noqa: F401
 from codex_agent import CodexModel
 from coding_agents import ClaudeCodeModel
 from harness_utils import isOnline
-from model_messages import (claudeBlock, claudeMessages, explainApiError, localMessages, openAiMessages, readCutCalls, readOpenAiUsage, readResponsesUsage,  # noqa: F401
-                            readToolCalls, responsesInput)
+from model_messages import claudeBlock, claudeMessages, explainApiError, localMessages, openAiMessages, readOpenAiUsage, readResponsesUsage, responsesInput
 from model_support import API_LIBRARIES, ModelConnectionError, ModelError, ModelMemoryError, getApiKey, importLibrary, isDownloaded, recordCall
 from models_library import API_KEYS, isGated
 
@@ -30,6 +29,14 @@ CLAUDE_MAX_TOKENS = 32000
 LOCAL_MAX_TOKENS = 16384
 THINKING_PATTERN = re.compile(r"<think>.*?</think>", re.DOTALL)
 STREAM_ATTEMPTS = 2
+
+
+# An API like the one of OpenAI can answer with no choice at all (Gemini does when it blocks an answer): it is said in words, not as an error of Python.
+def firstChoice(response, name):
+    choices = getattr(response, "choices", None) or []
+    if not choices or getattr(choices[0], "message", None) is None:
+        raise ModelError(f"{name} gave no answer to this request. Try again, or choose another model for this agent.")
+    return choices[0]
 
 
 class ApiModel:
@@ -106,16 +113,12 @@ class ApiModel:
             options["tools"] = [{"type": "function", "function": {"name": item["name"], "description": item["description"], "parameters": item["parameters"]}} for item in tools]
         response = self.client.chat.completions.create(**options)
         self.addUsage(**readOpenAiUsage(response.usage))
-        choice = response.choices[0]
+        choice = firstChoice(response, self.name)
         message = choice.message
-        if message.refusal and not message.content and not message.tool_calls:
+        if getattr(message, "refusal", None) and not message.content and not message.tool_calls:
             raise ModelError(f"{self.name} declined this request: {message.refusal}")
-        calls, written = [], [item for item in message.tool_calls or [] if getattr(item, "function", None)]
-        for item in written:
-            try:
-                calls.append({"id": item.id, "name": item.function.name, "arguments": json.loads(item.function.arguments or "{}")})
-            except ValueError:
-                calls.append({"id": item.id, "name": item.function.name, "arguments": {}, "problem": "its arguments were not valid JSON. Write them again."})
+        written = [item for item in message.tool_calls or [] if getattr(item, "function", None)]
+        calls = [apiCall(item.id, item.function.name, item.function.arguments) for item in written]
         raw = {"role": "assistant", "content": message.content or ""}
         if written:
             raw["tool_calls"] = [item.model_dump(mode="json", exclude_none=True) for item in written]
@@ -136,10 +139,7 @@ class ApiModel:
         for item in response.output or []:
             raw.append(item.model_dump(mode="json", exclude_none=True))
             if item.type == "function_call":
-                try:
-                    calls.append({"id": item.call_id, "name": item.name, "arguments": json.loads(item.arguments or "{}")})
-                except ValueError:
-                    calls.append({"id": item.call_id, "name": item.name, "arguments": {}, "problem": "its arguments were not valid JSON. Write them again."})
+                calls.append(apiCall(item.call_id, item.name, item.arguments))
             elif item.type == "message":
                 texts += [part.text for part in item.content or [] if getattr(part, "type", "") == "output_text"]
                 if any(getattr(part, "type", "") == "refusal" for part in item.content or []) and not texts:
@@ -149,8 +149,8 @@ class ApiModel:
     def askOpenAi(self, prompt):
         response = self.client.chat.completions.create(model=self.name, messages=[{"role": "user", "content": prompt}])
         self.addUsage(**readOpenAiUsage(response.usage))
-        choice = response.choices[0]
-        if choice.message.refusal and not choice.message.content:
+        choice = firstChoice(response, self.name)
+        if getattr(choice.message, "refusal", None) and not choice.message.content:
             raise ModelError(f"{self.name} declined this request: {choice.message.refusal}")
         return choice.message.content or ""
 

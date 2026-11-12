@@ -377,6 +377,25 @@ class CodexTests(FolderTestCase):
 
 
 # The commands Codex runs itself never reach the gateway: they go to the journal of the mission, so the architect learns from them too.
+# What Codex writes is read for as long as it runs, whatever it writes.
+class CodexReadingTests(unittest.TestCase):
+    def testALineThatIsNotAMessageNeverEndsTheReading(self):
+        notices, answered = [], [threading.Event(), None]
+        def onNotify(method, params):
+            if method == "boom":
+                raise KeyError("an item of another shape")
+            notices.append((method, params))
+        connection = codex_agent.CodexConnection.__new__(codex_agent.CodexConnection)
+        lines = ["[1, 2]\n", "12\n", "not json\n", '"text"\n', "[" * 100000 + "\n", '{"method": "item/started", "params": "odd"}\n', '{"method": "boom", "params": {}}\n',
+                 '{"id": [1], "result": {}}\n', '{"id": 1, "result": {"ok": true}}\n']
+        connection.process, connection.pending, connection.closed = SimpleNamespace(stdout=lines), {1: answered}, False
+        connection.onNotify, connection.onRequest = onNotify, lambda method, params: None
+        connection.read()
+        self.assertEqual(notices, [("item/started", {}), ("connection/closed", {})])
+        self.assertEqual((answered[0].is_set(), answered[1]), (True, {"id": 1, "result": {"ok": True}}))
+        self.assertTrue(connection.closed)
+
+
 class CodexJournalTests(FolderTestCase):
     def testTheCommandsCodexRunsItselfAreWrittenInTheJournal(self):
         model = CodexModel(DEFAULT_CLI_MODEL)

@@ -24,6 +24,10 @@ STOP_BYTES = 512 * 1024 * 1024
 LITE_CHARS = 300
 ARGUMENT_CHARS = 2000
 CONTENT_CHARS = 300
+# A text of an entry that is too long is cut down to this, not further: cutting a shorter text would make it longer (clip says how much it cut).
+FIT_CHARS = 200
+# What an entry keeps when nothing else makes it fit: who did what, and when.
+KEPT_KEYS = ("v", "t", "seq", "pid", "mission", "run", "round", "project", "agent", "kind")
 # Arguments that carry the content of a file: the journal keeps their size, a hash and their beginning.
 CONTENT_KEYS = ("content", "new_text", "old_text", "text", "code", "body")
 SECRET_PATTERN = re.compile(r"\b(?:sk-(?:ant-|proj-)?[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_\w{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[\w-]{10,}|"
@@ -79,17 +83,28 @@ def shapeArguments(arguments):
     return kept
 
 
-# The longest texts of an entry are cut until its line fits ENTRY_CHARS.
+def dumped(value):
+    return json.dumps(value, ensure_ascii=False, default=str)
+
+
+# A list keeps its first half; a list of one item, or an object, keeps the beginning of what it holds.
+def shrink(value):
+    return value[:len(value) // 2] if isinstance(value, list) and len(value) > 1 else clip(dumped(value), ARGUMENT_CHARS)
+
+
+# What is longest in an entry is cut until its line fits ENTRY_CHARS: a text, or a list or an object (the calls of a step, the arguments of a
+# call), and then the entry says it was shortened. Each turn makes the entry shorter, so this always ends: before, an entry that was long because of a
+# list (a model that writes eighty calls in one answer) was cut for ever, text after text that was already short, and its agent never went on.
 def fit(entry):
-    line = json.dumps(entry, ensure_ascii=False, default=str)
+    line = dumped(entry)
     while len(line) > ENTRY_CHARS:
-        texts = [(len(value), key) for key, value in entry.items() if isinstance(value, str)]
-        if not texts:
-            entry = {key: value for key, value in entry.items() if not isinstance(value, (dict, list))} | {"cut": True}
-            return json.dumps(entry, ensure_ascii=False, default=str)
-        size, key = max(texts)
-        entry[key] = clip(entry[key], max(100, size // 2 - 50))
-        line = json.dumps(entry, ensure_ascii=False, default=str)
+        sizes = [(len(value), key) for key, value in entry.items() if isinstance(value, str) and len(value) > FIT_CHARS]
+        sizes += [(len(dumped(value)), key) for key, value in entry.items() if isinstance(value, (dict, list))]
+        if not sizes:
+            return dumped({key: value for key, value in entry.items() if key in KEPT_KEYS} | {"shortened": True})
+        size, key = max(sizes)
+        entry |= {key: clip(entry[key], max(100, size // 2 - 50))} if isinstance(entry[key], str) else {key: shrink(entry[key]), "shortened": True}
+        line = dumped(entry)
     return line
 
 

@@ -4,6 +4,7 @@
 # Before the user sees a draft, a strict review checks it against the instructions and the rules (it can read the files to verify it). A real
 # problem sends the draft back to the agent with what to fix, CHECK_ROUNDS times at most, so the user gets the best draft the agent can write.
 # If the user does not approve the result, what the agent changed in the files is put back.
+import re
 from pathlib import Path
 
 import agent_prompts as prompts
@@ -13,6 +14,8 @@ from harness_utils import GENERAL_RULES, rulesFileOf
 
 CHECK_ROUNDS = 2
 ECHO_CHARS = 120
+VERDICT_MARKS = " \t.*`\"'#>_!-"
+VERDICT_LABEL = re.compile(r"^(?:the\s+)?(?:verdict|answer|result|review)(?:\s+is)?[\s:=*`\"'_-]*(?=good\b)", re.IGNORECASE)
 RECORD_FILES = 15
 RECORD_CALLS = 12
 RECORD_CHARS = 240
@@ -36,15 +39,15 @@ def describeWork(loop):
     return "\n".join(lines)
 
 
-# A verdict that starts with GOOD, or that ends with it after the model thought aloud.
+# A verdict that starts with GOOD, or that ends with it after the model thought aloud. A model often dresses the word: **GOOD**, "Verdict: GOOD".
 def isGood(verdict):
-    lines = [line.strip(" .*`\"'") for line in verdict.strip().splitlines() if line.strip()]
-    return verdict.strip().upper().startswith("GOOD") or bool(lines) and lines[-1].upper() == "GOOD"
+    lines = [VERDICT_LABEL.sub("", line.strip(VERDICT_MARKS)).strip(VERDICT_MARKS) for line in str(verdict or "").splitlines() if line.strip(VERDICT_MARKS)]
+    return bool(lines) and (lines[0].upper().startswith("GOOD") or lines[-1].upper() == "GOOD")
 
 
 # Whether a verdict only says the draft again: one of them starts like a part of the other.
 def repeats(verdict, draft):
-    said, written = " ".join(verdict.split()), " ".join(draft.split())
+    said, written = " ".join(str(verdict or "").split()), " ".join(str(draft or "").split())
     return len(said) >= ECHO_CHARS and len(written) >= ECHO_CHARS and (said[:ECHO_CHARS] in written or written[:ECHO_CHARS] in said)
 
 

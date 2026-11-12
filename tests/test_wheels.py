@@ -26,8 +26,8 @@ from swarm_harness import Swarm
 from tasks_library import buildLoop
 from test_leader_utils import makeCatalog
 from user_settings import saveSettings
-from wheel_checks import checkWheel, cleanSteps
-from wheel_store import catalogFor, isApproved, loadWheel, readCatalog, resolve, retireWheel, revoke, saveWheel, wheelsFolder
+from wheel_checks import checkWheel, cleanCode, cleanSteps
+from wheel_store import catalogFor, isApproved, loadWheel, readCatalog, readManifest, resolve, retireWheel, revoke, saveWheel, wheelsFolder
 from wheel_tools import RUNNER, packageFolders
 
 
@@ -105,6 +105,37 @@ class CheckTests(WheelTestCase):
         self.assertEqual(self.problems(clean, "steps", "find_first_word"), [])
         self.assertEqual(cleanSteps("not json"), "not json")
         self.assertEqual(cleanSteps("[1, 2]"), "[1, 2]")
+        for written in ("```json\n" + json.dumps(STEPS) + "\n```", json.dumps(STEPS)[:-1] + ",}", str(STEPS), json.dumps(STEPS)[:-1]):
+            self.assertEqual(json.loads(cleanSteps(written)), STEPS, written)
+        self.assertEqual(self.problems(cleanCode("```python\n" + script() + "```")), [])
+
+    # An architect can write anything where a wheel is asked: every time, it is told what a wheel is, in words.
+    def testAWheelThatIsNotOneIsToldAndNeverBreaksTheChecks(self):
+        odd = [{**STEPS, "inputs": ["path"]}, {**STEPS, "inputs": {"path": None}}, {**STEPS, "inputs": {"path": {"type": ["string"], "description": "x"}}}, {**STEPS, "inputs": 5},
+               {**STEPS, "required": [["path"]]}, {**STEPS, "steps": 3.5}, {**STEPS, "steps": [None, 5, "x"]}, {**STEPS, "steps": [{"tool": "files__read_file", "arguments": ["a"]}]},
+               {**STEPS, "steps": [{"tool": "files__read_file", "arguments": {"path": "{path}"}, "save": ["first"]}]}, {**STEPS, "steps": [{"tool": "files__read_file", "each": ["path"]}]},
+               {**STEPS, "steps": [{"tool": "files__read_file", "each": "path", "arguments": {"path": "{item}"}}]}, {**STEPS, "name": {"a": 1}, "summary": [1]}, {}]
+        for manifest in odd:
+            self.assertTrue(self.problems(json.dumps(manifest), "steps", "find_first_word"), manifest)
+        for text in ("", "[]", "null", "[" * 100000, '{"steps": ' + "[" * 100000, None, 5):
+            self.assertTrue(self.problems(text, "steps", "find_first_word"), text)
+        for text in ("", "WHEEL = 5\n", "WHEEL = {1: [}\n", "WHEEL = {'name': {}}\n\n\ndef run(args, folder):\n    return 'ok'\n", "(" * 50000, "\x00", None,
+                     "WHEEL = {'name': 'count_lines', 'summary': 'x' * 40, 'inputs': {'a': {'type': {}, 'description': 'x'}}}\n\n\ndef run(args, folder):\n    return 'ok'\n"):
+            self.assertTrue(self.problems(text), text)
+        for text, kind in (("[" * 100000, "steps"), ("(" * 50000, "script"), ("WHEEL = {[]: 1}", "script"), (None, "script"), ("null", "steps")):
+            with self.assertRaises(ValueError, msg=str(text)[:20]):
+                readManifest(text, kind)
+
+    # The id of a pattern as an architect writes it.
+    def testTheIdOfAPatternIsReadAsItIsWritten(self):
+        from server_architect import coveredRows, patternKey
+        for written in (12, "12", "#12", " # 12 ", "pattern 12", "Pattern #12 (the sequence)", "[12]", "#12.", 12.0):
+            self.assertEqual(patternKey(written), "12", written)
+        self.assertEqual((patternKey("0123456789abcdef0123"), patternKey("#0123456789abcdef0123"), patternKey("abc")), ("0123456789abcdef0123", "0123456789abcdef0123", "abc"))
+        store = types.SimpleNamespace(pattern=lambda ident: {"id": ident} if ident in ("12", "13") else None)
+        for written in (["#12", 13], "#12, pattern 13", ["12,13", ""]):
+            self.assertEqual(coveredRows(store, written), ([{"id": "12"}, {"id": "13"}], []), written)
+        self.assertEqual((coveredRows(store, None), coveredRows(store, 12), coveredRows(store, ["#99"])), (([], []), ([{"id": "12"}], []), ([], ["#99"])))
 
     # What a real pass saved: a search for each path, without the text to search. Every call would fail.
     def testAStepNeedsARealToolWithWhatItNeeds(self):

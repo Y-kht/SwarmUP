@@ -11,10 +11,10 @@
 # user allowed always (the pin, <name>@<hash8>): a changed wheel is a new version, and is asked again.
 import ast
 import hashlib
-import json
 from datetime import datetime
 from pathlib import Path
 
+from loose_json import parseJson
 from mission_memory import folderLock, longTermFolder, readJson, readText, writeJson, writeText
 
 
@@ -49,21 +49,26 @@ def pinOf(name, digest):
     return f"{name}@{digest[:8]}"
 
 
-# The manifest of a wheel from its text: the literal WHEEL of a script, or the JSON of steps. It raises ValueError when there is none.
+# The manifest of a wheel from its text: the literal WHEEL of a script, or the JSON of steps. It raises ValueError when there is none, or when
+# the text cannot be read at all (a file of a wheel that was damaged or changed by hand).
 def readManifest(text, kind):
+    text = str(text or "")
     if kind == "steps":
-        manifest = json.loads(text)
+        manifest = parseJson(text)
         if not isinstance(manifest, dict):
             raise ValueError("A wheel of steps is a JSON object.")
         return manifest
-    tree = ast.parse(text)
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "WHEEL" for target in node.targets):
-            manifest = ast.literal_eval(node.value)
-            if not isinstance(manifest, dict):
-                raise ValueError("WHEEL must be a dictionary.")
-            return manifest
-    raise ValueError("A script wheel starts with WHEEL = {...}, a dictionary written out in full.")
+    try:
+        tree = ast.parse(text)
+        assigned = [node.value for node in tree.body if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "WHEEL" for target in node.targets)]
+        manifest = ast.literal_eval(assigned[0]) if assigned else None
+    except (SyntaxError, TypeError, MemoryError, RecursionError) as error:
+        raise ValueError(f"The wheel cannot be read as Python: {error}") from None
+    if not assigned:
+        raise ValueError("A script wheel starts with WHEEL = {...}, a dictionary written out in full.")
+    if not isinstance(manifest, dict):
+        raise ValueError("WHEEL must be a dictionary.")
+    return manifest
 
 
 def readCatalog():
@@ -97,7 +102,7 @@ def loadWheel(name, pin=None):
         return None
     try:
         manifest = readManifest(text, entry["kind"])
-    except (ValueError, SyntaxError):
+    except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
         return None
     actual = hashText(text)
     return {**entry, "manifest": manifest, "text": text, "path": path if pin else historyPath(name, actual, entry["kind"]), "hash": actual,

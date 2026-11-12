@@ -19,7 +19,7 @@ from base_loop import Loop
 from memory_cache import describeMemory, noteUse
 from mcp_gateway import Gateway
 from mission_memory import SWARMUP, MemoryRefused, MissionMemory, WorkSession
-from model_messages import readToolCalls
+from call_reader import readToolCalls
 from swarm_harness import Swarm
 
 

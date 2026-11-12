@@ -7,6 +7,7 @@
 # fingerprint() gives a short, stable id of a shape: the same in every program and every project.
 import hashlib
 import json
+import math
 import re
 import shlex
 from pathlib import PurePosixPath
@@ -18,7 +19,7 @@ HEX = re.compile(r"\b(?:0x[0-9a-f]+|(?=[0-9a-f]*\d)[0-9a-f]{7,})\b", re.IGNORECA
 REDIRECTION = re.compile(r"(?<![\w\"'=])(?:\d|&)?>{1,2}(?:&\d|\s*(?![-&|;])[^\s;&|]+)|(?<![\w\"'=])<\s*[^\s;&|<]+")
 NUMBER = re.compile(r"(?<![\w.])-?\d+(?:\.\d+)?(?![\w.])")
 QUOTED = re.compile(r"\"(?:[^\"\\\n]|\\.){1,200}\"|'(?:[^'\\\n]|\\.){1,200}'|`[^`\n]{1,200}`")
-EMAIL = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b")
+EMAIL = re.compile(r"\b[\w.+-]{1,64}@[\w-]{1,255}\.[\w.-]{1,255}\b")
 URL = re.compile(r"\bhttps?://[^\s\"'<>)]+", re.IGNORECASE)
 WINDOWS_PATH = re.compile(r"\b[A-Za-z]:\\[^\s\"'<>|]+")
 POSIX_PATH = re.compile(r"(?<![\w.~:/-])(?:~|\.{1,2})?/(?:[\w.@+-]+/)*[\w.@+-]+")
@@ -379,4 +380,5 @@ def targetOf(server, tool, arguments, root=None):
 
 
 def numbersOf(arguments):
-    return {key: value for key, value in (arguments or {}).items() if isinstance(value, (int, float)) and not isinstance(value, bool)} if isinstance(arguments, dict) else {}
+    return {key: value for key, value in (arguments or {}).items() if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)} \
+        if isinstance(arguments, dict) else {}

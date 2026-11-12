@@ -32,8 +32,8 @@ def legacyMissions(project):
         state = readJsonFile(path)
         if not isinstance(state, dict) or not state.get("id"):
             continue
-        members = (state.get("members") or {}).values()
-        folders = [((member.get("recipe") or {}).get("answers") or {}).get("folder") for member in members]
+        recipes = [member.get("recipe") if isinstance(member.get("recipe"), dict) else {} for member in membersOf(state).values()]
+        folders = [(recipe.get("answers") if isinstance(recipe.get("answers"), dict) else {}).get("folder") for recipe in recipes]
         owner, root = findProject(folders)
         if (state.get("project") or owner) != project:
             continue
@@ -52,7 +52,9 @@ def callEntries(missionId):
     for line in lines:
         try:
             call = json.loads(line)
-        except ValueError:
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(call, dict):
             continue
         entries.append({"t": stamp(call.get("time")), "mission": missionId, "round": call.get("round"), "agent": call.get("agent"), "kind": "call", "origin": "legacy",
                         "server": call.get("server"), "tool": call.get("tool"), "args": call.get("arguments"), "outcome": call.get("outcome"),
@@ -67,22 +69,28 @@ def conversationEntries(missionId):
         if not isinstance(saved, dict):
             continue
         agent, step = path.stem, 0
-        for message in saved.get("messages") or []:
+        messages = saved.get("messages") if isinstance(saved.get("messages"), list) else []
+        for message in [message for message in messages if isinstance(message, dict)]:
             if message.get("role") == "user":
                 step = 0
                 entries.append({"mission": missionId, "agent": agent, "kind": "request", "prompt": str(message.get("content") or "")[:2000]})
             elif message.get("role") == "assistant":
                 step += 1
-                calls = [{"id": call.get("id"), "name": call.get("name"), "args": call.get("arguments")} for call in message.get("calls") or []]
+                written = message.get("calls") if isinstance(message.get("calls"), list) else []
+                calls = [{"id": call.get("id"), "name": call.get("name"), "args": call.get("arguments")} for call in written if isinstance(call, dict)]
                 entries.append({"mission": missionId, "agent": agent, "kind": "step", "n": step, "text": str(message.get("content") or "")[:3000],
                                 "length": len(str(message.get("content") or "")), "calls": calls})
     return entries
 
 
+def membersOf(state):
+    members = state.get("members") if isinstance(state.get("members"), dict) else {}
+    return {name: member for name, member in members.items() if isinstance(member, dict)}
+
+
 def stateEntries(missionId, state):
-    entries = [{"mission": missionId, "agent": "", "kind": "run", "agents": [{"name": name, "role": member.get("role"), "wheels": []}
-                                                                             for name, member in (state.get("members") or {}).items()]}]
-    for name, member in (state.get("members") or {}).items():
+    entries = [{"mission": missionId, "agent": "", "kind": "run", "agents": [{"name": name, "role": member.get("role"), "wheels": []} for name, member in membersOf(state).items()]}]
+    for name, member in membersOf(state).items():
         if member.get("status") == "failed" and member.get("error"):
             entries.append({"mission": missionId, "agent": name, "kind": "status", "status": "failed", "error": str(member["error"])[:1500]})
     return entries

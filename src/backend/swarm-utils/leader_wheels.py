@@ -4,12 +4,12 @@
 # leader__find_wheels. The agents nobody chose wheels for get them when a run starts: an agent alone gets the wheels of its project, and in a
 # swarm the leader is asked once which wheels each of them needs (giveStartingWheels).
 import difflib
-import json
 import re
 import threading
 
 import agent_prompts as prompts
-from harness_utils import ARCHITECT_NAME, stripFences
+from harness_utils import ARCHITECT_NAME
+from loose_json import readReply
 from project_identity import projectFor
 from user_settings import currentSetting
 from wheel_store import catalogFor, readCatalog, realName
@@ -118,10 +118,8 @@ def withoutChoice(swarm):
 # What the leader answered: {agent: [wheels]}, with agents it was asked about and wheels of the project.
 def checkGiven(draft, names, project):
     try:
-        given = json.loads(stripFences(draft))
+        given = readReply(draft)
     except ValueError:
-        given = None
-    if not isinstance(given, dict):
         return f"Reply only with JSON like {prompts.LEADER_WHEELS_EXAMPLE}"
     unknown = [name for name in given if name not in names]
     if unknown:
@@ -143,7 +141,7 @@ def askLeaderForWheels(swarm, names):
         draft = None
     if draft is None or not swarm.active or swarm.stopped:
         return {}
-    given = json.loads(stripFences(draft))
+    given = readReply(draft)
     for name in names:
         member = swarm.members.get(name)
         if member is None:

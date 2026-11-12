@@ -11,6 +11,7 @@ import types
 
 import jsonschema
 
+from loose_json import decodeAt, parseJson, readLoose, unfence
 from mcp_external import screenTool
 from pattern_detectors import LOOKING
 
@@ -43,9 +44,9 @@ def checkInputs(manifest):
     for key, spec in inputs.items():
         if not re.fullmatch(r"[a-z][a-z0-9_]{0,40}", str(key)):
             problems.append(f"The input {key!r} must be a name in small letters, digits and _.")
-        if not isinstance(spec, dict) or spec.get("type") not in INPUT_TYPES or not str(spec.get("description") or "").strip():
+        if not isinstance(spec, dict) or not isinstance(spec.get("type"), str) or spec["type"] not in INPUT_TYPES or not str(spec.get("description") or "").strip():
             problems.append(f"The input {key} needs a type ({', '.join(sorted(INPUT_TYPES))}) and a description.")
-    if not isinstance(required, list) or any(name not in inputs for name in required):
+    if not isinstance(required, list) or any(not isinstance(name, str) or name not in inputs for name in required):
         problems.append("required lists the names of inputs that the wheel cannot do without.")
     try:
         jsonschema.Draft202012Validator.check_schema({"type": "object", "properties": inputs, "required": list(required) if isinstance(required, list) else [],
@@ -124,12 +125,14 @@ def checkScript(text):
         compile(text, "<wheel>", "exec")
     except SyntaxError as error:
         return None, [f"The code does not compile: {error.msg}, line {error.lineno}."]
+    except (ValueError, MemoryError, RecursionError) as error:
+        return None, [f"The code cannot be read as Python: {error or type(error).__name__}."]
     manifest = None
     for node in tree.body:
         if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "WHEEL" for target in node.targets):
             try:
                 manifest = ast.literal_eval(node.value)
-            except ValueError:
+            except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
                 problems.append("WHEEL must be written out in full, with no variable or call in it.")
         elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
             continue
@@ -189,15 +192,19 @@ def checkSteps(manifest):
     steps = manifest.get("steps")
     if not isinstance(steps, list) or not 1 <= len(steps) <= MAX_STEPS:
         return [f"A wheel of steps has 1 to {MAX_STEPS} steps: [{{\"tool\": \"server__tool\", \"arguments\": {{...}}, \"save\": {{\"name\": \"regex\"}}}}]."]
-    known = set(manifest.get("inputs") or {})
+    inputs = manifest.get("inputs") if isinstance(manifest.get("inputs"), dict) else {}
+    known = set(inputs)
     for number, step in enumerate(steps, 1):
         if not isinstance(step, dict) or not re.fullmatch(r"[a-z][a-z0-9_]*__[a-z][a-z0-9_]*", str(step.get("tool") or "")):
             problems.append(f"Step {number} needs a tool, as its full name like files__read_file.")
             continue
         if step["tool"].startswith(("wheels__", "architect__", "leader__", "user__")):
             problems.append(f"Step {number} calls {step['tool']}: a wheel calls the tools of the agent only, not wheels, the leader or the user.")
+        if not isinstance(step.get("arguments") or {}, dict) or not isinstance(step.get("save") or {}, dict):
+            problems.append(f"Step {number}: arguments is an object {{\"name\": value}}, and save an object {{\"name\": \"regex\"}}.")
+            continue
         each = step.get("each")
-        if each is not None and (manifest.get("inputs") or {}).get(each, {}).get("type") != "array":
+        if each is not None and not (isinstance(each, str) and isinstance(inputs.get(each), dict) and inputs[each].get("type") == "array"):
             problems.append(f"Step {number} repeats for each item of {each}, which must be an input of type array.")
         names = set(re.findall(r"\{(\w+)\}", str(step.get("arguments") or {})))
         missing = names - known - ({"item"} if each is not None else set())
@@ -224,13 +231,14 @@ def isAlias(manifest):
     steps = manifest.get("steps") if isinstance(manifest, dict) else None
     if not isinstance(steps, list) or len(steps) != 1 or not isinstance(steps[0], dict) or steps[0].get("each"):
         return False
-    return all(isinstance(value, str) and re.fullmatch(r"\{\w+\}", value) for value in (steps[0].get("arguments") or {}).values())
+    arguments = steps[0].get("arguments") if isinstance(steps[0].get("arguments"), dict) else {}
+    return all(isinstance(value, str) and re.fullmatch(r"\{\w+\}", value) for value in arguments.values())
 
 
 # A wheel of steps that only reads what the agent could read itself in one step: no step writes or runs, and none uses a value saved before.
 def onlyReads(manifest):
     steps = manifest.get("steps") if isinstance(manifest, dict) else None
-    if not steps or not all(isinstance(step, dict) and str(step.get("tool") or "").startswith(LOOKING) for step in steps):
+    if not isinstance(steps, list) or not steps or not all(isinstance(step, dict) and str(step.get("tool") or "").startswith(LOOKING) for step in steps):
         return False
     # A step for each item of a list does in one call what a model that makes one call at a time takes many model steps to do.
     if any(step.get("each") for step in steps):
@@ -239,16 +247,27 @@ def onlyReads(manifest):
     for step in steps:
         if saved & set(re.findall(r"\{(\w+)\}", str(step.get("arguments") or {}))):
             return False
-        saved |= set(step.get("save") or {})
+        saved |= set(step.get("save") if isinstance(step.get("save"), dict) else {})
     return True
 
 
-# The JSON of a wheel of steps as a small model writes it: what comes after the end of its object, like a brace too many, is left out.
+# The code of a wheel as a model writes it: a code fence around it is not part of it.
+def cleanCode(code):
+    text = str(code or "")
+    return unfence(text) if text.strip().startswith("```") else text
+
+
+# The JSON of a wheel of steps as a small model writes it: what comes after the end of its object, like a brace too many, is left out, and
+# JSON that is almost right is read (loose_json.py). What is not an object stays as it was written, and the checks say what is wrong with it.
 def cleanSteps(code):
+    text = cleanCode(code).strip()
     try:
-        value = json.JSONDecoder().raw_decode(str(code).strip())[0]
+        value = decodeAt(text, 0)[0]
     except ValueError:
-        return code
+        try:
+            value = readLoose(text)
+        except ValueError:
+            return code
     return json.dumps(value, ensure_ascii=False, indent=1) if isinstance(value, dict) else code
 
 
@@ -256,9 +275,10 @@ def cleanSteps(code):
 # {fingerprint: wheel} what the live wheels already cover. current: the entry of the live wheel it is a new version of, which covered its
 # patterns when it was first saved (their rows may be gone since, with the missions the user deleted).
 def checkWheel(text, kind, name, covers, scope, liveCovers, replaces=(), current=None):
+    text = str(text or "")
     if kind == "steps":
         try:
-            manifest = json.loads(text)
+            manifest = parseJson(text)
         except ValueError as error:
             return None, [f"A wheel of steps is JSON: {error}."]
         problems = [] if isinstance(manifest, dict) else ["A wheel of steps is a JSON object."]

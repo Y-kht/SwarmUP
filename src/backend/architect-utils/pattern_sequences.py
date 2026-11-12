@@ -17,18 +17,23 @@ STREAK_STEPS = 3
 STREAK_EXAMPLES = 6
 
 
+def listOf(value):
+    return list(value) if isinstance(value, list) else []
+
+
 class AgentTrail:
+    # data: what toData gave, as the store kept it. Anything in it that is not as toData writes it (another version, a damaged store) is left out.
     def __init__(self, data=None):
-        data = data or {}
-        self.shapes = [list(item) for item in data.get("shapes", [])]
-        self.pending = list(data.get("pending", []))
-        self.request = data.get("request", 0)
-        self.steps = data.get("steps", 0)
-        self.prompt = data.get("prompt", "")
-        self.inLoop = data.get("inLoop", "")
-        self.stepCalls = list(data.get("stepCalls", []))
-        self.calls = data.get("calls", 0)
-        self.streak = data.get("streak") or {"shape": "", "steps": [], "examples": []}
+        data = data if isinstance(data, dict) else {}
+        self.shapes = [list(item) for item in listOf(data.get("shapes")) if isinstance(item, list) and len(item) >= 2 and isinstance(item[0], str)]
+        self.pending = [item for item in listOf(data.get("pending")) if isinstance(item, dict) and isinstance(item.get("recipe"), list) and isinstance(item.get("age"), int)
+                        and "error" in item and "family" in item]
+        self.request, self.steps, self.calls = (data.get(key) if isinstance(data.get(key), int) else 0 for key in ("request", "steps", "calls"))
+        self.prompt, self.inLoop = (data.get(key) if isinstance(data.get(key), str) else "" for key in ("prompt", "inLoop"))
+        self.stepCalls = listOf(data.get("stepCalls"))
+        streak = data.get("streak") if isinstance(data.get("streak"), dict) else {}
+        whole = isinstance(streak.get("shape"), str) and isinstance(streak.get("steps"), list) and isinstance(streak.get("examples"), list)
+        self.streak = streak if whole else {"shape": "", "steps": [], "examples": []}
 
     def toData(self):
         return {"shapes": self.shapes, "pending": self.pending, "request": self.request, "steps": self.steps, "prompt": self.prompt, "inLoop": self.inLoop,

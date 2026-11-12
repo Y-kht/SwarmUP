@@ -60,7 +60,7 @@ RULES = [
     ("package", re.compile(r"PackagesNotFoundError"), lambda m: ("conda:not-found", "packages not found")),
     ("package", re.compile(r"error: externally-managed-environment"), lambda m: ("pip:externally-managed", "externally managed environment")),
     ("missing", re.compile(r"Cannot find module '([^']+)'|Module not found: Error: Can't resolve '([^']+)'"), lambda m: ("node:module", "cannot find module <str>")),
-    ("missing", re.compile(r"(?:^|\s)(\S+): (?:command )?not found\b|'(\S+)' is not recognized as an internal or external command"), lambda m: ("command", "<cmd>: command not found")),
+    ("missing", re.compile(r"(?:^|\s)(\S+): (?:command )?not found\b|'(\S{1,200})' is not recognized as an internal or external command"), lambda m: ("command", "<cmd>: command not found")),
     ("missing", re.compile(r"No such file or directory|ENOENT|cannot find the (?:file|path) specified", re.IGNORECASE), lambda m: ("file", "no such file or directory")),
     ("permission", re.compile(r"Permission denied|EACCES|Operation not permitted|EPERM", re.IGNORECASE), lambda m: ("os", "permission denied")),
     ("network", re.compile(r"Connection refused|ECONNREFUSED"), lambda m: ("refused", "connection refused")),

@@ -29,12 +29,14 @@ import writing_loops
 from base_loop import Loop
 from checking_loops import CoderLoop, MathCheckLoop
 from gpu_check import NO_GPU_MESSAGE, checkVram, readGpus
-from harness_utils import ConnectionLost, USER_NAME, addToContext, describeError, fetchUrl, getFromContext, loadContext, readAbstract, readFeed, retrieveContext
+from harness_utils import ConnectionLost, USER_NAME, addToContext, describeError, fetchUrl, getFromContext, isNo, isYes, loadContext, readAbstract, readFeed, retrieveContext, stripFences
+from loose_json import readLoose, readReply
 from message_loops import CalendarLoop, EmailLoop, NewsLoop
 from messengers import MessagingError, checkMessenger, findTelegramChats, sendMessage, splitMessage
 from models_library import getModelInfo
 from sources_library import MESSAGING_APPS
 from swarm_harness import Swarm
+from swarm_losses import readDecision
 from writing_loops import AuthorLoop, DocumentFormatLoop, LiteratureSurveyLoop
 from general_loop import GeneralLoop, describeWork, isGood, repeats
 
@@ -1437,6 +1439,14 @@ class SwarmTests(LoopTestCase):
         self.assertTrue(swarm.planWithLeader())
         self.assertEqual(swarm.getStages(), [["Writer", "Formatter", "Checker"]])
 
+    # A leader that writes words around its JSON, one name where a list is asked, or null for nobody, said what it meant.
+    def testAPlanThatIsAlmostAsAskedIsRead(self):
+        swarm = self.planSwarm(['Here is my plan:\n{"Writer": null, "Formatter": "Writer", "Checker": [],}\nIt is ready.'], ["yes"])
+        self.assertTrue(swarm.planWithLeader())
+        self.assertEqual(swarm.getStages(), [["Writer", "Checker"], ["Formatter"]])
+        self.assertEqual(readDecision('Sure.\n{"works_from": "x", "decision": "Keep.", "why": " it can "}'), ("keep", "it can"))
+        self.assertEqual((readDecision('{"decision": "maybe"}'), readDecision("keep"), readDecision(None)), (None, None, None))
+
     def testRejectedPlanChangesNothing(self):
         swarm = self.planSwarm(['{"Writer": [], "Formatter": ["Writer"], "Checker": []}'], ["no"])
         self.assertFalse(swarm.planWithLeader())
@@ -2738,6 +2748,44 @@ class MessagingTests(unittest.TestCase):
         self.assertIn("24 hours", MESSAGING_APPS["WhatsApp"]["info"])
 
 
+# What a model writes when it is asked for JSON (loose_json.py).
+class LooseJsonTests(unittest.TestCase):
+    def testJsonThatIsAlmostRightIsRead(self):
+        cases = {'{"a": 1,}': {"a": 1}, "{'a': 'x', 'b': None, 'c': True}": {"a": "x", "b": None, "c": True}, '{"a": [1, 2}': {"a": [1, 2]}, '{"a": {"b": 1}}}': {"a": {"b": 1}},
+                 '{"a": {"b": 1}': {"a": {"b": 1}}, '{“a”: “b”}': {"a": "b"}, '{a: 1, b-c: "x"}': {"a": 1, "b-c": "x"}, '{"a": 1, // one\n "b": 2 /* two */}': {"a": 1, "b": 2},
+                 '{"a": "line\nbreak"}': {"a": "line\nbreak"}, "[1, 2,]": [1, 2], '{"a": -1.5e3, "b": [true, null]}': {"a": -1500.0, "b": [True, None]}}
+        for text, value in cases.items():
+            self.assertEqual(readLoose(text), value, text)
+
+    # Only what stands outside the strings is repaired: a text that a model wrote arrives as it wrote it.
+    def testARepairNeverChangesTheTextsOfTheJson(self):
+        content = "a list [1, 2,] and {x: true, }, null // not a comment"
+        self.assertEqual(readLoose('{"content": "' + content + '", "more": 1,}'), {"content": content, "more": 1})
+        self.assertEqual(readLoose("{'content': 'it is true, null and false', 'more': None}"), {"content": "it is true, null and false", "more": None})
+
+    def testWhatWasCutOrIsNotJsonIsRefusedWithItsFirstError(self):
+        for text in ('{"a": "it ends in a tex', '{"a": 1,', '{"a":', "not json", "", "[" * 100000, '{"a": ' * 5000, "__import__('os').getcwd()", "{'a': open('x')}"):
+            with self.assertRaises(ValueError, msg=text[:30]):
+                readLoose(text)
+        with self.assertRaises(json.JSONDecodeError):
+            readLoose('{"a": oops}')
+
+    def testAReplyThatHoldsItsJsonAmongWordsIsRead(self):
+        for reply in ('{"Coder": "fix it"}', 'Here is the route:\n{"Coder": "fix it"}\nI hope it helps.', '```json\n{"Coder": "fix it"}\n```', '```\n{"Coder": "fix it"}', "{'Coder': 'fix it',}",
+                      '{"Coder": "fix it"'):
+            self.assertEqual(readReply(reply), {"Coder": "fix it"}, reply)
+        self.assertEqual(readReply("No agent is concerned: {}"), {})
+        for reply in ("", None, "no json here", '"text"', "12", "{" * 50000):
+            with self.assertRaises(ValueError, msg=str(reply)[:30]):
+                readReply(reply)
+
+    def testACodeFenceThatIsNeverClosedStillGivesItsCode(self):
+        self.assertEqual(stripFences("```python\nprint(1)"), "print(1)")
+        self.assertEqual(stripFences("Here:\n```python\nprint(1)\n```\nDone."), "print(1)")
+        self.assertEqual((stripFences("no fence"), stripFences(None)), ("no fence", ""))
+        self.assertEqual((isYes(" YES "), isYes(None), isNo(None), isNo(5)), (True, False, True, False))
+
+
 class SplitMessageTests(unittest.TestCase):
     def testShortTextsAreNotCut(self):
         self.assertEqual(splitMessage("  hello  "), ["hello"])
@@ -3182,6 +3230,10 @@ class GeneralAgentTests(LoopTestCase):
         self.assertNotIn("YOUR TOOLS", agent.prompts[1])
         self.assertTrue(isGood("good"))
         self.assertFalse(isGood("It is not GOOD: nothing changed."))
+        for verdict in ("**GOOD**", "Verdict: GOOD.", "## GOOD", "The verdict is: `GOOD`", "I checked the records.\n\n> **Verdict:** GOOD", "GOOD\n", '"GOOD"'):
+            self.assertTrue(isGood(verdict), verdict)
+        for verdict in ("", None, "Verdict: the tests fail.", "The file is missing.\nNot GOOD yet.", "**Change** the name.", "---"):
+            self.assertFalse(isGood(verdict), verdict)
 
     def testTheReviewStopsAfterItsRoundsAndTheUserDecides(self):
         agent = FakeAgent(["Draft 1", "Not good", "Draft 2", "Still not good", "Draft 3"])

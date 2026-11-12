@@ -4,6 +4,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 import types
 import unittest
 from patching import everywhere
@@ -23,7 +24,9 @@ from mcp_gateway import Gateway, builtinServers
 from base_loop import Loop
 from checking_loops import WorkerLoop
 from harness_utils import SwarmStopped
+from call_reader import BAD_LIMIT, apiCall, readCutCalls, tidyCalls
 from model_clients import ApiModel, LocalModel, claudeMessages, localMessages, openAiMessages, readToolCalls
+from model_support import ModelError
 from swarm_harness import Swarm
 from writing_loops import AuthorLoop
 
@@ -124,8 +127,20 @@ class ToolboxTests(ConversationTestCase):
         self.assertIn("     2\tHoney is sweet\n[Lines 2 to 2 of 3. Read on with start_line=3.]", text)
         self.assertEqual(box.run("read_file", {"path": "../secret"})[1], True)
         self.assertEqual(box.run("read_file", {})[0], "Not done: files__read_file needs path.")
-        self.assertEqual(box.run("read_file", {"path": 3})[0], "Not done: path must be a string.")
+        self.assertEqual(box.run("read_file", {"path": ["notes"]})[0], "Not done: path must be a string.")
         self.assertIn("there is no tool fly for you now", box.run("fly", {})[0])
+
+    # What a model means is clear, and its form is not: the name with another separator, a key in another case, a number as text, null for nothing.
+    def testACallThatIsRightInMeaningAndWrongInFormIsRun(self):
+        box = Box(self.chatLoop([]))
+        for name in ("files.read_file", "Files__Read_File", "functions.files__read_file", "read_file"):
+            text, error = box.link.call(name, {"Path": "notes/ideas.md", "start_line": "2", "line_count": 1.0} if name == "read_file" else {"path": "notes/ideas.md"})
+            self.assertFalse(error, f"{name}: {text}")
+        self.assertIn("     2\tHoney is sweet\n[Lines 2 to 2 of 3.", text)
+        self.assertFalse(box.link.call("files__read_file", {"path": "notes/ideas.md", "start_line": None, "line_count": ""})[1])
+        self.assertEqual(box.link.call("files__read_file", None)[0], "Not done: files__read_file needs path.")
+        self.assertIn("there is no tool file__read for you now", box.link.call("file__read", {"path": "notes/ideas.md"})[0])
+        self.assertIn("there is no tool None for you now", box.link.call(None, {})[0])
 
     def testEveryChangeAsksTheUserAndCanBePutBack(self):
         loop = self.chatLoop([])
@@ -215,6 +230,31 @@ class ConversationTests(ConversationTestCase):
         self.assertEqual(len(third["messages"]), 5)
         self.assertEqual(third["system"], first["system"])
         self.assertIn('[AuthorLoop] files__read_file("path": "notes/ideas.md")', loop.said)
+
+    # An adapter can give anything as its calls (a model of an API, a coding agent, a person who types): the request goes on with what can be run.
+    def testWhateverAnAdapterGivesAsCallsTheRequestGoesOn(self):
+        odd = {"text": None, "calls": [{"name": "files.read_file", "arguments": '{"path": "notes/ideas.md", "start_line": "2"}'}, {"id": "c2", "name": None, "arguments": {}},
+                                        {"id": "c3", "name": "files__list_files", "arguments": ["x"]}, "junk"]}
+        loop = self.chatLoop([odd, say("Done")])
+        self.assertEqual(loop.askAgent("Work."), "Done")
+        results = [message for message in loop.agent.seen[1]["messages"] if message["role"] == "tool"]
+        self.assertEqual([message["name"] for message in results], ["files__read_file", "unknown", "files__list_files"])
+        self.assertIn("     2\tHoney is sweet", results[0]["content"])
+        self.assertEqual([message["error"] for message in results], [False, True, True])
+        self.assertIn("does not name a tool", results[1]["content"])
+        self.assertIn("must be a JSON object", results[2]["content"])
+        self.assertEqual(self.chatLoop(["Only words"]).askAgent("Work."), "Only words")
+        self.assertEqual(self.chatLoop([{"calls": "none"}]).askAgent("Work."), "")
+
+    def testAConversationThatCannotBeReadAgainStartsAgain(self):
+        loop = self.chatLoop([say("Done")])
+        loop.session = WorkSession("m1", "run")
+        loop.resumed = True
+        path = Conversation(loop).path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        for saved in ('{"system": "S", "messages": [{"role": "us', '[1, 2]', '{"system": "S", "messages": ["x"], "delivered": [0, 0]}', '{"system": "S", "messages": [], "delivered": "no"}'):
+            path.write_text(saved, encoding="utf-8")
+            self.assertEqual(Conversation.load(loop).messages, [], saved)
 
     def testMessagesArriveBetweenTwoStepsOfTheWork(self):
         def working(loop):
@@ -577,7 +617,122 @@ class ClientTests(unittest.TestCase):
         calls, rest = readToolCalls(text, [{"name": "files__read_file"}, {"name": "team__send_message"}])
         self.assertEqual([(call["name"], call["arguments"]) for call in calls], [("files__read_file", {"path": "a"}), ("team__send_message", {"to": "Writer", "text": "hi"})])
         self.assertEqual(rest, "")
-        self.assertEqual(readToolCalls('{"name": "x"}; not json', [{"name": "x"}])[0], [])
+        calls, rest = readToolCalls('{"name": "x"}; not json', [{"name": "x"}])
+        self.assertEqual(([call["name"] for call in calls], rest), (["x"], "not json"))
+        self.assertEqual(readToolCalls('{"name": "y"}; not json', [{"name": "x"}]), ([], '{"name": "y"}; not json'))
+
+    TOOLS = [{"name": "files__read_file", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "start_line": {"type": "integer"}}}},
+             {"name": "files__write_file", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}}}]
+    GOOD = '{"name": "files__read_file", "arguments": {"path": "a.md"}}'
+
+    def read(self, text, tools=TOOLS):
+        calls, rest = readToolCalls(text, tools)
+        return [(item["name"], item["arguments"]) for item in calls if not item.get("problem")], [item["problem"] for item in calls if item.get("problem")], rest
+
+    # Each family of models learned its own way to write a call, and a small model gets the JSON almost right: the call it meant is the call that is read.
+    def testACallIsReadInEveryFormTheModelsWriteIt(self):
+        good = self.GOOD
+        forms = [f"<tool_call>{good}</tool_call>", f"<tool_call>{good}", f"<tool_call>\n```json\n{good}\n```\n</tool_call>", f"<tool_call>{good}}}</tool_call>",
+                 '<tool_call>{"name": "files__read_file", "arguments": {"path": "a.md"}</tool_call>', "<tool_call>{'name': 'files__read_file', 'arguments': {'path': 'a.md'}}</tool_call>",
+                 '<tool_call>{"name": "files__read_file", "arguments": {"path": "a.md",},}</tool_call>', '<tool_call>{"name": "files__read_file", "arguments": "{\\"path\\": \\"a.md\\"}"}</tool_call>',
+                 '<tool_call>{"name": "files__read_file", "path": "a.md"}</tool_call>', '<tool_call>{"name": "files__read_file", "args": {"path": "a.md"}}</tool_call>',
+                 '<tool_call>{"tool": "files__read_file", "input": {"path": "a.md"}}</tool_call>', '<tool_call>{"function": "files__read_file", "parameters": {"path": "a.md"}}</tool_call>',
+                 '<tool_call>{"type": "function", "function": {"name": "files__read_file", "arguments": "{\\"path\\": \\"a.md\\"}"}}</tool_call>',
+                 '<tool_call>{"files__read_file": {"path": "a.md"}}</tool_call>', '<tool_call>files__read_file\n{"path": "a.md"}</tool_call>', '<tool_call>files__read_file(path="a.md")</tool_call>',
+                 '<tool_call>{“name”: “files__read_file”, “arguments”: {“path”: “a.md”}}</tool_call>', f"<tool_calls>[{good}]</tool_calls>", f"<function_call>{good}</function_call>",
+                 f"<TOOL_CALL>{good}</TOOL_CALL>", f"<|tool_call|>{good}<|/tool_call|>", f"[TOOL_CALLS] [{good}]", '<function=files__read_file>{"path": "a.md"}</function>',
+                 '<function_calls>\n<invoke name="files__read_file">\n<parameter name="path">a.md</parameter>\n</invoke>\n</function_calls>', good, f"```json\n{good}\n```", f"```{good}```",
+                 '{"tool_calls": [' + good + "]}", 'files__read_file(path="a.md")', '[files__read_file(path="a.md")]', '```tool_code\nprint(files__read_file(path="a.md"))\n```',
+                 'files__read_file{"path": "a.md"}', f"<tool_call><tool_call>{good}</tool_call></tool_call>", f"{good}</tool_call>"]
+        for form in forms:
+            self.assertEqual(self.read(form), ([("files__read_file", {"path": "a.md"})], [], ""), form)
+        for form in (f"<tool_call>[{good}, {good}]</tool_call>", f"<tool_call>{good}\n{good}</tool_call>", f"<tool_call>{good}</tool_call>\n<tool_call>{good}</tool_call>", f"<tool_call>{good}<tool_call>{good}",
+                     f"[{good}, {good}]", f"{good}; {good}"):
+            self.assertEqual(self.read(form), ([("files__read_file", {"path": "a.md"})] * 2, [], ""), form)
+
+    def testACallAmongTheWordsOfAnAnswerIsReadAndTheWordsStay(self):
+        good = self.GOOD
+        self.assertEqual(self.read(f"I will read the file.\n{good}")[2], "I will read the file.")
+        self.assertEqual(self.read(f"I will read the file.\n```json\n{good}\n```\nThen I go on."), ([("files__read_file", {"path": "a.md"})], [], "I will read the file.\n\nThen I go on."))
+        self.assertEqual(self.read('Thought: I need the file.\nAction: files__read_file\nAction Input: {"path": "a.md"}'), ([("files__read_file", {"path": "a.md"})], [], "Thought: I need the file."))
+        self.assertEqual(self.read(f"I look.\n<tool_call>{good}</tool_call>\nThen I go on.")[2], "I look.\n\nThen I go on.")
+
+    # A text of an argument is the agent's work: it may hold the tags of a call, quotes that are not escaped, or what looks like broken JSON.
+    def testTheTextsOfACallArriveAsTheModelWroteThem(self):
+        content = "write <tool_call> like </tool_call> this, {x: true, } and [1, 2,]"
+        calls = self.read('<tool_call>{"name": "files__write_file", "arguments": {"path": "a.md", "content": "' + content + '"}}</tool_call>')
+        self.assertEqual(calls, ([("files__write_file", {"path": "a.md", "content": content})], [], ""))
+        calls = self.read('<tool_call>{"name": "files__write_file", "arguments": {"path": "a.py", "content": "print("it is true")\\n"}}}</tool_call>')
+        self.assertEqual(calls[0], [("files__write_file", {"path": "a.py", "content": 'print("it is true")\n'})])
+        calls = self.read("<tool_call>{'name': 'files__write_file', 'arguments': {'path': 'a.md', 'content': 'it is true, null and false'}}</tool_call>")
+        self.assertEqual(calls[0][0][1]["content"], "it is true, null and false")
+        invoked = self.read('<invoke name="files__read_file"><parameter name="path">12</parameter><parameter name="start_line">3</parameter></invoke>')
+        self.assertEqual(invoked[0], [("files__read_file", {"path": "12", "start_line": 3})])
+
+    def testACallThatCannotBeReadSaysWhatToWriteInstead(self):
+        good, bad, rest = self.read('<tool_call>{"name": "files__read_file", "arguments": "a.md"}</tool_call>')
+        self.assertEqual((good, rest), ([], ""))
+        self.assertIn("the arguments of files__read_file must be a JSON object", bad[0])
+        self.assertIn("does not name a tool", self.read('<tool_call>{"path": "a.md"}</tool_call>')[1][0])
+        self.assertIn("does not name a tool", self.read("<tool_call></tool_call>")[1][0])
+        self.assertIn("does not name a tool", self.read('<tool_call>{"name": 12, "arguments": {}}</tool_call>')[1][0])
+        calls, rest = readToolCalls('<tool_call>{"name": "files__write_file", "arguments": {"path": "a.md", "content": "it ends he</tool_call>', self.TOOLS)
+        self.assertEqual((calls[0]["name"], calls[0]["arguments"]), ("files__write_file", {}))
+        self.assertIn("not valid JSON", calls[0]["problem"])
+        # A model that writes nothing but calls nobody can read is told about the first ones, not about hundreds.
+        self.assertEqual(len(readToolCalls("<tool_call>{" * 500, self.TOOLS)[0]), BAD_LIMIT)
+        self.assertEqual(readToolCalls("<tool_call>" * 500, self.TOOLS)[0][1:], [])
+
+    def testWhatIsNotACallStaysInTheAnswer(self):
+        answers = ['{"name": "John", "arguments": {"age": 3}}', '{"verdict": "good", "name": "x"}', 'I ran:\nfiles__read_file(path="a.md")\nand it worked.', "The answer is {4}.",
+                   f"<think>I could write <tool_call>{self.GOOD}</tool_call></think>The answer is 4.", "", "[1, 2, 3]", "```python\nprint(1)\n```"]
+        for answer in answers:
+            self.assertEqual(readToolCalls(answer, self.TOOLS), ([], answer), answer)
+        # A model that has no tools now answers in JSON when it is asked to: only a call written with its tags is a call.
+        self.assertEqual(readToolCalls(self.GOOD, []), ([], self.GOOD))
+        self.assertEqual(readToolCalls('{"name": "Coder", "task": "author"}', []), ([], '{"name": "Coder", "task": "author"}'))
+        self.assertEqual([call["name"] for call in readToolCalls(f"<tool_call>{self.GOOD}</tool_call>", [])[0]], ["files__read_file"])
+        self.assertEqual(readToolCalls(None, self.TOOLS), ([], ""))
+
+    def testACallThatWasBeingWrittenWhenTheTokensEndedIsTheCallTheModelMeant(self):
+        calls, rest = readCutCalls('I write.\n<tool_call>{"name": "files__write_file", "arguments": {"path": "a", "content": "abc', self.TOOLS)
+        self.assertEqual(([(call["name"], call.get("problem")) for call in calls], rest), ([("files__write_file", None)], ""))
+        self.assertEqual(readCutCalls("The answer starts here and", self.TOOLS), ([], "The answer starts here and"))
+
+    # Deep or huge texts are read in a time that grows with their length, and never end the stack of Python.
+    def testATextOfAnySizeIsReadWithoutHanging(self):
+        started = time.monotonic()
+        for text in ("<tool_call>" + "[" * 100000, "{\n" * 50000, '<invoke name="a">' + '<parameter name="b">' * 30000, "files__read_file {\n" * 20000, "<tool_call>" + '{"a":' * 50000,
+                     "<tool_call>" + self.GOOD[:-2] + ', "content": "' + "x" * 1000000 + '"}}</tool_call>'):
+            readToolCalls(text, self.TOOLS)
+            readCutCalls(text, self.TOOLS)
+        self.assertLess(time.monotonic() - started, 20)
+
+    def testTheCallsOfAnApiAndOfEveryAdapterAreMadeWhole(self):
+        self.assertEqual(apiCall("c1", "t", '{"a": 1,}'), {"id": "c1", "name": "t", "arguments": {"a": 1}})
+        self.assertEqual([apiCall("c1", "t", raw)["arguments"] for raw in ({"a": 1}, None, "", "null", " ")], [{"a": 1}, {}, {}, {}, {}])
+        self.assertIn("not valid JSON", apiCall("c1", "t", '{"a": ')["problem"])
+        self.assertIn("must be a JSON object", apiCall("c1", "t", "[1]")["problem"])
+        calls = tidyCalls([{"name": "t", "arguments": None}, {"id": 5, "name": " t ", "arguments": '{"a": 1}'}, {"id": "c3", "name": None}, {"id": "c4", "name": "t", "arguments": [1]}, "junk", None])
+        self.assertEqual([(call["name"], call["arguments"], bool(call.get("problem"))) for call in calls], [("t", {}, False), ("t", {"a": 1}, False), ("unknown", {}, True), ("t", {}, True)])
+        self.assertTrue(all(isinstance(call["id"], str) and call["id"] for call in calls))
+        self.assertEqual((tidyCalls(None), tidyCalls({"name": "t"}), tidyCalls("calls")), ([], [], []))
+
+    def testAnApiThatAnswersOddlyIsReadOrToldInWords(self):
+        class ApiError(Exception):
+            pass
+        def written(arguments):
+            return types.SimpleNamespace(id="c1", function=types.SimpleNamespace(name="read_file", arguments=arguments), model_dump=lambda **options: {})
+        message = types.SimpleNamespace(content=None, refusal=None, tool_calls=[written({"path": "a"}), written('{"path": "a",}'), written("[1]"), written("{oops")])
+        replies = [types.SimpleNamespace(choices=[types.SimpleNamespace(message=message, finish_reason="tool_calls")], usage=None), types.SimpleNamespace(choices=[], usage=None)]
+        model = ApiModel("gemini", "gemini-x", "key")
+        model.client = types.SimpleNamespace(chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=lambda **options: replies.pop(0))))
+        model.connect = lambda: types.SimpleNamespace(APIError=ApiError)
+        calls = model.converse("S", [{"role": "user", "content": "Work."}], [])["calls"]
+        self.assertEqual([call["arguments"] for call in calls], [{"path": "a"}, {"path": "a"}, {}, {}])
+        self.assertEqual([bool(call.get("problem")) for call in calls], [False, False, True, True])
+        with self.assertRaisesRegex(ModelError, "gave no answer"):
+            model.converse("S", [{"role": "user", "content": "Work."}], [])
 
     def testClaudeIsAskedWithItsToolsAndItsCache(self):
         message = types.SimpleNamespace(content=[FakeBlock(type="text", text="I read."), FakeBlock(type="tool_use", id="t1", name="read_file", input={"path": "a"})],

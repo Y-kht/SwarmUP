@@ -1,4 +1,3 @@
-import json
 import threading
 import traceback
 from collections import Counter
@@ -6,7 +5,8 @@ from datetime import datetime
 
 import agent_prompts as prompts
 from background_processes import stopProcesses
-from harness_utils import SUMMARY_LENGTH, USER_NAME, stripFences
+from harness_utils import SUMMARY_LENGTH, USER_NAME
+from loose_json import readReply
 from model_adapters import adapterOf
 
 
@@ -17,6 +17,13 @@ BROADCAST_NAMES = ("all", "everyone", "everybody", "team", "all agents")
 
 
 # The agents of a swarm (Swarm in swarm_harness.py): who joins and who leaves, their models, who waits for whom, and what a user interface reads of them.
+# The plan of a leader: {agent: [the agents it waits for]} for each of the workers. A leader often writes one name where a list is asked, or
+# null for nobody. KeyError when a worker is not in the plan.
+def readWaits(draft, workers):
+    plan = readReply(draft)
+    return {name: [str(other) for other in ([plan[name]] if isinstance(plan[name], str) else plan[name] or [])] for name in workers}
+
+
 class SwarmTeam:
     # An agent of the swarm, or one that was just removed and whose thread did not end yet.
     def anyMember(self, name):
@@ -402,8 +409,7 @@ class SwarmTeam:
     def checkPlan(self, draft):
         workers = [name for name in self.members if name != self.leader]
         try:
-            plan = json.loads(stripFences(draft))
-            waits = {name: list(plan[name]) for name in workers}
+            waits = readWaits(draft, workers)
         except (ValueError, KeyError, TypeError):
             return f"Reply only with JSON like {prompts.SWARM_PLAN_EXAMPLE}, with one entry for each of these agents: {workers}"
         unknown = [other for others in waits.values() for other in others if other not in workers]
@@ -426,9 +432,8 @@ class SwarmTeam:
             leader.journal = None
         if plan is None:
             return False
-        for name, others in json.loads(stripFences(plan)).items():
-            if name != self.leader:
-                self.setWaitsFor(name, others)
+        for name, others in readWaits(plan, [name for name in self.members if name != self.leader]).items():
+            self.setWaitsFor(name, others)
         return True
 
     # The picture of the swarm that an agent receives: the mission, its own role and task, and who else is in the swarm.

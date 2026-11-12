@@ -17,6 +17,7 @@ import time
 
 import agent_prompts as prompts
 from agent_storehouse import agentWorkspace, describeTree, safeName
+from call_reader import tidyCalls
 from harness_utils import STOPPED_MESSAGE, SwarmStopped
 from mcp_gateway import LOOSE_GATEWAY, gatewayOf
 from memory_cache import describeMemory
@@ -150,12 +151,20 @@ class Conversation:
         path.write_text(json.dumps({"system": self.system, "messages": self.messages, "delivered": self.delivered}, ensure_ascii=False, default=str), encoding="utf-8")
 
     # The conversation the agent had before the program stopped. Calls that did not get their result are answered, so the model can go on.
+    # A file that cannot be read (the program was stopped while it wrote it) is a conversation that starts again: the work goes on without it.
     @classmethod
     def load(cls, loop):
         conversation = cls(loop)
         if loop.session and conversation.path().exists():
-            saved = json.loads(conversation.path().read_text(encoding="utf-8"))
-            conversation.system, conversation.messages, conversation.delivered = saved["system"], saved["messages"], saved["delivered"]
+            try:
+                saved = json.loads(conversation.path().read_text(encoding="utf-8"))
+                system, messages, delivered = str(saved["system"]), list(saved["messages"]), [int(count) for count in saved["delivered"]][:2]
+                valid = len(delivered) == 2 and all(isinstance(message, dict) and message.get("role") in ("user", "assistant", "tool") for message in messages)
+            except (OSError, ValueError, KeyError, TypeError):
+                valid = False
+            if not valid:
+                return conversation
+            conversation.system, conversation.messages, conversation.delivered = system, messages, delivered
             answered = {message["id"] for message in conversation.messages if message["role"] == "tool"}
             last = next((message for message in reversed(conversation.messages) if message["role"] == "assistant"), None)
             for call in (last or {}).get("calls") or []:
@@ -301,12 +310,16 @@ class Conversation:
                     reply = self.converseWithRoom(adapter, tools, options)
                 finally:
                     live.end()
-                calls = reply.get("calls") or []
-                text = reply.get("text") or ""
+                reply = reply if isinstance(reply, dict) else {"text": reply}
+                reply["text"] = text = str(reply.get("text") or "")
+                # Whatever the adapter gave, the calls are calls from here on (call_reader.tidyCalls), under the names of the tools the model meant.
+                calls = tidyCalls(reply.get("calls"))
+                for call in calls:
+                    call["name"] = link.nameOf(call["name"], readOnly)
                 loop.note("step", own=self.own, n=step + 1, text=clipText(text, 2000, 1000), length=len(text), cut=bool(reply.get("cut")),
                           seconds=round(time.time() - started, 3), tokens=tokensSince(loop, mark),
                           calls=[{"id": call.get("id"), "name": call.get("name"), "args": clipArguments(call.get("arguments"))} for call in calls])
-                self.messages.append({"role": "assistant", "content": reply.get("text") or "", "calls": calls, "raw": reply.get("raw")})
+                self.messages.append({"role": "assistant", "content": text, "calls": calls, "raw": reply.get("raw")})
                 if last and calls:
                     reply = {"text": text}
                     break
@@ -412,8 +425,9 @@ def answerOnce(loop, prompt, own, alone=False):
         reply = loop.callModel(lambda: adapter.converse("", [{"role": "user", "content": prompt}], [], **options), own)
     finally:
         live.end()
-    loop.note("answer", own=own, prompt=clipText(prompt, 600), reply=clipText(reply.get("text"), 1200), seconds=round(time.time() - started, 3))
-    return reply.get("text") or ""
+    text = str((reply.get("text") if isinstance(reply, dict) else reply) or "")
+    loop.note("answer", own=own, prompt=clipText(prompt, 600), reply=clipText(text, 1200), seconds=round(time.time() - started, 3))
+    return text
 
 
 # Asks the model of the loop. With tools it works in its conversation (own: its own work, kept for the whole run; otherwise a request of a

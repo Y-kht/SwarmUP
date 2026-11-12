@@ -15,7 +15,7 @@ MIN_WORDS = 12
 CHUNK_WORDS = 400
 SMALL_CHUNK = 40
 WORD = re.compile(r"[a-z<>#][a-z0-9_<>#'-]*")
-INTENT = re.compile(r"(?:^|[.!?\n]\s*)((?:i need to|i'll|i will|let me|let's|first,|next,|now i|i should|i must|we need to|to do this|my plan|step \d+[:.)])[^.!?\n]{3,160})",
+INTENT = re.compile(r"(?:^|[.!?\n]\s{0,4})((?:i need to|i'll|i will|let me|let's|first,|next,|now i|i should|i must|we need to|to do this|my plan|step \d+[:.)])[^.!?\n]{3,160})",
                     re.IGNORECASE)
 LOCATION = re.compile(r"\b(button|link|field|input|icon|menu|tab|checkbox|box|element|image|logo|title|header|search bar|text box)\b[^.\n]{0,80}?"
                       r"(?:at|around|near|coordinates?|position)\s*\(?\s*(-?\d{1,5})\s*[,x]\s*(-?\d{1,5})\s*\)?", re.IGNORECASE)
